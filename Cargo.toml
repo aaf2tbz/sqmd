@@ -1,0 +1,6 @@
+[workspace]
+members = [
+    "crates/sqmd-core",
+    "crates/sqmd-cli",
+]
+resolver = "3"
