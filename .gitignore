@@ -1,0 +1,11 @@
+/target
+.sqmd/
+*.db
+*.db-wal
+*.db-shm
+*.swp
+*.swo
+*~
+.DS_Store
+.idea/
+.vscode/
