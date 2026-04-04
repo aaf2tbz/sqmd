@@ -36,6 +36,11 @@ enum Commands {
     },
     /// Reset the index
     Reset,
+    /// Show dependencies for a file
+    Deps {
+        /// File path
+        path: String,
+    },
 }
 
 fn main() {
@@ -55,6 +60,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         Commands::Stats => cmd_stats(),
         Commands::Get { location } => cmd_get(&location),
         Commands::Reset => cmd_reset(),
+        Commands::Deps { path } => cmd_deps(&path),
     }
 }
 
@@ -235,6 +241,57 @@ fn cmd_get(location: &str) -> Result<(), Box<dyn std::error::Error>> {
         }
         None => {
             println!("No chunk found at {}:{}", file, line);
+        }
+    }
+
+    drop(db);
+    Ok(())
+}
+
+fn cmd_deps(file_path: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let db = ensure_db()?;
+
+    let imports = sqmd_core::relationships::get_dependencies(&db, file_path)?;
+    let dependents = sqmd_core::relationships::get_dependents(&db, file_path)?;
+
+    if imports.is_empty() && dependents.is_empty() {
+        println!("No relationships found for {}", file_path);
+        return Ok(());
+    }
+
+    if !imports.is_empty() {
+        println!("Dependencies of {} (imports):\n", file_path);
+        let mut seen = std::collections::HashSet::new();
+        for dep in &imports {
+            let key = format!("{}:{}", dep.target_file, dep.target_line);
+            if seen.contains(&key) {
+                continue;
+            }
+            seen.insert(key);
+            println!("  -> {}:{} {} ({})",
+                dep.target_file,
+                dep.target_line + 1,
+                dep.target_name.as_deref().unwrap_or("(unnamed)"),
+                dep.rel_type,
+            );
+        }
+        println!();
+    }
+
+    if !dependents.is_empty() {
+        println!("Dependents of {} (who imports this):\n", file_path);
+        let mut seen = std::collections::HashSet::new();
+        for dep in &dependents {
+            let key = format!("{}:{}", dep.source_file, dep.source_line);
+            if seen.contains(&key) {
+                continue;
+            }
+            seen.insert(key);
+            println!("  <- {}:{} {}",
+                dep.source_file,
+                dep.source_line + 1,
+                dep.source_name.as_deref().unwrap_or("(unnamed)"),
+            );
         }
     }
 

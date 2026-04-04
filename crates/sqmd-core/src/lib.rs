@@ -1,5 +1,8 @@
 pub mod chunk;
+pub mod chunker;
 pub mod embed;
 pub mod files;
 pub mod index;
+pub mod languages;
+pub mod relationships;
 pub mod schema;

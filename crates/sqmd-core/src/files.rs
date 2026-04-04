@@ -126,7 +126,7 @@ pub fn walk_project(root: &Path) -> impl Iterator<Item = PathBuf> {
         {
             return false;
         }
-        if entry.file_type().map_or(false, |ft| ft.is_file()) {
+        if entry.file_type().is_some_and(|ft| ft.is_file()) {
             let lang = detect_language(entry.path());
             return lang.supported();
         }

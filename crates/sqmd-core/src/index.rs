@@ -1,3 +1,4 @@
+use crate::chunker::LanguageChunker;
 use crate::files::{SourceFile, walk_project, content_hash};
 use crate::schema;
 use rusqlite::{params, Connection};
@@ -113,16 +114,47 @@ impl<'a> Indexer<'a> {
             self.root.join(relative)
         ).unwrap_or_default();
 
-        let lines: Vec<&str> = content.lines().collect();
-
-        if lines.is_empty() {
+        if content.trim().is_empty() {
             return Ok(());
         }
 
-        let file_chunk = FileChunker::chunk_file(&content, relative, file.language.as_str());
-        for chunk in &file_chunk {
+        let (chunks, raw_imports) = match file.language {
+            crate::files::Language::TypeScript | crate::files::Language::JavaScript | crate::files::Language::JSX => {
+                let chunker = crate::languages::typescript::TypeScriptChunker::new();
+                let chunks = chunker.chunk(&content, relative);
+                (chunks, chunker.extract_imports(&content))
+            }
+            crate::files::Language::TSX => {
+                let chunker = crate::languages::typescript::TypeScriptChunker::tsx();
+                let chunks = chunker.chunk(&content, relative);
+                (chunks, chunker.extract_imports(&content))
+            }
+            crate::files::Language::Rust => {
+                let chunker = crate::languages::rust::RustChunker::new();
+                let chunks = chunker.chunk(&content, relative);
+                (chunks, chunker.extract_imports(&content))
+            }
+            crate::files::Language::Python => {
+                let chunker = crate::languages::python::PythonChunker::new();
+                let chunks = chunker.chunk(&content, relative);
+                (chunks, chunker.extract_imports(&content))
+            }
+            _ => {
+                let chunks = FileChunker::chunk_file(&content, relative, file.language.as_str());
+                (chunks, Vec::new())
+            }
+        };
+
+        for chunk in &chunks {
             self.insert_chunk(chunk)?;
         }
+
+        let mut imports = raw_imports;
+        for imp in &mut imports {
+            imp.source_file = relative.to_string();
+        }
+        let rels = crate::relationships::resolve_imports(self.db, &imports)?;
+        crate::relationships::insert_relationships(self.db, &rels)?;
 
         Ok(())
     }
