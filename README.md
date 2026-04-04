@@ -1,77 +1,146 @@
 # sqmd
 
-**SQLite + Markdown — the most optimal file reading system for AI agents.**
+**Local-first code intelligence for AI agents. A single 5MB Rust binary, zero network.**
 
-sqmd turns any codebase into a single SQLite database of semantically chunked Markdown, queryable via FTS5 keyword search, vector similarity, and import/call graph traversal. Zero network. Zero external services. Works offline.
+sqmd indexes any codebase into a SQLite database of semantically chunked source code with tree-sitter parsing, FTS5 keyword search, vector embeddings, and an import/call relationship graph. Query in milliseconds.
 
-A single Rust binary (~5MB). Index once, query in <20ms.
+## The Problem
 
-## What It Is
+AI agents read code one file at a time, grep for keywords without understanding structure, and burn tokens on irrelevant context. There's no fast, offline way to ask "find the auth middleware and everything it depends on" and get a precise, token-efficient answer.
 
-sqmd solves the core problem every AI agent faces when reading code: **context retrieval is slow, wasteful, and structurally blind.**
+## How sqmd Works
 
-Currently, agents read files one at a time, grep for keywords without understanding semantics, and burn tokens on irrelevant code. There's no way to ask "find the auth middleware and everything it depends on" and get a precise, token-efficient answer.
+```
+source files
+    │
+    ▼ tree-sitter (per-language AST)
+┌──────────────────────────────┐
+│  Chunk: raw code + metadata  │
+│  name, signature, type,      │
+│  line range, importance,     │
+│  file path, language         │
+└──────┬───────────────────────┘
+       │
+       ├──► SQLite chunks table (structured data + raw code)
+       ├──► FTS5 index (keyword search on code + names)
+       ├──► sqlite-vec (768-dim vector embeddings, KNN)
+       └──► relationships table (imports + contains graph)
+                    │
+                    ▼
+           Hybrid Search Engine
+           (FTS5 + vector + graph)
+                    │
+                    ▼
+           Chunk::render_md() → on-demand Markdown
+                    │
+                    ▼
+           Agent context injection
+```
 
-sqmd fixes this by:
+**Key design choice:** sqmd stores raw source code in the database, not pre-rendered Markdown. Markdown is derived on demand via `Chunk::render_md()` at query time. This keeps the source of truth in the code itself and avoids stale renderings.
 
-1. **Parsing** any source file into semantically meaningful chunks (functions, classes, types, modules) using tree-sitter
-2. **Storing** each chunk as Markdown in SQLite with metadata (file path, line ranges, language, signature, exports)
-3. **Embedding** each chunk with a local ONNX model for vector similarity search
-4. **Mapping** import/call relationships between chunks in a dependency graph
-5. **Querying** with hybrid search (70% vector + 30% keyword) and graph traversal in <20ms
-
-The result: an agent can ask a natural language question about a codebase and get exactly the relevant chunks — with their dependencies — assembled into a context-ready Markdown document within a token budget.
-
-### What It Replaces
-
-sqmd is designed to replace the LLM-heavy extraction pipelines used by systems like Signet, where per-session costs include 3-5 LLM calls for transcript extraction, fact extraction, decision-making, and synthesis. sqmd eliminates all of these by using deterministic parsing, embedding, and scoring — cutting LLM costs by 60-80% with better recall quality.
-
-## Quick Start (Planned)
+## Quick Start
 
 ```bash
-# Install
-cargo install sqmd
+# Build from source
+cargo build --release
+# Binary at target/release/sqmd
 
 # Index your project
-sqmd init          # creates .sqmd/index.db
-sqmd index         # tree-sitter parse + embed everything
-
-# Watch for changes
-sqmd watch         # incremental re-index on file save
+cd /path/to/your/project
+sqmd init          # creates .sqmd/index.db, updates .gitignore
+sqmd index         # tree-sitter parse → chunk → store (~38ms for 220 chunks)
 
 # Query
-sqmd search "how does authentication work"
-sqmd get src/auth.ts:42           # chunk at file:line
-sqmd deps src/auth.ts:42 --depth 2  # auth + its dependency graph
+sqmd search "authenticate"           # FTS5 keyword search
+sqmd search "error handling" --top 20
+sqmd get src/auth.ts:42              # chunk at file:line (renders with language fence)
+sqmd deps src/auth.ts                # import dependency graph
+sqmd stats                           # files, chunks, relationships, DB size
+
+# Reset and rebuild
+sqmd reset && sqmd index
 ```
+
+## What Gets Indexed
+
+| Chunk Type | Examples | Importance |
+|-----------|----------|------------|
+| Function | `fn main()`, `def process()`, `const authenticate = ()` | 0.9 |
+| Method | `impl Block for Transaction { fn execute() }` | 0.85 |
+| Class/Struct/Enum | `struct User`, `class Database`, `enum Result` | 0.85 |
+| Interface/Trait/Type | `trait Read`, `interface Handler`, `type Config` | 0.8 |
+| Impl block | `impl User { ... }` | 0.7 |
+| Module/Section | Top-level unclaimed code, file-level constants | 0.2-0.5 |
+
+Each chunk stores: raw source code, file path, language, line range, name, signature, importance score. Unclaimed lines between declarations are grouped into section chunks (max ~50 lines).
+
+## Languages Supported
+
+| Language | Grammar | Status |
+|----------|---------|--------|
+| TypeScript | `tree-sitter-typescript` | Shipped |
+| TSX | `tree-sitter-typescript` (tsx variant) | Shipped |
+| Rust | `tree-sitter-rust` | Shipped |
+| Python | `tree-sitter-python` | Shipped |
+
+Other languages fall back to a line-based `FileChunker` that splits at section boundaries.
+
+## Relationships
+
+sqmd extracts two kinds of relationships automatically:
+
+- **`imports`** — cross-file: `import { X } from './path'`, `use crate::module::Item`, `from module import X`
+- **`contains`** — intra-file: class→method, impl→method, module→function, trait→method
+
+Query with `sqmd deps <file>` to see both directions (what a file imports + what imports it).
 
 ## Architecture
 
 ```
-Source Files
-    │
-    ▼ tree-sitter (per-language AST parsing)
-┌─────────┐
-│ Chunks  │ ──► Markdown content + metadata
-└────┬────┘
-     │
-     ├──► SQLite (chunks table, FTS5 index)
-     ├──► sqlite-vec (vector embeddings, KNN search)
-     └──► relationships table (import/call graph)
-              │
-              ▼
-         Hybrid Search Engine
-              │
-              ▼
-         Context Assembly (token-budgeted Markdown)
-              │
-              ▼
-         Agent context injection
+sqmd/
+├── crates/
+│   ├── sqmd-core/          # library
+│   │   ├── src/
+│   │   │   ├── schema.rs       # SQLite schema + migrations + chunks_vec (non-fatal)
+│   │   │   ├── chunk.rs        # Chunk struct + ChunkType + render_md()
+│   │   │   ├── chunker.rs      # LanguageChunker trait + FileChunker fallback
+│   │   │   ├── index.rs        # Transactional indexer with contains relationships
+│   │   │   ├── embed.rs        # ONNX embedding (ort v2 RC)
+│   │   │   ├── relationships.rs # Import path resolution + graph queries
+│   │   │   ├── files.rs        # Language detection + file walking + hashing
+│   │   │   └── languages/
+│   │   │       ├── typescript.rs  # TS/TSX chunker + import extraction
+│   │   │       ├── rust.ts        # Rust chunker + use/impl extraction
+│   │   │       └── python.rs      # Python chunker + import extraction
+│   │   └── Cargo.toml
+│   └── sqmd-cli/           # binary (named `sqmd`)
+│       └── Cargo.toml
+├── docs/
+│   ├── ROADMAP.md
+│   ├── ARCHITECTURE.md
+│   └── schema.sql
+└── Cargo.toml
 ```
 
-## Roadmap
+## Current Status
 
-See [docs/ROADMAP.md](docs/ROADMAP.md) for the full development plan.
+| Phase | Status | What it adds |
+|-------|--------|-------------|
+| 0 — Spike | Done | Validated sqlite-vec + ort |
+| 1 — Foundations | Done | Schema, CLI, file ingestion, FTS5 search |
+| 2 — Tree-sitter | Done | TS/Rust/Python chunkers, relationships, importance |
+| 3 — Incremental | Next | File watcher, hash-based change detection |
+| 4 — Embeddings | MVP | Vector search, hybrid scoring |
+| 5 — Call graph | Future | Cross-file call graph + traversal |
+| 6 — Agent API | Future | Daemon mode, context assembly, token budgets |
+| 7 — Signet | Future | Replace LLM-heavy extraction pipeline |
+
+**28 tests, 0 clippy warnings, CI passing.** Binary: ~5MB release build.
+
+## What It Replaces
+
+sqmd is designed to replace LLM-heavy extraction pipelines (like Signet's) where per-session costs include 3-5 LLM calls for transcript extraction, fact extraction, decision-making, and synthesis. sqmd uses deterministic parsing, embedding, and scoring instead — cutting LLM costs by 60-80% with better recall.
 
 ## License
 

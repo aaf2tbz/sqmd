@@ -2,222 +2,73 @@
 
 ## Overview
 
-A single Rust binary (~5MB) that turns any codebase into a queryable SQLite database of Markdown chunks, with tree-sitter parsing, local embeddings, FTS5 + vector hybrid search, and an import/call relationship graph. Zero network, zero external services, works offline.
+A single Rust binary (~5MB) that turns any codebase into a queryable SQLite database of semantically chunked code, with tree-sitter parsing, local embeddings, FTS5 + vector hybrid search, and an import/call relationship graph. Zero network. Zero external services. Works offline.
+
+### Design principle: raw code, derived Markdown
+
+sqmd stores raw source code (`content_raw`) in the database, **not** pre-rendered Markdown. Markdown is derived on demand via `Chunk::render_md()` at query time. This avoids stale renderings, keeps the source of truth in the code itself, and lets consumers choose their own rendering format.
 
 ---
 
-## Phase 0: Spike (Days 1-2)
+## Phase 0: Spike — COMPLETE
 
-Validate the two riskiest dependencies before committing to the stack.
+Validated the two riskiest dependencies before committing to the stack.
 
-### 0.1 sqlite-vec loadable extension via rusqlite
-- Can `rusqlite` load `sqlite-vec` as a loadable extension?
-- Test `CREATE VIRTUAL TABLE ... USING vec0(...)` and KNN queries
-- **Fallback:** Custom brute-force cosine similarity in Rust (fast enough for <1M chunks)
+### Results
 
-### 0.2 ONNX Runtime (ort) + nomic-embed-text-v1.5
-- Can `ort` load and run `nomic-embed-text-v1.5` with q8 quantization?
-- Test single-text and batch embedding throughput
-- Measure model load time and resident RAM
-- **Fallback:** HTTP embedding API to local Ollama (adds network dep but works)
-
-### 0.3 Spike deliverable
-- Minimal Rust project that opens SQLite, loads sqlite-vec, embeds a string, runs a KNN query
-- Document results in `docs/SPIKE_RESULTS.md`
+- **sqlite-vec**: Cannot be loaded as a `.dylib` extension from source (linking issues), but compiles statically via the `sqlite-vec` Rust crate (`cc::Build`). Registered as a process-level singleton via `sqlite3_auto_extension`. The `chunks_vec` virtual table is created non-fatally in schema init.
+- **ort v2.0.0-rc.12**: Works. Model load ~220ms (cached), inference ~17ms/chunk. nomic-embed-text-v1.5 q8 ONNX model (768 dims, 522MB) cached at `~/.sqmd/models/`. Test skips gracefully when model absent (CI-safe).
 
 ---
 
-## Phase 1: Foundations (Week 1)
+## Phase 1: Foundations — COMPLETE
 
 **Goal:** Project scaffold, SQLite schema, CLI skeleton, basic file ingestion.
 
-### 1.1 Cargo workspace
+### What shipped
 
-```
-sqmd/
-├── Cargo.toml              (workspace)
-├── crates/
-│   ├── sqmd-core/          (library — schema, chunking, search, embedding, graph)
-│   └── sqmd-cli/           (binary — user-facing commands)
-└── docs/
-```
-
-### 1.2 SQLite schema (`sqmd-core/src/schema.rs`)
-
-```sql
-CREATE TABLE files (
-    path      TEXT PRIMARY KEY,
-    language  TEXT NOT NULL,
-    size      INTEGER,
-    mtime     REAL,
-    hash      TEXT NOT NULL,
-    indexed_at TEXT DEFAULT (datetime('now'))
-);
-
-CREATE TABLE chunks (
-    id           INTEGER PRIMARY KEY,
-    file_path    TEXT NOT NULL REFERENCES files(path),
-    language     TEXT NOT NULL,
-    chunk_type   TEXT NOT NULL,
-    name         TEXT,
-    signature    TEXT,
-    line_start   INTEGER NOT NULL,
-    line_end     INTEGER NOT NULL,
-    content_md   TEXT NOT NULL,
-    content_hash TEXT NOT NULL,
-    metadata     TEXT,
-    importance   REAL DEFAULT 0.5,
-    created_at   TEXT DEFAULT (datetime('now')),
-    updated_at   TEXT DEFAULT (datetime('now'))
-);
-
-CREATE TABLE relationships (
-    id       INTEGER PRIMARY KEY,
-    source_id INTEGER NOT NULL REFERENCES chunks(id) ON DELETE CASCADE,
-    target_id INTEGER NOT NULL REFERENCES chunks(id) ON DELETE CASCADE,
-    rel_type TEXT NOT NULL,
-    metadata TEXT
-);
-
-CREATE TABLE embeddings (
-    chunk_id  INTEGER PRIMARY KEY REFERENCES chunks(id) ON DELETE CASCADE,
-    vector    BLOB NOT NULL,
-    dimensions INTEGER NOT NULL,
-    model     TEXT NOT NULL,
-    created_at TEXT DEFAULT (datetime('now'))
-);
-
-CREATE VIRTUAL TABLE chunks_fts USING fts5(
-    content_md,
-    name,
-    signature,
-    file_path,
-    content='chunks',
-    content_rowid='id'
-);
-```
-
-Auto-sync triggers for FTS5. WAL mode enabled by default.
-
-### 1.3 CLI commands (`sqmd-cli`)
-
-```
-sqmd init              # Create .sqmd/index.db, add to .gitignore
-sqmd index [path]      # Full index of project (default: cwd)
-sqmd watch             # File watcher mode (incremental re-index)
-sqmd search <query>    # Hybrid search (FTS5 + vector once Phase 3 lands)
-sqmd get <file:line>   # Retrieve chunk at file:line
-sqmd deps <file:line>  # Show dependency graph for a chunk
-sqmd stats             # Index statistics
-sqmd reset             # Drop and re-index
-```
-
-### 1.4 File ingestion (no tree-sitter yet)
-
-- Walk directory, skip `.git`, `node_modules`, `target`, `.sqmd`, `dist`, `build`, `.venv`
-- Respect `.gitignore` (via `ignore` crate)
-- Detect language from file extension
-- SHA-256 content hash for change detection
-- Store file metadata in `files` table
-
-### 1.5 Dependencies
-
-| Crate | Purpose |
-|-------|---------|
-| `rusqlite` | SQLite bindings |
-| `clap` (derive) | CLI argument parsing |
-| `serde` / `serde_json` | Serialization |
-| `walkdir` | Directory traversal |
-| `ignore` | .gitignore-aware walking |
-| `sha2` | Content hashing |
+- Cargo workspace: `sqmd-core` (library) + `sqmd-cli` (binary named `sqmd`)
+- SQLite schema with WAL mode, FTS5, relationships table, auto-sync triggers
+- File walking with `.gitignore`-aware skipping, language detection, SHA-256 hashing
+- CLI commands: `init`, `index`, `search`, `stats`, `get`, `reset`, `deps`
+- Release binary: 4.2MB (macOS universal)
 
 ---
 
-## Phase 2: Tree-sitter Chunking (Week 2-3)
+## Phase 2: Tree-sitter Chunking — COMPLETE
 
-**Goal:** Parse source files into semantically meaningful Markdown chunks.
+**Goal:** Parse source files into semantically meaningful chunks.
 
-### 2.1 Language support (v1)
+### What shipped
 
-| Language | Grammar | Priority |
-|----------|---------|----------|
-| TypeScript | `tree-sitter-typescript` | Critical |
-| TSX | `tree-sitter-typescript` (tsx variant) | Critical |
-| Rust | `tree-sitter-rust` | High |
-| Python | `tree-sitter-python` | High |
+- Language chunkers for TypeScript, Rust, Python via tree-sitter
+- `LanguageChunker` trait with graceful fallback to `FileChunker` on parse failure
+- Chunk types: Function, Method, Class, Struct, Enum, Interface, Type, Impl, Module, Section
+- `content_raw` stored in DB (not `content_md`); Markdown derived via `Chunk::render_md()`
+- Import relationship extraction for all three languages
+- `contains` relationship extraction (class→method, impl→method, module→function)
+- Importance scoring: `ChunkType::importance()` (functions=0.9, classes=0.85, sections=0.2, etc.)
+- Context lines: 2-3 lines before each chunk (decorators, comments) via O(k) `rsplit`
+- Schema migration system (versioned, reads `schema_version` table)
 
-### 2.2 Chunker trait
+### Key learnings
 
-```rust
-pub struct Chunk {
-    pub file_path: PathBuf,
-    pub language: String,
-    pub chunk_type: ChunkType,  // Function, Class, Method, Interface, Type, Module, Section
-    pub name: Option<String>,
-    pub signature: Option<String>,
-    pub line_start: usize,
-    pub line_end: usize,
-    pub content_md: String,
-    pub metadata: Value,
-}
+- tree-sitter node kind names differ from docs (e.g., Rust: `function_item` not `fn_item`)
+- `tree_sitter::Language` does not implement `Copy`; must use `.clone()`
+- TypeScript import specifiers are nested 3 levels deep; must walk recursively
+- Python `decorated_definition` wraps decorated methods; `expression_statement` wraps top-level assignments
+- FTS5 tokenization: `unicode61` only (no Porter stemmer) — code identifiers don't stem well
 
-pub trait LanguageChunker: Send + Sync {
-    fn language(&self) -> &str;
-    fn chunk(&self, source: &str, path: &Path) -> Result<Vec<Chunk>>;
-}
-```
+### E2E validation
 
-### 2.3 AST walking strategy
-
-Walk the tree depth-first, extracting:
-
-- **Module-level** imports → stored as relationship rows
-- **Declarations** (functions, classes, interfaces, types) → individual chunks
-- **Methods/properties** inside classes → chunks with "contains" relationship to parent
-- **Unclaimed lines** between declarations → grouped into "section" chunks (max ~50 lines)
-
-### 2.4 Markdown rendering
-
-Each chunk renders as:
-
-```markdown
-### `functionName(param: Type): Return`
-
-**File:** `src/auth/login.ts:42-67`
-**Type:** function
-**Exports:** yes
-**Imports:** `./db.findUser`, `./types.Credentials`
-
-​```typescript
-export async function authenticateUser(
-  credentials: Credentials
-): Promise<AuthResult> {
-  const user = await db.findUser(credentials.email);
-  return createSession(user);
-}
-​```
-```
-
-### 2.5 Context windows
-
-- Include 2-3 lines before each chunk (decorators, JSDoc, comments)
-- Include first line of next sibling (boundary context)
-- Each chunk is self-contained enough for agent comprehension
-
-### 2.6 Dependencies
-
-| Crate | Purpose |
-|-------|---------|
-| `tree-sitter` | Core parsing library |
-| `tree-sitter-typescript` | TS/TSX grammar |
-| `tree-sitter-rust` | Rust grammar |
-| `tree-sitter-python` | Python grammar |
+- Indexing sqmd itself: 220 chunks, 13 relationships in ~38ms
+- 28 tests pass, 0 clippy warnings
 
 ---
 
-## Phase 3: Incremental Indexing (Week 3-4)
+## Phase 3: Incremental Indexing — NEXT
 
-**Goal:** Fast incremental updates when files change.
+**Goal:** Fast incremental updates when files change via `notify` file watcher.
 
 ### 3.1 Change detection
 
@@ -249,25 +100,23 @@ export async function authenticateUser(
 
 ---
 
-## Phase 4: Embeddings + Vector Search (Week 4-6)
+## Phase 4: Embeddings + Vector Search (MVP milestone)
 
 **Goal:** Semantic search on top of keyword search.
 
 ### 4.1 Embedding pipeline (`sqmd-core/src/embed.rs`)
 
-- `ort` crate for ONNX Runtime
-- Model: `nomic-embed-text-v1.5` (768-dim, q8 quantized, ~50MB)
+- `ort` crate for ONNX Runtime (v2 RC — already validated in spike)
+- Model: `nomic-embed-text-v1.5` (768-dim, q8 quantized, 522MB)
 - First-run download from HuggingFace, cached in `~/.sqmd/models/`
 - Batch embedding for throughput (process N chunks per ONNX session)
 
 ### 4.2 Vector storage
 
-**Primary:** `sqlite-vec` loadable extension (validated in Phase 0 spike)
+`sqlite-vec` compiled statically (validated in spike):
 ```sql
 CREATE VIRTUAL TABLE chunks_vec USING vec0(embedding float[768]);
 ```
-
-**Fallback (if spike fails):** Vectors as BLOBs in `embeddings` table, brute-force cosine similarity in Rust. Still fast for <1M chunks.
 
 ### 4.3 Hybrid search engine (`sqmd-core/src/search.rs`)
 
@@ -309,20 +158,16 @@ pub struct SearchResult {
 | Vector search (100k chunks) | <5ms |
 | FTS5 search | <3ms |
 | Full hybrid query | <20ms |
-| Model load (cold) | <2s |
-| Model RAM (resident) | ~300MB |
 
 ---
 
-## Phase 5: Relationship Graph (Week 6-8)
+## Phase 5: Relationship Graph (Future)
 
 **Goal:** Import/call dependency graph for traversal queries.
 
-### 5.1 Import extraction (per language)
+### 5.1 Import extraction — DONE (Phase 2)
 
-- TypeScript: `import { X } from './path'` → relationship to exported chunk in target
-- Rust: `use crate::module::Item` → relationship
-- Python: `from module import X` → relationship
+Already implemented for TypeScript, Rust, and Python. Resolves relative paths, `crate::`, `super::`, `self::`.
 
 ### 5.2 Call graph extraction (best-effort, static)
 
@@ -346,7 +191,7 @@ When a chunk matches a search query, automatically include its direct dependenci
 
 ---
 
-## Phase 6: Agent API + Context Assembly (Week 8-10)
+## Phase 6: Agent API + Context Assembly (Future)
 
 **Goal:** Turn sqmd into something agents can query programmatically.
 
@@ -382,40 +227,30 @@ Given a query or working files:
 5. Trim to budget (default: 8000 tokens)
 6. Render as a single Markdown document for context injection
 
-### 6.4 Token counting
-
-- `tiktoken-rs` for cl100k base encoding
-- Accurate budget enforcement — no more guessing about context size
-
 ---
 
-## Phase 7: Signet Integration (Week 10-12)
+## Phase 7: Signet Integration (Future)
 
 **Goal:** Replace Signet's LLM-heavy extraction pipeline with sqmd.
 
-### 7.1 Transcript chunking
-
-- Parse Signet JSONL transcripts into sqmd chunks (no LLM)
-- Store in `transcripts` table alongside code chunks
-
-### 7.2 Replace extraction worker
+### 7.1 Replace extraction worker
 
 - Current: transcript → LLM extract → LLM decide → write (3 calls)
 - New: transcript → sqmd chunk → embed → deterministic dedup → write (0 calls)
 
-### 7.3 Replace decision worker
+### 7.2 Replace decision worker
 
 - Content hash dedup (exact match)
 - Cosine similarity dedup (threshold 0.95)
 - Importance scoring: recency + turn density + error count (from transcript structure)
 
-### 7.4 Replace synthesis worker
+### 7.3 Replace synthesis worker
 
 - Query sqmd for top-scored recent chunks
 - Template-based MEMORY.md assembly (no LLM render)
 - Optional: single lightweight LLM pass for prose smoothing
 
-### 7.5 Migration path
+### 7.4 Migration path
 
 - Add `chunks` table to existing `memories.db`
 - Parallel indexing (sqmd + legacy) during transition
@@ -426,30 +261,30 @@ Given a query or working files:
 
 ## Dependency Risk Matrix
 
-| Dependency | Risk | Mitigation |
-|-----------|------|------------|
-| `tree-sitter` + language grammars | Low | Battle-tested (Neovim, Helix, Zed) |
-| `rusqlite` | Low | Most popular Rust SQLite lib |
-| `sqlite-vec` loadable extension | **Medium** | Spike first; fallback to custom KNN in Rust |
-| `ort` (ONNX Runtime) | **Medium** | Spike first; fallback to Ollama HTTP API |
-| `notify` (file watcher) | Low | Mature cross-platform |
-| `tiktoken-rs` | Low | Pure Rust, well-maintained |
-| `clap` | Low | De facto Rust CLI framework |
-| `rayon` | Low | Standard parallelism |
+| Dependency | Risk | Status |
+|-----------|------|--------|
+| `tree-sitter` + language grammars | Low | Validated (Phase 2) |
+| `rusqlite` (bundled) | Low | Shipped (Phase 1) |
+| `sqlite-vec` (static compile) | Medium | Validated (Phase 0) — compiled in, non-fatal |
+| `ort` v2 RC (ONNX Runtime) | Medium | Validated (Phase 0) — test skips without model |
+| `notify` (file watcher) | Low | Pending (Phase 3) |
+| `tiktoken-rs` | Low | Pending (Phase 6) |
+| `clap` (derive) | Low | Shipped (Phase 1) |
+| `rayon` | Low | Pending (Phase 3) |
 
 ---
 
-## Timeline Summary
+## Progress Summary
 
-| Week | Phase | Milestone |
-|------|-------|-----------|
-| 0 | Spike | Validate sqlite-vec + ort |
-| 1 | 1 | Schema, CLI, file ingestion |
-| 2-3 | 2 | Tree-sitter chunking (TS, Rust, Python) |
-| 3-4 | 3 | Incremental indexing, file watcher |
-| 4-6 | 4 | Embeddings + hybrid search |
-| 6-8 | 5 | Relationship graph + traversal |
-| 8-10 | 6 | Agent API + context assembly |
-| 10-12 | 7 | Signet integration |
+| Phase | Status |
+|-------|--------|
+| 0 — Spike | **COMPLETE** |
+| 1 — Foundations | **COMPLETE** |
+| 2 — Tree-sitter Chunking | **COMPLETE** |
+| 3 — Incremental Indexing | Next |
+| 4 — Embeddings + Vector Search | MVP milestone |
+| 5 — Relationship Graph | Future |
+| 6 — Agent API + Context Assembly | Future |
+| 7 — Signet Integration | Future |
 
-**MVP (usable by agents) after Phase 4 — Week 6.**
+**MVP (usable by agents) after Phase 4.**
