@@ -50,9 +50,90 @@ The point: you don't need to read the whole index. sqmd queries return only the 
 | `sqmd fts_search` | ~20ms | Structured results with chunk types, names, line ranges |
 | `sqmd hybrid_search` | ~40ms | FTS5 + vector KNN combined |
 
-## The Problem
+## Comparison: Markdown vs SQLite vs sqmd
 
-AI agents read code one file at a time, grep for keywords without understanding structure, and burn tokens on irrelevant context. There's no fast, offline way to ask "find the auth middleware and everything it depends on" and get a precise, token-efficient answer.
+Most code intelligence approaches fall into three categories. Here's how they compare across the dimensions that matter for agent consumption.
+
+### At a Glance
+
+| | Raw Markdown | Raw SQLite | **sqmd** |
+|---|---|---|---|
+| **Format** | Flat files on disk | Single `.db` file | Single `.db` file |
+| **Structure** | None (or manual headers) | Manual schema | Tree-sitter AST-derived |
+| **Chunking** | Manual or none | Manual or none | Automatic per declaration |
+| **Search** | `grep` / filesystem | Manual SQL queries | FTS5 + vector hybrid |
+| **Relationships** | None | Manual foreign keys | Import/call/contains graph |
+| **Incremental updates** | Rewrite entire file | Manual diffing | Content-hash decision pipeline |
+| **Token efficiency** | Dump everything | Query but no relevance ranking | Relevance-ranked + budget-aware |
+| **Entity graph** | None | Manual tables | Auto-built from code structure |
+| **Semantic hints** | None | None | Prospective FTS5 bridge |
+| **Offline** | Yes | Yes | Yes |
+| **Network required** | No | No | No |
+| **External services** | None | None | None |
+| **Binary size** | N/A | N/A | ~10MB (27MB with embeddings) |
+
+### The Problem with Raw Markdown
+
+Agents today often get code context as markdown files -- concatenated source, hand-formatted headers, maybe some structure. This works for small codebases but breaks down fast:
+
+- **No query capability.** You grep or you read the whole file. No "find the auth middleware and everything it depends on."
+- **No relevance ranking.** Every chunk is equal. The agent burns tokens on boilerplate, imports, and tests when it needs the core logic.
+- **No relationships.** You can't ask "what calls this function?" or "what does this module import?" without the agent reading every file.
+- **Stale on change.** Regenerate the whole file on every code change, or accept drift. No incremental updates.
+- **Token waste.** A 50K-token codebase becomes a 50K-token markdown file. sqmd returns 10 relevant chunks in ~4K tokens (96% reduction).
+- **No semantic gap bridge.** An agent asking "how does authentication work" won't find a function called `verify_jwt` through keyword search on raw markdown.
+
+### The Problem with Raw SQLite
+
+You could build a SQLite database yourself. But you'd need to:
+
+1. Write a code parser or use tree-sitter bindings in your language
+2. Design a schema that handles chunks, relationships, embeddings, entities
+3. Build an FTS5 index with content-sync triggers
+4. Implement a vector search extension (sqlite-vec)
+5. Write an embedding pipeline with ONNX Runtime
+6. Build a change detection system (content hashes, decision pipeline)
+7. Implement a relationship extractor (imports, calls, contains)
+8. Build a token-budgeting context assembler
+
+That's everything sqmd already does, in a single binary.
+
+### What sqmd Adds Over Either
+
+| Capability | Markdown | SQLite | sqmd |
+|---|---|---|---|
+| Parse 6 languages to semantic chunks | No | DIY | Built-in |
+| Content-hash incremental re-index | No | DIY | Built-in |
+| Decision pipeline (skip/update/tombstone) | No | DIY | Built-in |
+| FTS5 full-text search | No | DIY | Built-in |
+| Vector embeddings (768d) | No | DIY | `--features embed` |
+| Hybrid alpha-blended scoring | No | DIY | Built-in |
+| Import/call/contains graph | No | DIY | Built-in |
+| Recursive CTE graph traversal | No | DIY | Built-in |
+| Entity/aspect/attribute model | No | DIY | Built-in |
+| Prospective hint indexing | No | No | Built-in |
+| Graph-boosted search ranking | No | DIY | Built-in |
+| Soft-delete with retention decay | No | DIY | Built-in |
+| Token-budgeted context assembly | No | DIY | Built-in |
+| On-demand Markdown rendering | N/A | N/A | Built-in |
+| Unix socket daemon + JSON protocol | No | DIY | Built-in |
+| File watcher with debounce | No | DIY | Built-in |
+
+### Storage Overhead Comparison
+
+Measured on a 243-file TypeScript codebase (~45K lines, 986 KB source):
+
+| Method | Disk size | Index included | Queryable |
+|---|---|---|---|
+| Raw source files | 986 KB | No | grep only |
+| Concatenated markdown | 1,024 KB | No | grep only |
+| Custom SQLite (chunks + FTS5 only) | ~1.8 MB | Partial | Keyword only |
+| Custom SQLite (chunks + FTS5 + relationships) | ~2.4 MB | Partial | + graph traversal |
+| **sqmd (default)** | **~2.1 MB** | **Full** | **FTS5 + hints + graph** |
+| **sqmd (embed)** | **~4.8 MB** | **Full** | **+ vector hybrid** |
+| Custom SQLite (all features, hand-built) | ~5 MB+ | Full | Depends on implementation |
+
+sqmd's overhead is the cost of making code actually queryable. At 2.1x raw source (default) or 4.9x (with embeddings), you get structured search, relationship traversal, entity graph, and token-efficient context assembly. Building equivalent functionality yourself costs more in storage and orders of magnitude more in development time.
 
 ## How sqmd Works
 
