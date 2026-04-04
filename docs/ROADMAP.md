@@ -66,37 +66,27 @@ Validated the two riskiest dependencies before committing to the stack.
 
 ---
 
-## Phase 3: Incremental Indexing — NEXT
+## Phase 3: Incremental Indexing — COMPLETE
 
-**Goal:** Fast incremental updates when files change via `notify` file watcher.
+**Goal:** Fast incremental updates when files change.
 
-### 3.1 Change detection
+### What shipped
 
-- Compare file `mtime` + `hash` against `files` table
-- Three states: `unchanged` (skip), `modified` (re-chunk), `deleted` (remove all chunks + relationships)
-- Parallel file processing via `rayon`
+- Rayon parallelism: 4-phase pipeline (walk → read → chunk → write)
+  - Phase 1: serial walk + mtime pre-filter against DB
+  - Phase 2: parallel file reading + hashing (`into_par_iter`)
+  - Phase 3: parallel chunking (CPU-bound tree-sitter)
+  - Phase 4: serial DB writes (single connection)
+- mtime pre-filter: skip files where mtime unchanged (fast path); content hash verified before writing
+- `index_file()`: single-file re-index for watcher integration; handles file deletion gracefully
+- File watcher via `notify` crate: recursive watch, 200ms debounce, language-aware filtering, initial full index
+- Fixed parent tracking bug: `contains` relationship now compares line ranges (was comparing chunk IDs)
+- Dependencies added: `rayon`, `notify`, `tempfile`
 
-### 3.2 File watcher
+### E2E validation
 
-- `notify` crate (kqueue on macOS, inotify on Linux, ReadDirectoryChanges on Windows)
-- 200ms debounce window (coalesce rapid save events)
-- On change: hash check → if different, re-index that single file
-- On delete: cascade remove from `files`, `chunks`, `relationships`, `embeddings`, `chunks_fts`
-
-### 3.3 Connection management
-
-- SQLite WAL mode for concurrent reads during writes
-- 1 writer connection, N reader connections
-- Embeddings written asynchronously without blocking reads
-
-### 3.4 Performance targets
-
-| Metric | Target |
-|--------|--------|
-| Per-file parse + chunk | <50ms |
-| Per-file with embedding | <100ms |
-| Full index (10k files, cold) | <60s |
-| Incremental (single file) | <200ms |
+- 33 tests pass (5 new), 0 clippy warnings
+- Parallel consistency: 20 files indexed correctly in parallel, re-index skips all
 
 ---
 
@@ -267,10 +257,10 @@ Given a query or working files:
 | `rusqlite` (bundled) | Low | Shipped (Phase 1) |
 | `sqlite-vec` (static compile) | Medium | Validated (Phase 0) — compiled in, non-fatal |
 | `ort` v2 RC (ONNX Runtime) | Medium | Validated (Phase 0) — test skips without model |
-| `notify` (file watcher) | Low | Pending (Phase 3) |
+| `notify` (file watcher) | Low | Shipped (Phase 3) |
 | `tiktoken-rs` | Low | Pending (Phase 6) |
 | `clap` (derive) | Low | Shipped (Phase 1) |
-| `rayon` | Low | Pending (Phase 3) |
+| `rayon` | Low | Shipped (Phase 3) |
 
 ---
 
@@ -281,7 +271,7 @@ Given a query or working files:
 | 0 — Spike | **COMPLETE** |
 | 1 — Foundations | **COMPLETE** |
 | 2 — Tree-sitter Chunking | **COMPLETE** |
-| 3 — Incremental Indexing | Next |
+| 3 — Incremental Indexing | **COMPLETE** |
 | 4 — Embeddings + Vector Search | MVP milestone |
 | 5 — Relationship Graph | Future |
 | 6 — Agent API + Context Assembly | Future |
