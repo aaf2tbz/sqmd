@@ -2,7 +2,7 @@ use rusqlite::{Connection, Result as SqlResult};
 use sqlite_vec::sqlite3_vec_init;
 use std::path::Path;
 
-const CURRENT_VERSION: i64 = 3;
+const CURRENT_VERSION: i64 = 4;
 
 pub fn init(db: &mut Connection) -> SqlResult<()> {
     #[allow(clippy::missing_transmute_annotations)]
@@ -34,6 +34,10 @@ pub fn init(db: &mut Connection) -> SqlResult<()> {
 
     if version < 3 {
         migrate_v3(db)?;
+    }
+
+    if version < 4 {
+        migrate_v4(db)?;
     }
 
     Ok(())
@@ -222,6 +226,206 @@ fn migrate_v3(db: &mut Connection) -> SqlResult<()> {
     db.execute_batch(
         "INSERT OR IGNORE INTO schema_version (version) VALUES (3)",
     )?;
+
+    Ok(())
+}
+
+fn migrate_v4(db: &mut Connection) -> SqlResult<()> {
+    // ── Add knowledge columns to chunks ─────────────────────────────
+    // source_type: discriminates code vs memory vs transcript vs document vs entity
+    let has_source_type: bool = db
+        .prepare("SELECT COUNT(*) FROM pragma_table_info('chunks') WHERE name='source_type'")?
+        .query_row([], |r| r.get::<_, i64>(0))
+        .map(|c| c > 0)
+        .unwrap_or(false);
+
+    if !has_source_type {
+        db.execute_batch("ALTER TABLE chunks ADD COLUMN source_type TEXT NOT NULL DEFAULT 'code';")?;
+        db.execute_batch("ALTER TABLE chunks ADD COLUMN agent_id TEXT;")?;
+        db.execute_batch("ALTER TABLE chunks ADD COLUMN tags TEXT;")?;
+        db.execute_batch("ALTER TABLE chunks ADD COLUMN decay_rate REAL NOT NULL DEFAULT 0.0;")?;
+        db.execute_batch("ALTER TABLE chunks ADD COLUMN last_accessed TEXT;")?;
+        db.execute_batch("ALTER TABLE chunks ADD COLUMN created_by TEXT;")?;
+    }
+
+    // Indexes for knowledge queries
+    db.execute_batch("CREATE INDEX IF NOT EXISTS idx_chunks_source_type ON chunks(source_type);")?;
+    db.execute_batch("CREATE INDEX IF NOT EXISTS idx_chunks_agent_id ON chunks(agent_id);")?;
+    db.execute_batch("CREATE INDEX IF NOT EXISTS idx_chunks_tags ON chunks(tags);")?;
+
+    // ── Rebuild chunks table to extend chunk_type CHECK constraint ───
+    // SQLite cannot ALTER CHECK constraints, so we rebuild the table.
+    // We use a staging approach that preserves all data.
+    db.execute_batch("PRAGMA foreign_keys = OFF;")?;
+
+    // Drop FTS triggers first (they reference 'chunks')
+    db.execute_batch("DROP TRIGGER IF EXISTS chunks_fts_insert;")?;
+    db.execute_batch("DROP TRIGGER IF EXISTS chunks_fts_delete;")?;
+    db.execute_batch("DROP TRIGGER IF EXISTS chunks_fts_update;")?;
+
+    db.execute_batch(
+        "CREATE TABLE IF NOT EXISTS chunks_v4 (
+            id           INTEGER PRIMARY KEY,
+            file_path    TEXT NOT NULL,
+            language     TEXT NOT NULL,
+            chunk_type   TEXT NOT NULL CHECK(chunk_type IN (
+                'function', 'method', 'class', 'interface', 'type',
+                'module', 'section', 'import', 'export', 'macro',
+                'trait', 'impl', 'enum', 'struct', 'constant',
+                'fact', 'summary', 'entity_description', 'document_section',
+                'preference', 'decision'
+            )),
+            name         TEXT,
+            signature    TEXT,
+            line_start   INTEGER NOT NULL,
+            line_end     INTEGER NOT NULL,
+            content_raw  TEXT NOT NULL DEFAULT '',
+            content_hash TEXT NOT NULL,
+            importance   REAL NOT NULL DEFAULT 0.5 CHECK(importance >= 0.0 AND importance <= 1.0),
+            metadata     TEXT,
+            created_at   TEXT NOT NULL DEFAULT (datetime('now')),
+            updated_at   TEXT NOT NULL DEFAULT (datetime('now')),
+            is_deleted   INTEGER NOT NULL DEFAULT 0,
+            deleted_at   TEXT,
+            source_type  TEXT NOT NULL DEFAULT 'code' CHECK(source_type IN ('code', 'memory', 'transcript', 'document', 'entity')),
+            agent_id     TEXT,
+            tags         TEXT,
+            decay_rate   REAL NOT NULL DEFAULT 0.0,
+            last_accessed TEXT,
+            created_by   TEXT
+        );",
+    )?;
+
+    db.execute_batch(
+        "INSERT INTO chunks_v4 (id, file_path, language, chunk_type, name, signature,
+            line_start, line_end, content_raw, content_hash, importance, metadata,
+            created_at, updated_at, is_deleted, deleted_at, source_type, agent_id,
+            tags, decay_rate, last_accessed, created_by)
+         SELECT id, file_path, language, chunk_type, name, signature,
+            line_start, line_end, COALESCE(content_raw, ''), content_hash, importance, metadata,
+            COALESCE(created_at, datetime('now')), COALESCE(updated_at, datetime('now')),
+            COALESCE(is_deleted, 0), deleted_at,
+            COALESCE(source_type, 'code'), agent_id, tags,
+            COALESCE(decay_rate, 0.0), last_accessed, created_by
+         FROM chunks;",
+    )?;
+
+    db.execute_batch("DROP TABLE chunks;")?;
+    db.execute_batch("ALTER TABLE chunks_v4 RENAME TO chunks;")?;
+
+    // Recreate indexes
+    db.execute_batch("CREATE INDEX IF NOT EXISTS idx_chunks_file ON chunks(file_path);")?;
+    db.execute_batch("CREATE INDEX IF NOT EXISTS idx_chunks_type ON chunks(chunk_type);")?;
+    db.execute_batch("CREATE INDEX IF NOT EXISTS idx_chunks_name ON chunks(name);")?;
+    db.execute_batch("CREATE INDEX IF NOT EXISTS idx_chunks_hash ON chunks(content_hash);")?;
+    db.execute_batch("CREATE INDEX IF NOT EXISTS idx_chunks_importance ON chunks(importance);")?;
+    db.execute_batch("CREATE INDEX IF NOT EXISTS idx_chunks_lines ON chunks(file_path, line_start, line_end);")?;
+    db.execute_batch("CREATE INDEX IF NOT EXISTS idx_chunks_deleted ON chunks(is_deleted);")?;
+    db.execute_batch("CREATE INDEX IF NOT EXISTS idx_chunks_source_type ON chunks(source_type);")?;
+    db.execute_batch("CREATE INDEX IF NOT EXISTS idx_chunks_agent_id ON chunks(agent_id);")?;
+
+    // ── Rebuild relationships table to extend rel_type CHECK ────────
+    db.execute_batch(
+        "CREATE TABLE IF NOT EXISTS relationships_v4 (
+            id        INTEGER PRIMARY KEY,
+            source_id INTEGER NOT NULL REFERENCES chunks(id) ON DELETE CASCADE,
+            target_id INTEGER NOT NULL REFERENCES chunks(id) ON DELETE CASCADE,
+            rel_type  TEXT NOT NULL CHECK(rel_type IN (
+                'imports', 'calls', 'contains', 'implements',
+                'overrides', 'extends', 'references',
+                'contradicts', 'supersedes', 'elaborates',
+                'derived_from', 'mentioned_in', 'relates_to'
+            )),
+            metadata   TEXT,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            UNIQUE(source_id, target_id, rel_type)
+        );",
+    )?;
+
+    db.execute_batch(
+        "INSERT OR IGNORE INTO relationships_v4 (id, source_id, target_id, rel_type, metadata, created_at)
+         SELECT id, source_id, target_id, rel_type, metadata, COALESCE(created_at, datetime('now'))
+         FROM relationships;",
+    )?;
+
+    db.execute_batch("DROP TABLE relationships;")?;
+    db.execute_batch("ALTER TABLE relationships_v4 RENAME TO relationships;")?;
+
+    db.execute_batch("CREATE INDEX IF NOT EXISTS idx_rels_source ON relationships(source_id, rel_type);")?;
+    db.execute_batch("CREATE INDEX IF NOT EXISTS idx_rels_target ON relationships(target_id, rel_type);")?;
+
+    // ── Rebuild entity_dependencies to extend dep_type CHECK ────────
+    db.execute_batch(
+        "CREATE TABLE IF NOT EXISTS entity_dependencies_v4 (
+            id             INTEGER PRIMARY KEY,
+            source_entity  INTEGER NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
+            target_entity  INTEGER NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
+            dep_type       TEXT NOT NULL DEFAULT 'imports' CHECK(dep_type IN (
+                'imports', 'calls', 'contains', 'extends', 'implements',
+                'contradicts', 'supersedes', 'elaborates', 'relates_to'
+            )),
+            strength       REAL NOT NULL DEFAULT 1.0,
+            mentions       INTEGER NOT NULL DEFAULT 1,
+            created_at     TEXT NOT NULL DEFAULT '',
+            UNIQUE(source_entity, target_entity, dep_type)
+        );",
+    )?;
+
+    db.execute_batch(
+        "INSERT OR IGNORE INTO entity_dependencies_v4
+            (id, source_entity, target_entity, dep_type, strength, mentions, created_at)
+         SELECT id, source_entity, target_entity, dep_type, strength, mentions, created_at
+         FROM entity_dependencies;",
+    )?;
+
+    db.execute_batch("DROP TABLE entity_dependencies;")?;
+    db.execute_batch("ALTER TABLE entity_dependencies_v4 RENAME TO entity_dependencies;")?;
+
+    db.execute_batch("CREATE INDEX IF NOT EXISTS idx_ed_source ON entity_dependencies(source_entity, dep_type);")?;
+    db.execute_batch("CREATE INDEX IF NOT EXISTS idx_ed_target ON entity_dependencies(target_entity);")?;
+
+    // ── Recreate FTS triggers ───────────────────────────────────────
+    db.execute_batch("DROP TABLE IF EXISTS chunks_fts;")?;
+    db.execute_batch(
+        "CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
+            name, signature, content_raw, file_path,
+            content='chunks', content_rowid='id',
+            tokenize='unicode61'
+        );",
+    )?;
+
+    // Repopulate FTS index
+    db.execute_batch(
+        "INSERT INTO chunks_fts(rowid, name, signature, content_raw, file_path)
+         SELECT id, name, signature, content_raw, file_path FROM chunks WHERE is_deleted = 0;",
+    )?;
+
+    db.execute_batch(
+        "CREATE TRIGGER IF NOT EXISTS chunks_fts_insert AFTER INSERT ON chunks BEGIN
+            INSERT INTO chunks_fts(rowid, name, signature, content_raw, file_path)
+            VALUES (new.id, new.name, new.signature, new.content_raw, new.file_path);
+        END;",
+    )?;
+    db.execute_batch(
+        "CREATE TRIGGER IF NOT EXISTS chunks_fts_delete AFTER DELETE ON chunks BEGIN
+            INSERT INTO chunks_fts(chunks_fts, rowid, name, signature, content_raw, file_path)
+            VALUES ('delete', old.id, old.name, old.signature, old.content_raw, old.file_path);
+        END;",
+    )?;
+    db.execute_batch(
+        "CREATE TRIGGER IF NOT EXISTS chunks_fts_update AFTER UPDATE ON chunks BEGIN
+            INSERT INTO chunks_fts(chunks_fts, rowid, name, signature, content_raw, file_path)
+            VALUES ('delete', old.id, old.name, old.signature, old.content_raw, old.file_path);
+            INSERT INTO chunks_fts(rowid, name, signature, content_raw, file_path)
+            VALUES (new.id, new.name, new.signature, new.content_raw, new.file_path);
+        END;",
+    )?;
+
+    // Recreate vec table
+    db.execute_batch("CREATE VIRTUAL TABLE IF NOT EXISTS chunks_vec USING vec0(embedding float[768]);").ok();
+
+    db.execute_batch("PRAGMA foreign_keys = ON;")?;
+    db.execute_batch("INSERT OR IGNORE INTO schema_version (version) VALUES (4);")?;
 
     Ok(())
 }

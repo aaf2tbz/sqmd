@@ -85,6 +85,7 @@ pub fn make_chunk(
         file_path: file_path.to_string(),
         language: language.to_string(),
         chunk_type,
+        source_type: crate::chunk::SourceType::Code,
         name: name.map(|s| s.to_string()),
         signature: signature.map(|s| s.to_string()),
         line_start: node.start_position().row,
@@ -93,6 +94,10 @@ pub fn make_chunk(
         content_hash: crate::files::content_hash(text.as_bytes()),
         importance: chunk_type.importance(),
         metadata,
+        agent_id: None,
+        tags: None,
+        decay_rate: 0.0,
+        created_by: None,
     })
 }
 
@@ -190,6 +195,7 @@ impl FileChunker {
             file_path: relative.to_string(),
             language: language.to_string(),
             chunk_type: crate::chunk::ChunkType::Section,
+            source_type: crate::chunk::SourceType::Code,
             name,
             signature: None,
             line_start: start,
@@ -198,6 +204,10 @@ impl FileChunker {
             content_hash: crate::files::content_hash(content.as_bytes()),
             importance: crate::chunk::ChunkType::Section.importance(),
             metadata: serde_json::Map::new(),
+            agent_id: None,
+            tags: None,
+            decay_rate: 0.0,
+            created_by: None,
         }
     }
 }

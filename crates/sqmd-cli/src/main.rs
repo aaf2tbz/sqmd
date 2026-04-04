@@ -631,6 +631,7 @@ fn cmd_context(
         include_deps,
         dep_depth,
         top_k: 10,
+        source_types: None,
     };
 
     let resp = sqmd_core::context::ContextAssembler::build(&db, &request)?;

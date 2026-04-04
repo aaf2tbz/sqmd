@@ -654,9 +654,11 @@ impl<'a> Indexer<'a> {
             Some(serde_json::to_string(&chunk.metadata)?)
         };
 
+        let tags_json = chunk.tags.as_ref().map(|t| serde_json::to_string(t).unwrap_or_default());
+
         self.db.execute(
-            "INSERT INTO chunks (file_path, language, chunk_type, name, signature, line_start, line_end, content_raw, content_hash, importance, metadata)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            "INSERT INTO chunks (file_path, language, chunk_type, name, signature, line_start, line_end, content_raw, content_hash, importance, metadata, source_type, agent_id, tags, decay_rate, created_by)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
             params![
                 chunk.file_path,
                 chunk.language,
@@ -669,6 +671,11 @@ impl<'a> Indexer<'a> {
                 chunk.content_hash,
                 chunk.importance,
                 metadata,
+                chunk.source_type.as_str(),
+                chunk.agent_id,
+                tags_json,
+                chunk.decay_rate,
+                chunk.created_by,
             ],
         )?;
         Ok(Some(self.db.last_insert_rowid()))
@@ -694,6 +701,206 @@ impl<'a> Indexer<'a> {
             params![relative],
         )?;
         Ok(())
+    }
+}
+
+// ── Knowledge Ingestor ──────────────────────────────────────────────
+// Accepts pre-chunked knowledge (memories, facts, transcripts, etc.)
+// from external systems like Signet's pipeline.
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct KnowledgeChunk {
+    pub content: String,
+    pub chunk_type: String,
+    pub source_type: String,
+    pub name: Option<String>,
+    pub importance: Option<f64>,
+    pub agent_id: Option<String>,
+    pub tags: Option<Vec<String>>,
+    pub decay_rate: Option<f64>,
+    pub created_by: Option<String>,
+    pub metadata: Option<serde_json::Map<String, serde_json::Value>>,
+    /// Optional relationships to create: Vec<(target_chunk_id, rel_type)>
+    pub relationships: Option<Vec<(i64, String)>>,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct IngestResult {
+    pub chunk_id: i64,
+    pub content_hash: String,
+    pub was_duplicate: bool,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct IngestBatchResult {
+    pub ingested: usize,
+    pub duplicates: usize,
+    pub results: Vec<IngestResult>,
+}
+
+pub struct KnowledgeIngestor<'a> {
+    db: &'a Connection,
+}
+
+impl<'a> KnowledgeIngestor<'a> {
+    pub fn new(db: &'a Connection) -> Self {
+        Self { db }
+    }
+
+    pub fn ingest(&self, input: &KnowledgeChunk) -> Result<IngestResult, Box<dyn std::error::Error>> {
+        let chunk_type = chunk::ChunkType::from_str_name(&input.chunk_type)
+            .unwrap_or(chunk::ChunkType::Fact);
+        let source_type = chunk::SourceType::from_str_name(&input.source_type)
+            .unwrap_or(chunk::SourceType::Memory);
+        let importance = input.importance.unwrap_or_else(|| chunk_type.importance());
+
+        let mut c = chunk::Chunk::knowledge(
+            chunk_type,
+            source_type,
+            input.name.clone(),
+            input.content.clone(),
+            importance,
+        );
+        c.agent_id = input.agent_id.clone();
+        c.tags = input.tags.clone();
+        c.decay_rate = input.decay_rate.unwrap_or(0.0);
+        c.created_by = input.created_by.clone();
+        if let Some(ref m) = input.metadata {
+            c.metadata = m.clone();
+        }
+
+        // Check for duplicate by content hash
+        let existing: Option<i64> = self.db.query_row(
+            "SELECT id FROM chunks WHERE content_hash = ?1 AND source_type = ?2 AND is_deleted = 0",
+            params![c.content_hash, source_type.as_str()],
+            |r| r.get(0),
+        ).ok();
+
+        if let Some(existing_id) = existing {
+            // Update last_accessed and importance if higher
+            self.db.execute(
+                "UPDATE chunks SET last_accessed = datetime('now'), importance = MAX(importance, ?1) WHERE id = ?2",
+                params![importance, existing_id],
+            )?;
+            return Ok(IngestResult {
+                chunk_id: existing_id,
+                content_hash: c.content_hash,
+                was_duplicate: true,
+            });
+        }
+
+        // Ensure a synthetic file entry exists for this source type
+        let file_path = &c.file_path;
+        self.db.execute(
+            "INSERT OR IGNORE INTO files (path, language, size, mtime, hash) VALUES (?1, '', 0, 0.0, ?1)",
+            params![file_path],
+        )?;
+
+        // Insert the chunk
+        let tags_json = c.tags.as_ref().map(|t| serde_json::to_string(t).unwrap_or_default());
+        let metadata_json = if c.metadata.is_empty() {
+            None
+        } else {
+            Some(serde_json::to_string(&c.metadata)?)
+        };
+
+        self.db.execute(
+            "INSERT INTO chunks (file_path, language, chunk_type, name, signature, line_start, line_end, content_raw, content_hash, importance, metadata, source_type, agent_id, tags, decay_rate, created_by)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+            params![
+                c.file_path, c.language, c.chunk_type.as_str(), c.name, c.signature,
+                c.line_start as i64, c.line_end as i64, c.content_raw, c.content_hash,
+                c.importance, metadata_json, c.source_type.as_str(), c.agent_id,
+                tags_json, c.decay_rate, c.created_by,
+            ],
+        )?;
+
+        let chunk_id = self.db.last_insert_rowid();
+
+        // Generate hints for the knowledge chunk
+        let hints = crate::entities::generate_hints(
+            c.name.as_deref(),
+            c.chunk_type.as_str(),
+            &c.content_raw,
+            &c.file_path,
+        );
+        if !hints.is_empty() {
+            crate::entities::insert_hints(self.db, chunk_id, &hints)?;
+        }
+
+        // Create any specified relationships
+        if let Some(ref rels) = input.relationships {
+            for (target_id, rel_type) in rels {
+                self.db.execute(
+                    "INSERT OR IGNORE INTO relationships (source_id, target_id, rel_type) VALUES (?1, ?2, ?3)",
+                    params![chunk_id, target_id, rel_type],
+                )?;
+            }
+        }
+
+        Ok(IngestResult {
+            chunk_id,
+            content_hash: c.content_hash,
+            was_duplicate: false,
+        })
+    }
+
+    pub fn ingest_batch(&self, inputs: &[KnowledgeChunk]) -> Result<IngestBatchResult, Box<dyn std::error::Error>> {
+        self.db.execute_batch("BEGIN")?;
+        let mut results = Vec::with_capacity(inputs.len());
+        let mut ingested = 0;
+        let mut duplicates = 0;
+
+        for input in inputs {
+            match self.ingest(input) {
+                Ok(result) => {
+                    if result.was_duplicate {
+                        duplicates += 1;
+                    } else {
+                        ingested += 1;
+                    }
+                    results.push(result);
+                }
+                Err(e) => {
+                    self.db.execute_batch("ROLLBACK")?;
+                    return Err(e);
+                }
+            }
+        }
+
+        self.db.execute_batch("COMMIT")?;
+        Ok(IngestBatchResult {
+            ingested,
+            duplicates,
+            results,
+        })
+    }
+
+    /// Soft-delete a knowledge chunk by ID
+    pub fn forget(&self, chunk_id: i64) -> Result<bool, Box<dyn std::error::Error>> {
+        let count = self.db.execute(
+            "UPDATE chunks SET is_deleted = 1, deleted_at = datetime('now') WHERE id = ?1 AND source_type != 'code'",
+            params![chunk_id],
+        )?;
+        Ok(count > 0)
+    }
+
+    /// Update importance/tags on a knowledge chunk
+    pub fn modify(&self, chunk_id: i64, importance: Option<f64>, tags: Option<Vec<String>>) -> Result<bool, Box<dyn std::error::Error>> {
+        if let Some(imp) = importance {
+            self.db.execute(
+                "UPDATE chunks SET importance = ?1, updated_at = datetime('now') WHERE id = ?2",
+                params![imp, chunk_id],
+            )?;
+        }
+        if let Some(ref t) = tags {
+            let json = serde_json::to_string(t)?;
+            self.db.execute(
+                "UPDATE chunks SET tags = ?1, updated_at = datetime('now') WHERE id = ?2",
+                params![json, chunk_id],
+            )?;
+        }
+        Ok(true)
     }
 }
 

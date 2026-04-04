@@ -9,6 +9,8 @@ pub struct SearchQuery {
     pub alpha: f64,
     pub file_filter: Option<String>,
     pub type_filter: Option<String>,
+    pub source_type_filter: Option<Vec<String>>,
+    pub agent_id_filter: Option<String>,
     pub min_score: f64,
 }
 
@@ -20,6 +22,8 @@ impl Default for SearchQuery {
             alpha: 0.7,
             file_filter: None,
             type_filter: None,
+            source_type_filter: None,
+            agent_id_filter: None,
             min_score: 0.1,
         }
     }
@@ -34,6 +38,7 @@ pub struct SearchResult {
     pub line_start: i64,
     pub line_end: i64,
     pub chunk_type: String,
+    pub source_type: String,
     pub score: f64,
     pub vec_distance: Option<f64>,
     pub fts_rank: Option<f64>,
@@ -59,12 +64,12 @@ pub fn fts_search(db: &Connection, query: &SearchQuery) -> Result<Vec<SearchResu
         for (id, score) in hint_ids.iter().zip(hint_scores.iter()) {
             if !results.iter().any(|r| r.chunk_id == *id) {
                 let row = db.query_row(
-                    "SELECT id, file_path, name, signature, line_start, line_end, chunk_type FROM chunks WHERE id = ?1 AND is_deleted = 0",
+                    "SELECT id, file_path, name, signature, line_start, line_end, chunk_type, source_type FROM chunks WHERE id = ?1 AND is_deleted = 0",
                     params![id],
                     |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, Option<String>>(2)?,
-                           r.get::<_, Option<String>>(3)?, r.get::<_, i64>(4)?, r.get::<_, i64>(5)?, r.get::<_, String>(6)?)),
+                           r.get::<_, Option<String>>(3)?, r.get::<_, i64>(4)?, r.get::<_, i64>(5)?, r.get::<_, String>(6)?, r.get::<_, String>(7)?)),
                 ).ok();
-                if let Some((cid, file_path, name, sig, start, end, ct)) = row {
+                if let Some((cid, file_path, name, sig, start, end, ct, st)) = row {
                     results.push(SearchResult {
                         chunk_id: cid,
                         file_path,
@@ -73,6 +78,7 @@ pub fn fts_search(db: &Connection, query: &SearchQuery) -> Result<Vec<SearchResu
                         line_start: start,
                         line_end: end,
                         chunk_type: ct,
+                        source_type: st,
                         score: *score,
                         vec_distance: None,
                         fts_rank: Some(*score),
@@ -99,35 +105,57 @@ pub fn fts_search(db: &Connection, query: &SearchQuery) -> Result<Vec<SearchResu
 }
 
 fn fts_content_search(db: &Connection, query: &SearchQuery) -> Result<Vec<SearchResult>, Box<dyn std::error::Error>> {
-    let filter_clause = build_filter_clause(&query.file_filter, &query.type_filter);
+    let mut extra_clauses = Vec::new();
+    let mut param_values: Vec<Box<dyn rusqlite::ToSql>> = vec![
+        Box::new(query.text.clone()),
+        Box::new(query.top_k as i64),
+    ];
+    let mut next_param = 3;
+
+    if let Some(ref f) = query.file_filter {
+        extra_clauses.push(format!("AND c.file_path = ?{}", next_param));
+        param_values.push(Box::new(f.clone()));
+        next_param += 1;
+    }
+    if let Some(ref t) = query.type_filter {
+        extra_clauses.push(format!("AND c.chunk_type = ?{}", next_param));
+        param_values.push(Box::new(t.clone()));
+        next_param += 1;
+    }
+    if let Some(ref sources) = query.source_type_filter {
+        if !sources.is_empty() {
+            let placeholders: Vec<String> = sources.iter().enumerate().map(|(i, _)| format!("?{}", next_param + i)).collect();
+            extra_clauses.push(format!("AND c.source_type IN ({})", placeholders.join(", ")));
+            for s in sources {
+                param_values.push(Box::new(s.clone()));
+            }
+            next_param += sources.len();
+        }
+    }
+    if let Some(ref agent) = query.agent_id_filter {
+        extra_clauses.push(format!("AND c.agent_id = ?{}", next_param));
+        param_values.push(Box::new(agent.clone()));
+        let _ = next_param;
+    }
+
+    let filter_clause = extra_clauses.join(" ");
 
     let sql = format!(
         "SELECT c.id, c.file_path, c.name, c.signature, c.line_start, c.line_end, c.chunk_type, f.rank, \
-         snippet(chunks_fts, 2, '>>>', '<<<', '...', 32) \
+         snippet(chunks_fts, 2, '>>>', '<<<', '...', 32), c.source_type \
          FROM chunks_fts f JOIN chunks c ON f.rowid = c.id \
-         WHERE chunks_fts MATCH ?1 {} \
+         WHERE chunks_fts MATCH ?1 AND c.is_deleted = 0 {} \
          ORDER BY f.rank LIMIT ?2",
         filter_clause
     );
 
     let mut stmt = db.prepare(&sql)?;
-
-    let mut param_values: Vec<Box<dyn rusqlite::ToSql>> = vec![
-        Box::new(query.text.clone()),
-        Box::new(query.top_k as i64),
-    ];
-    if let Some(ref f) = query.file_filter {
-        param_values.push(Box::new(f.clone()));
-    }
-    if let Some(ref t) = query.type_filter {
-        param_values.push(Box::new(t.clone()));
-    }
     let param_refs: Vec<&dyn rusqlite::ToSql> = param_values.iter().map(|p| p.as_ref()).collect();
 
-    type FtsRow = (i64, String, Option<String>, Option<String>, i64, i64, String, f64, String);
+    type FtsRow = (i64, String, Option<String>, Option<String>, i64, i64, String, f64, String, String);
     let rows: Vec<FtsRow> = stmt
         .query_map(param_refs.as_slice(), |r| {
-            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?, r.get(8)?))
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?, r.get(8)?, r.get(9)?))
         })?
         .collect::<Result<_, _>>()?;
 
@@ -137,7 +165,7 @@ fn fts_content_search(db: &Connection, query: &SearchQuery) -> Result<Vec<Search
 
     let results: Vec<SearchResult> = rows
         .into_iter()
-        .map(|(id, file_path, name, sig, start, end, ct, rank, snippet)| {
+        .map(|(id, file_path, name, sig, start, end, ct, rank, snippet, source_type)| {
             let normalized = 1.0 - ((rank - min_rank) / rank_range);
             SearchResult {
                 chunk_id: id,
@@ -147,6 +175,7 @@ fn fts_content_search(db: &Connection, query: &SearchQuery) -> Result<Vec<Search
                 line_start: start,
                 line_end: end,
                 chunk_type: ct,
+                source_type,
                 score: normalized,
                 vec_distance: None,
                 fts_rank: Some(normalized),
@@ -176,9 +205,9 @@ pub fn vec_search(
     let filter_clause = build_filter_clause_vec(file_filter, type_filter);
 
     let sql = format!(
-        "SELECT v.rowid, v.distance, c.file_path, c.name, c.signature, c.line_start, c.line_end, c.chunk_type \
+        "SELECT v.rowid, v.distance, c.file_path, c.name, c.signature, c.line_start, c.line_end, c.chunk_type, c.source_type \
          FROM chunks_vec v JOIN chunks c ON v.rowid = c.id \
-         WHERE v.embedding MATCH ?1 {} ORDER BY v.distance LIMIT ?2",
+         WHERE v.embedding MATCH ?1 AND c.is_deleted = 0 {} ORDER BY v.distance LIMIT ?2",
         filter_clause
     );
 
@@ -196,16 +225,16 @@ pub fn vec_search(
     }
     let param_refs: Vec<&dyn rusqlite::ToSql> = param_values.iter().map(|p| p.as_ref()).collect();
 
-    type VecRow = (i64, f64, String, Option<String>, Option<String>, i64, i64, String);
+    type VecRow = (i64, f64, String, Option<String>, Option<String>, i64, i64, String, String);
     let rows: Vec<VecRow> = stmt
         .query_map(param_refs.as_slice(), |r| {
-            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?))
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?, r.get(8)?))
         })?
         .collect::<Result<_, _>>()?;
 
     let results: Vec<SearchResult> = rows
         .into_iter()
-        .map(|(id, distance, file_path, name, sig, start, end, ct)| {
+        .map(|(id, distance, file_path, name, sig, start, end, ct, source_type)| {
             SearchResult {
                 chunk_id: id,
                 file_path,
@@ -214,6 +243,7 @@ pub fn vec_search(
                 line_start: start,
                 line_end: end,
                 chunk_type: ct,
+                source_type,
                 score: 1.0 - distance.min(1.0),
                 vec_distance: Some(distance),
                 fts_rank: None,
@@ -289,15 +319,6 @@ fn merge_results(
 
     results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
     results
-}
-
-fn build_filter_clause(file_filter: &Option<String>, type_filter: &Option<String>) -> String {
-    match (file_filter, type_filter) {
-        (Some(_), Some(_)) => "AND c.file_path = ?3 AND c.chunk_type = ?4".to_string(),
-        (Some(_), None) => "AND c.file_path = ?3".to_string(),
-        (None, Some(_)) => "AND c.chunk_type = ?3".to_string(),
-        (None, None) => String::new(),
-    }
 }
 
 fn build_filter_clause_vec(file_filter: Option<&str>, type_filter: Option<&str>) -> String {

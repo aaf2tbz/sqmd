@@ -1,5 +1,5 @@
 use tree_sitter::{Node, Tree};
-use crate::chunk::{Chunk, ChunkType};
+use crate::chunk::{Chunk, ChunkType, SourceType};
 use crate::chunker::{LanguageChunker, make_chunk};
 
 pub struct TypeScriptChunker {
@@ -244,6 +244,7 @@ impl LanguageChunker for TypeScriptChunker {
                                 file_path: file_path.to_string(),
                                 language: "typescript".to_string(),
                                 chunk_type: ChunkType::Section,
+                                source_type: SourceType::Code,
                                 name: None,
                                 signature: None,
                                 line_start: effective_start,
@@ -252,6 +253,10 @@ impl LanguageChunker for TypeScriptChunker {
                                 importance: ChunkType::Section.importance(),
                                 content_hash: crate::files::content_hash(text.as_bytes()),
                                 metadata: serde_json::Map::new(),
+                                agent_id: None,
+                                tags: None,
+                                decay_rate: 0.0,
+                                created_by: None,
                             });
                         }
                     }
@@ -268,6 +273,7 @@ impl LanguageChunker for TypeScriptChunker {
                     file_path: file_path.to_string(),
                     language: "typescript".to_string(),
                     chunk_type: ChunkType::Section,
+                    source_type: SourceType::Code,
                     name: None,
                     signature: None,
                     line_start: gap_start,
@@ -276,6 +282,10 @@ impl LanguageChunker for TypeScriptChunker {
                     importance: ChunkType::Section.importance(),
                     content_hash: crate::files::content_hash(text.as_bytes()),
                     metadata: serde_json::Map::new(),
+                    agent_id: None,
+                    tags: None,
+                    decay_rate: 0.0,
+                    created_by: None,
                 });
             }
         }
