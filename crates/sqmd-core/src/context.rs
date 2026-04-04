@@ -29,7 +29,7 @@ pub struct ChunkSource {
     pub score: f64,
 }
 
-type SelectedChunk = (i64, String, Option<String>, String, i64, i64, String, String, f64);
+type SelectedChunk = (i64, String, Option<String>, String, i64, i64, String, String, f64, String);
 
 pub struct ContextAssembler;
 
@@ -41,7 +41,6 @@ impl ContextAssembler {
         let mut selected: Vec<SelectedChunk> = Vec::new();
         let mut seen_ids: std::collections::HashSet<i64> = std::collections::HashSet::new();
 
-        // 1. Search by query (hybrid)
         if !request.query.is_empty() {
             let search_query = crate::search::SearchQuery {
                 text: request.query.clone(),
@@ -57,7 +56,7 @@ impl ContextAssembler {
             let results = crate::search::fts_search(db, &search_query)?;
             for r in &results {
                 if seen_ids.insert(r.chunk_id) {
-                    let content = get_chunk_content(db, r.chunk_id)?;
+                    let (content, language) = get_chunk_content_and_lang(db, r.chunk_id)?;
                     selected.push((
                         r.chunk_id,
                         r.file_path.clone(),
@@ -68,40 +67,71 @@ impl ContextAssembler {
                         r.score.to_string(),
                         content,
                         r.score,
+                        language,
                     ));
                 }
             }
         }
 
-        // 2. Fetch specific files
         for file_path in &request.files {
             let mut stmt = db.prepare(
-                "SELECT id, file_path, name, chunk_type, line_start, line_end, importance, content_raw
+                "SELECT id, file_path, name, chunk_type, line_start, line_end, importance, content_raw, language
                  FROM chunks WHERE file_path = ?1 AND importance >= 0.5
                  ORDER BY importance DESC",
             )?;
             #[allow(clippy::type_complexity)]
-            let rows: Vec<(i64, String, Option<String>, String, i64, i64, f64, String)> = stmt
+            let rows: Vec<(i64, String, Option<String>, String, i64, i64, f64, String, String)> = stmt
                 .query_map(rusqlite::params![file_path], |r| {
-                    Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?))
+                    Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?, r.get(8)?))
                 })?
                 .collect::<Result<Vec<_>, _>>()?;
 
-            for (id, fp, name, ct, ls, le, imp, content) in rows {
+            for (id, fp, name, ct, ls, le, imp, content, lang) in rows {
                 if seen_ids.insert(id) {
-                    selected.push((id, fp, name, ct, ls, le, format!("{:.2}", imp), content, imp));
+                    selected.push((id, fp, name, ct, ls, le, format!("{:.2}", imp), content, imp, lang));
                 }
             }
         }
 
-        // 3. Include dependencies
         if request.include_deps {
             let chunk_ids: Vec<i64> = selected.iter().map(|(id, ..)| *id).collect();
             if !chunk_ids.is_empty() {
                 let deps = get_related_chunks(db, &chunk_ids, request.dep_depth)?;
-                for (id, fp, name, ct, ls, le, content) in &deps {
+                for (id, fp, name, ct, ls, le, content, lang) in &deps {
                     if seen_ids.insert(*id) {
-                        selected.push((*id, fp.clone(), name.clone(), ct.clone(), *ls, *le, "0.5".to_string(), content.clone(), 0.5));
+                        selected.push((*id, fp.clone(), name.clone(), ct.clone(), *ls, *le, "0.5".to_string(), content.clone(), 0.5, lang.clone()));
+                    }
+                }
+            }
+        }
+
+        for file_path in &request.files {
+            let mut stmt = db.prepare(
+                "SELECT id, file_path, name, chunk_type, line_start, line_end, importance, content_raw, language
+                 FROM chunks WHERE file_path = ?1 AND importance >= 0.5
+                 ORDER BY importance DESC",
+            )?;
+            #[allow(clippy::type_complexity)]
+            let rows: Vec<(i64, String, Option<String>, String, i64, i64, f64, String, String)> = stmt
+                .query_map(rusqlite::params![file_path], |r| {
+                    Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?, r.get(8)?))
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+
+            for (id, fp, name, ct, ls, le, imp, content, lang) in rows {
+                if seen_ids.insert(id) {
+                    selected.push((id, fp, name, ct, ls, le, format!("{:.2}", imp), content, imp, lang));
+                }
+            }
+        }
+
+        if request.include_deps {
+            let chunk_ids: Vec<i64> = selected.iter().map(|(id, ..)| *id).collect();
+            if !chunk_ids.is_empty() {
+                let deps = get_related_chunks(db, &chunk_ids, request.dep_depth)?;
+                for (id, fp, name, ct, ls, le, content, lang) in &deps {
+                    if seen_ids.insert(*id) {
+                        selected.push((*id, fp.clone(), name.clone(), ct.clone(), *ls, *le, "0.5".to_string(), content.clone(), 0.5, lang.clone()));
                     }
                 }
             }
@@ -114,8 +144,8 @@ impl ContextAssembler {
         let mut token_count = 0;
         let mut sources = Vec::new();
 
-        for (_id, file_path, name, chunk_type, line_start, line_end, _score, content, score) in &selected {
-            let rendered = render_chunk(file_path, name, chunk_type, *line_start, *line_end, content);
+        for (_id, file_path, name, chunk_type, line_start, line_end, _score, content, score, language) in &selected {
+            let rendered = render_chunk(file_path, name, chunk_type, *line_start, *line_end, content, language);
             let chunk_tokens = estimate_tokens(&rendered);
 
             if token_count + chunk_tokens > request.max_tokens && token_count > 0 {
@@ -152,6 +182,7 @@ fn render_chunk(
     line_start: i64,
     line_end: i64,
     content: &str,
+    language: &str,
 ) -> String {
     let name = name.as_deref().unwrap_or("(unnamed)");
     format!(
@@ -161,18 +192,20 @@ fn render_chunk(
         line_start + 1,
         line_end + 1,
         chunk_type,
-        "", // language omitted for context (agent doesn't need it)
+        language,
         content.trim(),
     )
 }
 
-fn get_chunk_content(db: &Connection, chunk_id: i64) -> Result<String, Box<dyn std::error::Error>> {
-    let content: String = db
-        .query_row("SELECT content_raw FROM chunks WHERE id = ?1", rusqlite::params![chunk_id], |r| {
-            r.get(0)
-        })
+fn get_chunk_content_and_lang(db: &Connection, chunk_id: i64) -> Result<(String, String), Box<dyn std::error::Error>> {
+    let result: (String, String) = db
+        .query_row(
+            "SELECT content_raw, COALESCE(language, '') FROM chunks WHERE id = ?1",
+            rusqlite::params![chunk_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
         .unwrap_or_default();
-    Ok(content)
+    Ok(result)
 }
 
 #[allow(clippy::type_complexity)]
@@ -180,7 +213,7 @@ fn get_related_chunks(
     db: &Connection,
     chunk_ids: &[i64],
     depth: usize,
-) -> Result<Vec<(i64, String, Option<String>, String, i64, i64, String)>, Box<dyn std::error::Error>> {
+) -> Result<Vec<(i64, String, Option<String>, String, i64, i64, String, String)>, Box<dyn std::error::Error>> {
     if chunk_ids.is_empty() || depth == 0 {
         return Ok(Vec::new());
     }
@@ -194,7 +227,7 @@ fn get_related_chunks(
             JOIN rel_graph rg ON r.source_id = rg.id
             WHERE rg.depth < {1} AND r.rel_type = 'imports'
         )
-        SELECT DISTINCT c.id, c.file_path, c.name, c.chunk_type, c.line_start, c.line_end, c.content_raw
+        SELECT DISTINCT c.id, c.file_path, c.name, c.chunk_type, c.line_start, c.line_end, c.content_raw, COALESCE(c.language, '')
         FROM rel_graph rg
         JOIN chunks c ON rg.id = c.id
         WHERE c.id NOT IN ({0})
@@ -206,9 +239,9 @@ fn get_related_chunks(
 
     let mut stmt = db.prepare(&sql)?;
     let params: Vec<&dyn rusqlite::ToSql> = chunk_ids.iter().map(|id| id as &dyn rusqlite::ToSql).collect();
-    let rows: Vec<(i64, String, Option<String>, String, i64, i64, String)> = stmt
+    let rows: Vec<(i64, String, Option<String>, String, i64, i64, String, String)> = stmt
         .query_map(params.as_slice(), |r| {
-            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?))
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?))
         })?
         .collect::<Result<_, _>>()?;
 

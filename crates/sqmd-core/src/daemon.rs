@@ -87,6 +87,8 @@ fn handle_connection(stream: UnixStream, root: &Path) -> Result<(), Box<dyn std:
         "context" => handle_context(&db, &request.params),
         "get" => handle_get(&db, &request.params),
         "stats" => handle_stats(&db),
+        "ls" => handle_ls(&db, &request.params),
+        "cat" => handle_cat(&db, &request.params),
         #[cfg(feature = "embed")]
         "embed" => handle_embed(&mut db),
         _ => Response {
@@ -320,6 +322,65 @@ fn handle_embed(db: &mut Connection) -> Response {
             ok: true,
             result: Some(serde_json::json!({"embedded": count})),
             error: None,
+        },
+        Err(e) => Response {
+            ok: false,
+            result: None,
+            error: Some(e.to_string()),
+        },
+    }
+}
+
+fn handle_ls(db: &Connection, params: &serde_json::Value) -> Response {
+    let file = params["file"].as_str();
+    let type_filter = params["type"].as_str();
+    let depth = params["depth"].as_u64().unwrap_or(1) as usize;
+
+    match crate::vfs::list_chunks(db, file, type_filter, depth) {
+        Ok(entries) => {
+            let json = serde_json::to_value(&entries).unwrap_or_default();
+            Response {
+                ok: true,
+                result: Some(json),
+                error: None,
+            }
+        }
+        Err(e) => Response {
+            ok: false,
+            result: None,
+            error: Some(e.to_string()),
+        },
+    }
+}
+
+fn handle_cat(db: &Connection, params: &serde_json::Value) -> Response {
+    let id = params["id"].as_i64().unwrap_or(0);
+
+    match crate::vfs::get_chunk_by_id(db, id) {
+        Ok(Some(entry)) => {
+            let content: String = db
+                .query_row("SELECT content_raw FROM chunks WHERE id = ?1", rusqlite::params![id], |r| r.get(0))
+                .unwrap_or_default();
+            Response {
+                ok: true,
+                result: Some(serde_json::json!({
+                    "id": entry.id,
+                    "file_path": entry.file_path,
+                    "language": entry.language,
+                    "chunk_type": entry.chunk_type,
+                    "name": entry.name,
+                    "signature": entry.signature,
+                    "line_start": entry.line_start + 1,
+                    "line_end": entry.line_end + 1,
+                    "content": content,
+                })),
+                error: None,
+            }
+        }
+        Ok(None) => Response {
+            ok: false,
+            result: None,
+            error: Some(format!("No chunk found with id {}", id)),
         },
         Err(e) => Response {
             ok: false,

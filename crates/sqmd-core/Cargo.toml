@@ -5,7 +5,7 @@ edition = "2021"
 
 [features]
 default = []
-embed = ["dep:ort", "dep:ndarray", "dep:ureq"]
+embed = ["dep:ort", "dep:ndarray", "dep:ureq", "dep:tokenizers"]
 
 [dependencies]
 rusqlite = { version = "0.34", features = ["bundled"] }
@@ -16,6 +16,8 @@ sha2 = "0.10"
 thiserror = "2"
 ort = { version = "2.0.0-rc.12", optional = true }
 ndarray = { version = "0.17", optional = true }
+ureq = { version = "3", optional = true }
+tokenizers = { version = "0.21", optional = true }
 ignore = "0.4"
 walkdir = "2"
 tree-sitter = "0.24"
@@ -24,7 +26,6 @@ tree-sitter-rust = "0.23"
 tree-sitter-python = "0.23"
 tree-sitter-go = "0.23"
 tree-sitter-java = "0.23"
-ureq = { version = "3", optional = true }
 rayon = "1.10"
 notify = "7"
 tempfile = "3"

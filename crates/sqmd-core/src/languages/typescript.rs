@@ -219,7 +219,7 @@ impl LanguageChunker for TypeScriptChunker {
         imports
     }
 
-    fn chunk_unclaimed(&self, tree: &Tree, source: &str, file_path: &str, chunks: &mut Vec<Chunk>) {
+    fn chunk_unclaimed(&self, _tree: &Tree, source: &str, file_path: &str, chunks: &mut Vec<Chunk>) {
         let mut claimed_ranges: Vec<(usize, usize)> = chunks.iter().map(|c| (c.line_start, c.line_end)).collect();
         claimed_ranges.sort();
 
@@ -240,18 +240,19 @@ impl LanguageChunker for TypeScriptChunker {
                     if effective_end > effective_start {
                         let text: String = source_lines[effective_start..effective_end].join("\n");
                         if !text.trim().is_empty() {
-                            if let Some(chunk) = make_chunk(
-                                source,
-                                tree.root_node(),
-                                file_path,
-                                "typescript",
-                                ChunkType::Section,
-                                None,
-                                None,
-                                serde_json::Map::new(),
-                            ) {
-                                chunks.push(chunk);
-                            }
+                            chunks.push(Chunk {
+                                file_path: file_path.to_string(),
+                                language: "typescript".to_string(),
+                                chunk_type: ChunkType::Section,
+                                name: None,
+                                signature: None,
+                                line_start: effective_start,
+                                line_end: effective_end,
+                                content_raw: text.clone(),
+                                importance: ChunkType::Section.importance(),
+                                content_hash: crate::files::content_hash(text.as_bytes()),
+                                metadata: serde_json::Map::new(),
+                            });
                         }
                     }
                 }
@@ -271,13 +272,7 @@ impl LanguageChunker for TypeScriptChunker {
                     signature: None,
                     line_start: gap_start,
                     line_end: effective_end,
-                    content_raw: format!(
-                        "### (unclaimed)\n\n**File:** `{}`\n**Lines:** {}-{}\n\n```\n{}\n```",
-                        file_path,
-                        gap_start + 1,
-                        effective_end + 1,
-                        text
-                    ),
+                    content_raw: text.clone(),
                     importance: ChunkType::Section.importance(),
                     content_hash: crate::files::content_hash(text.as_bytes()),
                     metadata: serde_json::Map::new(),

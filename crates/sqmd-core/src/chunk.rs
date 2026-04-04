@@ -40,6 +40,27 @@ impl ChunkType {
         }
     }
 
+    pub fn from_str_name(s: &str) -> Option<Self> {
+        match s {
+            "function" => Some(ChunkType::Function),
+            "method" => Some(ChunkType::Method),
+            "class" => Some(ChunkType::Class),
+            "interface" => Some(ChunkType::Interface),
+            "type" => Some(ChunkType::Type),
+            "module" => Some(ChunkType::Module),
+            "section" => Some(ChunkType::Section),
+            "import" => Some(ChunkType::Import),
+            "export" => Some(ChunkType::Export),
+            "macro" => Some(ChunkType::Macro),
+            "trait" => Some(ChunkType::Trait),
+            "impl" => Some(ChunkType::Impl),
+            "enum" => Some(ChunkType::Enum),
+            "struct" => Some(ChunkType::Struct),
+            "constant" => Some(ChunkType::Constant),
+            _ => None,
+        }
+    }
+
     pub fn importance(&self) -> f64 {
         match self {
             ChunkType::Function | ChunkType::Method => 0.9,
@@ -71,14 +92,19 @@ pub struct Chunk {
 
 impl Chunk {
     pub fn render_md(&self) -> String {
-        let name = self.name.as_deref().unwrap_or("(unnamed)");
-        let sig = self.signature.as_deref()
+        let sig_line = self.signature.as_deref()
             .map(|s| format!("\n**Signature:** `{}`", s))
             .unwrap_or_default();
         format!(
-            "### `{}`{}\n\n**File:** `{}`\n**Lines:** {}-{}\n**Type:** {}\n\n```{}\n{}\n```",
-            name,
-            sig,
+            "<document>\n<source>{}</source>\n<location>{}:{}</location>\n<lines>{}</lines>\n<type>{}</type>\n<importance>{:.2}</importance>\n</document>\n\n### `{}`{}\n\n**File:** `{}` | **Lines:** {}-{} | **Type:** {}\n\n```{}\n{}\n```",
+            self.file_path,
+            self.file_path,
+            self.line_start + 1,
+            self.line_end + 1,
+            self.chunk_type.as_str(),
+            self.importance,
+            self.name.as_deref().unwrap_or("(unnamed)"),
+            sig_line,
             self.file_path,
             self.line_start + 1,
             self.line_end + 1,

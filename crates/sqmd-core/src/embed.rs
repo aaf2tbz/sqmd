@@ -6,11 +6,14 @@ use std::path::PathBuf;
 const DIMS: usize = 768;
 const MODEL_NAME: &str = "nomic-embed-text-v1.5";
 const MODEL_FILE: &str = "nomic-embed-text-v1.5-q8.onnx";
+const TOKENIZER_FILE: &str = "nomic-embed-text-v1.5-tokenizer.json";
 const MODEL_URL: &str = "https://huggingface.co/nomic-ai/nomic-embed-text-v1.5/resolve/main/nomic-embed-text-v1.5-q8.onnx";
+const TOKENIZER_URL: &str = "https://huggingface.co/nomic-ai/nomic-embed-text-v1.5/resolve/main/tokenizer.json";
 const MAX_SEQ_LEN: usize = 512;
 
 pub struct Embedder {
     session: Option<Session>,
+    tokenizer: Option<tokenizers::Tokenizer>,
     model_name: String,
 }
 
@@ -18,6 +21,7 @@ impl Embedder {
     pub fn new() -> Result<Self, Box<dyn std::error::Error>> {
         Ok(Self {
             session: None,
+            tokenizer: None,
             model_name: MODEL_NAME.to_string(),
         })
     }
@@ -32,20 +36,23 @@ impl Embedder {
         Ok(Self::model_dir()?.join(MODEL_FILE))
     }
 
-    pub fn ensure_model_exists() -> Result<(), Box<dyn std::error::Error>> {
-        let path = Self::model_path()?;
-        if path.exists() {
+    fn tokenizer_path() -> Result<PathBuf, Box<dyn std::error::Error>> {
+        Ok(Self::model_dir()?.join(TOKENIZER_FILE))
+    }
+
+    fn download_file(url: &str, dest: &PathBuf, label: &str) -> Result<(), Box<dyn std::error::Error>> {
+        if dest.exists() {
             return Ok(());
         }
 
-        let dir = Self::model_dir()?;
-        std::fs::create_dir_all(&dir)?;
+        let dir = dest.parent().unwrap();
+        std::fs::create_dir_all(dir)?;
 
-        eprintln!("Downloading embedding model ({MODEL_FILE})...");
-        eprintln!("  URL: {MODEL_URL}");
-        eprintln!("  Destination: {:?}", path);
+        eprintln!("Downloading {label}...");
+        eprintln!("  URL: {url}");
+        eprintln!("  Destination: {:?}", dest);
 
-        let response = ureq::Agent::new_with_defaults().get(MODEL_URL).call()?;
+        let response = ureq::Agent::new_with_defaults().get(url).call()?;
 
         let total_bytes: usize = response.headers().get("content-length")
             .and_then(|v| v.to_str().ok())
@@ -53,7 +60,7 @@ impl Embedder {
             .unwrap_or(0);
 
         let mut reader = response.into_body().into_reader();
-        let mut file = std::fs::File::create(&path)?;
+        let mut file = std::fs::File::create(dest)?;
         let mut downloaded: usize = 0;
 
         let mut buf = [0u8; 8192];
@@ -70,23 +77,40 @@ impl Embedder {
             }
         }
 
-        eprintln!("\n  Saved {} MB", downloaded / 1_048_576);
+        eprintln!("\n  Saved {} KB", downloaded / 1024);
+        Ok(())
+    }
+
+    pub fn ensure_model_exists() -> Result<(), Box<dyn std::error::Error>> {
+        let model_path = Self::model_path()?;
+        Self::download_file(MODEL_URL, &model_path, "embedding model")?;
+        let tokenizer_path = Self::tokenizer_path()?;
+        Self::download_file(TOKENIZER_URL, &tokenizer_path, "tokenizer")?;
         Ok(())
     }
 
     pub fn ensure_loaded(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        if self.session.is_some() {
+        if self.session.is_some() && self.tokenizer.is_some() {
             return Ok(());
         }
 
-        let path = Self::model_path()?;
-
-        if !path.exists() {
+        if !Self::model_path()?.exists() || !Self::tokenizer_path()?.exists() {
             Self::ensure_model_exists()?;
         }
 
-        let session = Session::builder()?.commit_from_file(&path)?;
+        let session = Session::builder()?.commit_from_file(&Self::model_path()?)?;
         self.session = Some(session);
+
+        let tokenizer = tokenizers::Tokenizer::from_file(&Self::tokenizer_path()?)
+            .map_err(|e| format!("Failed to load tokenizer: {e}"))?;
+        let mut with_padding = tokenizer.clone();
+        let padding = tokenizers::PaddingParams {
+            strategy: tokenizers::PaddingStrategy::BatchLongest,
+            ..Default::default()
+        };
+        with_padding.with_padding(Some(padding));
+        self.tokenizer = Some(with_padding);
+
         Ok(())
     }
 
@@ -97,17 +121,21 @@ impl Embedder {
     pub fn embed_one(&mut self, text: &str) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
         self.ensure_loaded()?;
         let session = self.session.as_mut().unwrap();
+        let tokenizer = self.tokenizer.as_ref().unwrap();
 
-        let tokens = tokenize(text);
-        let seq_len = tokens.len().min(MAX_SEQ_LEN);
+        let encodings = tokenizer.encode(text, true)
+            .map_err(|e| format!("Tokenization failed: {e}"))?;
+        let ids = encodings.get_ids();
+
+        let seq_len = ids.len().min(MAX_SEQ_LEN);
         let padded_len = seq_len.next_power_of_two().max(8);
 
         let mut input_ids = vec![0i64; padded_len];
         let mut attention_mask = vec![0i64; padded_len];
         let token_types = vec![0i64; padded_len];
 
-        for (i, &t) in tokens.iter().take(seq_len).enumerate() {
-            input_ids[i] = t;
+        for (i, &t) in ids.iter().take(seq_len).enumerate() {
+            input_ids[i] = t as i64;
             attention_mask[i] = 1;
         }
 
@@ -189,27 +217,6 @@ pub fn blob_to_vector(blob: &[u8]) -> Vec<f32> {
     blob.chunks_exact(4)
         .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
         .collect()
-}
-
-fn tokenize(text: &str) -> Vec<i64> {
-    let mut tokens = Vec::new();
-    for word in text.split_whitespace() {
-        let mut chars = word.chars().peekable();
-        tokens.push(101); // [CLS]
-        while chars.peek().is_some() {
-            tokens.push(chars.next().unwrap() as i64 + 256);
-        }
-        if tokens.len() >= MAX_SEQ_LEN {
-            tokens.truncate(MAX_SEQ_LEN);
-            tokens[MAX_SEQ_LEN - 1] = 102; // [SEP]
-            return tokens;
-        }
-    }
-    if tokens.is_empty() {
-        tokens.push(101);
-    }
-    tokens.push(102); // [SEP]
-    tokens
 }
 
 #[cfg(test)]

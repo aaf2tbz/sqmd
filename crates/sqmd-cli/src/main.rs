@@ -7,6 +7,9 @@ use std::io::Write;
 struct Cli {
     #[command(subcommand)]
     command: Commands,
+    /// Output results as JSON
+    #[arg(long, global = true)]
+    json: bool,
 }
 
 #[derive(Subcommand)]
@@ -95,13 +98,40 @@ enum Commands {
         #[arg(default_value = ".")]
         path: PathBuf,
     },
+    /// List chunks (file-system view)
+    Ls {
+        /// Filter by file path
+        #[arg(long)]
+        file: Option<String>,
+        /// Filter by chunk type
+        #[arg(long)]
+        r#type: Option<String>,
+        /// Max depth for contains tree
+        #[arg(short = 'd', long, default_value = "1")]
+        depth: usize,
+    },
+    /// Get chunk by ID
+    Cat {
+        /// Chunk ID
+        id: i64,
+    },
+    /// Show chunks modified since timestamp
+    Diff {
+        /// ISO timestamp (e.g., "2025-01-01T00:00:00")
+        since: String,
+    },
 }
 
 fn main() {
     let cli = Cli::parse();
+    let is_json = cli.json;
     let result = run(cli);
     if let Err(e) = result {
-        eprintln!("Error: {e}");
+        if is_json {
+            eprintln!("{}", serde_json::json!({"ok": false, "error": e.to_string()}));
+        } else {
+            eprintln!("Error: {e}");
+        }
         std::process::exit(1);
     }
 }
@@ -121,16 +151,16 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         Commands::Index { path } => cmd_index(&path),
         #[cfg(feature = "embed")]
         Commands::Search { query, top_k, alpha, file, r#type, keyword } => {
-            cmd_search(&query, top_k, Some(alpha), file, r#type, Some(keyword))
+            cmd_search(&query, top_k, Some(alpha), file, r#type, Some(keyword), cli.json)
         }
         #[cfg(not(feature = "embed"))]
         Commands::Search { query, top_k, file, r#type } => {
-            cmd_search(&query, top_k, None, file, r#type, None)
+            cmd_search(&query, top_k, None, file, r#type, None, cli.json)
         }
         #[cfg(feature = "embed")]
         Commands::Embed => cmd_embed(),
-        Commands::Stats => cmd_stats(),
-        Commands::Get { location } => cmd_get(&location),
+        Commands::Stats => cmd_stats(cli.json),
+        Commands::Get { location } => cmd_get(&location, cli.json),
         Commands::Reset => cmd_reset(),
         Commands::Deps { path, depth } => cmd_deps(&path, depth),
         Commands::Context { query, files, max_tokens, deps, dep_depth } => {
@@ -138,11 +168,28 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         }
         Commands::Serve { path } => cmd_serve(&path),
         Commands::Watch { path } => cmd_watch(&path),
+        Commands::Ls { file, r#type, depth } => cmd_ls(file.as_deref(), r#type.as_deref(), depth, cli.json),
+        Commands::Cat { id } => cmd_cat(id, cli.json),
+        Commands::Diff { since } => cmd_diff(&since, cli.json),
+    }
+}
+
+fn find_project_root() -> Option<PathBuf> {
+    let mut dir = std::env::current_dir().ok()?;
+    loop {
+        if dir.join(".sqmd").exists() {
+            return Some(dir);
+        }
+        if !dir.pop() {
+            return None;
+        }
     }
 }
 
 fn db_path() -> PathBuf {
-    PathBuf::from(".sqmd/index.db")
+    find_project_root()
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default())
+        .join(".sqmd/index.db")
 }
 
 fn ensure_db() -> Result<rusqlite::Connection, Box<dyn std::error::Error>> {
@@ -269,6 +316,7 @@ fn cmd_search(
     type_filter: Option<String>,
     #[cfg_attr(not(feature = "embed"), allow(unused_variables))]
     keyword_only: Option<bool>,
+    json: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let db = ensure_db()?;
 
@@ -293,7 +341,32 @@ fn cmd_search(
     let results = sqmd_core::search::fts_search(&db, &search_query)?;
 
     if results.is_empty() {
-        println!("No results for: {}", query);
+        if json {
+            println!("{}", serde_json::json!({"query": query, "results": []}));
+        } else {
+            println!("No results for: {}", query);
+        }
+        return Ok(());
+    }
+
+    if json {
+        let arr: Vec<serde_json::Value> = results.iter().map(|r| {
+            serde_json::json!({
+                "file_path": r.file_path,
+                "chunk_type": r.chunk_type,
+                "name": r.name,
+                "line_start": r.line_start + 1,
+                "line_end": r.line_end + 1,
+                "score": r.score,
+                "snippet": r.snippet,
+            })
+        }).collect();
+        println!("{}", serde_json::to_string_pretty(&serde_json::json!({
+            "query": query,
+            "result_count": results.len(),
+            "results": arr,
+        }))?);
+        drop(db);
         return Ok(());
     }
 
@@ -330,7 +403,7 @@ fn cmd_search(
     Ok(())
 }
 
-fn cmd_stats() -> Result<(), Box<dyn std::error::Error>> {
+fn cmd_stats(json: bool) -> Result<(), Box<dyn std::error::Error>> {
     let db = ensure_db()?;
 
     let files: i64 = db.query_row("SELECT COUNT(*) FROM files", [], |r| r.get(0))?;
@@ -341,6 +414,20 @@ fn cmd_stats() -> Result<(), Box<dyn std::error::Error>> {
         [],
         |r| r.get(0),
     )?;
+    let db_size = std::fs::metadata(db_path())?.len();
+
+    if json {
+        println!("{}", serde_json::json!({
+            "files": files,
+            "chunks": chunks,
+            "relationships": rels,
+            "embedded": embedded,
+            "db_size_bytes": db_size,
+        }));
+        drop(db);
+        return Ok(());
+    }
+
     let langs: Vec<(String, i64)> = {
         let mut stmt = db.prepare(
             "SELECT language, COUNT(*) FROM chunks GROUP BY language ORDER BY COUNT(*) DESC LIMIT 10"
@@ -355,7 +442,6 @@ fn cmd_stats() -> Result<(), Box<dyn std::error::Error>> {
         stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
             .collect::<Result<Vec<_>, _>>()?
     };
-    let db_size = std::fs::metadata(db_path())?.len();
 
     println!("sqmd index statistics");
     println!("=====================");
@@ -379,7 +465,7 @@ fn cmd_stats() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn cmd_get(location: &str) -> Result<(), Box<dyn std::error::Error>> {
+fn cmd_get(location: &str, json: bool) -> Result<(), Box<dyn std::error::Error>> {
     let (file, line) = location
         .rsplit_once(':')
         .ok_or("Invalid format. Use file:line")?;
@@ -396,10 +482,21 @@ fn cmd_get(location: &str) -> Result<(), Box<dyn std::error::Error>> {
 
     match result {
         Some((start, end, name, language, content)) => {
-            println!("Chunk: {} (lines {}-{})", name, start + 1, end + 1);
-            println!("```{}", language);
-            println!("{}", content);
-            println!("```");
+            if json {
+                println!("{}", serde_json::json!({
+                    "name": name,
+                    "file_path": file,
+                    "language": language,
+                    "line_start": start + 1,
+                    "line_end": end + 1,
+                    "content": content,
+                }));
+            } else {
+                println!("Chunk: {} (lines {}-{})", name, start + 1, end + 1);
+                println!("```{}", language);
+                println!("{}", content);
+                println!("```");
+            }
         }
         None => {
             println!("No chunk found at {}:{}", file, line);
@@ -537,4 +634,95 @@ fn cmd_reset() -> Result<(), Box<dyn std::error::Error>> {
 fn cmd_watch(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let root = root.canonicalize()?;
     sqmd_core::watcher::watch(&root)
+}
+
+fn cmd_ls(file: Option<&str>, type_filter: Option<&str>, depth: usize, json: bool) -> Result<(), Box<dyn std::error::Error>> {
+    let db = ensure_db()?;
+    let entries = sqmd_core::vfs::list_chunks(&db, file, type_filter, depth)?;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&entries)?);
+    } else {
+        if entries.is_empty() {
+            println!("No chunks found.");
+            return Ok(());
+        }
+        let tree = sqmd_core::vfs::render_tree(&entries, 0);
+        print!("{}", tree);
+        println!("\n{} chunks", entries.len());
+    }
+
+    drop(db);
+    Ok(())
+}
+
+fn cmd_cat(id: i64, json: bool) -> Result<(), Box<dyn std::error::Error>> {
+    let db = ensure_db()?;
+    let entry = sqmd_core::vfs::get_chunk_by_id(&db, id)?;
+
+    match entry {
+        Some(e) => {
+            let content: String = db
+                .query_row("SELECT content_raw FROM chunks WHERE id = ?1", rusqlite::params![id], |r| r.get(0))
+                .unwrap_or_default();
+
+            if json {
+                println!("{}", serde_json::json!({
+                    "id": e.id,
+                    "file_path": e.file_path,
+                    "language": e.language,
+                    "chunk_type": e.chunk_type,
+                    "name": e.name,
+                    "signature": e.signature,
+                    "line_start": e.line_start + 1,
+                    "line_end": e.line_end + 1,
+                    "content": content,
+                }));
+            } else {
+                println!("Chunk #{}: {} ({}:{})", e.id, e.name.as_deref().unwrap_or("(unnamed)"), e.file_path, e.line_start + 1);
+                if let Some(sig) = &e.signature {
+                    println!("Signature: {}", sig);
+                }
+                println!("Type: {} | Language: {} | Lines: {}-{}", e.chunk_type, e.language, e.line_start + 1, e.line_end + 1);
+                println!();
+                println!("```{}", e.language);
+                println!("{}", content);
+                println!("```");
+            }
+        }
+        None => {
+            println!("No chunk found with id {}", id);
+        }
+    }
+
+    drop(db);
+    Ok(())
+}
+
+fn cmd_diff(since: &str, json: bool) -> Result<(), Box<dyn std::error::Error>> {
+    let db = ensure_db()?;
+    let diffs = sqmd_core::vfs::diff_snapshots(&db, since)?;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&diffs)?);
+    } else {
+        if diffs.is_empty() {
+            println!("No changes since {}", since);
+            return Ok(());
+        }
+        println!("Changes since {} ({} chunks):\n", since, diffs.len());
+        for d in &diffs {
+            let name = d.name.as_deref().unwrap_or("(unnamed)");
+            println!("{} {} [{}] {}", d.change, name, d.chunk_type, d.file_path);
+            if let Some(content) = &d.new_content {
+                for line in content.lines().take(5) {
+                    println!("  {}", line);
+                }
+            }
+            println!();
+        }
+    }
+
+    drop(db);
+    Ok(())
 }
