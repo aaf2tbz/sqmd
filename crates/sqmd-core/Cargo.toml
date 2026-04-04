@@ -27,6 +27,7 @@ tree-sitter-python = "0.23"
 tree-sitter-go = "0.23"
 tree-sitter-java = "0.23"
 rayon = "1.10"
+chrono = { version = "0.4", features = ["serde"] }
 notify = "7"
 tempfile = "3"
 regex = "1"

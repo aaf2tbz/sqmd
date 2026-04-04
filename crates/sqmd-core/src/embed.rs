@@ -1,6 +1,6 @@
-use std::io::{Read, Write};
 use ort::session::Session;
 use ort::value::Value;
+use std::io::{Read, Write};
 use std::path::PathBuf;
 
 const DIMS: usize = 768;
@@ -8,8 +8,12 @@ const MODEL_NAME: &str = "nomic-embed-text-v1.5";
 const MODEL_FILE: &str = "nomic-embed-text-v1.5-q8.onnx";
 const TOKENIZER_FILE: &str = "nomic-embed-text-v1.5-tokenizer.json";
 const MODEL_URL: &str = "https://huggingface.co/nomic-ai/nomic-embed-text-v1.5/resolve/main/nomic-embed-text-v1.5-q8.onnx";
-const TOKENIZER_URL: &str = "https://huggingface.co/nomic-ai/nomic-embed-text-v1.5/resolve/main/tokenizer.json";
+const TOKENIZER_URL: &str =
+    "https://huggingface.co/nomic-ai/nomic-embed-text-v1.5/resolve/main/tokenizer.json";
 const MAX_SEQ_LEN: usize = 512;
+
+const QUERY_PREFIX: &str = "search_query: ";
+const DOCUMENT_PREFIX: &str = "search_document: ";
 
 pub struct Embedder {
     session: Option<Session>,
@@ -40,7 +44,11 @@ impl Embedder {
         Ok(Self::model_dir()?.join(TOKENIZER_FILE))
     }
 
-    fn download_file(url: &str, dest: &PathBuf, label: &str) -> Result<(), Box<dyn std::error::Error>> {
+    fn download_file(
+        url: &str,
+        dest: &PathBuf,
+        label: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         if dest.exists() {
             return Ok(());
         }
@@ -54,7 +62,9 @@ impl Embedder {
 
         let response = ureq::Agent::new_with_defaults().get(url).call()?;
 
-        let total_bytes: usize = response.headers().get("content-length")
+        let total_bytes: usize = response
+            .headers()
+            .get("content-length")
             .and_then(|v| v.to_str().ok())
             .and_then(|v| v.parse::<usize>().ok())
             .unwrap_or(0);
@@ -119,11 +129,33 @@ impl Embedder {
     }
 
     pub fn embed_one(&mut self, text: &str) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
+        self.embed_with_prefix(text, "")
+    }
+
+    pub fn embed_query(&mut self, text: &str) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
+        self.embed_with_prefix(text, QUERY_PREFIX)
+    }
+
+    pub fn embed_document(&mut self, text: &str) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
+        self.embed_with_prefix(text, DOCUMENT_PREFIX)
+    }
+
+    fn embed_with_prefix(
+        &mut self,
+        text: &str,
+        prefix: &str,
+    ) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
         self.ensure_loaded()?;
         let session = self.session.as_mut().unwrap();
         let tokenizer = self.tokenizer.as_ref().unwrap();
 
-        let encodings = tokenizer.encode(text, true)
+        let full_text = if prefix.is_empty() {
+            text.to_string()
+        } else {
+            format!("{}{}", prefix, text)
+        };
+        let encodings = tokenizer
+            .encode(full_text.as_str(), true)
             .map_err(|e| format!("Tokenization failed: {e}"))?;
         let ids = encodings.get_ids();
 
@@ -139,7 +171,11 @@ impl Embedder {
             attention_mask[i] = 1;
         }
 
-        let input_names: Vec<String> = session.inputs().iter().map(|i| i.name().to_string()).collect();
+        let input_names: Vec<String> = session
+            .inputs()
+            .iter()
+            .map(|i| i.name().to_string())
+            .collect();
 
         let input_ids_val = Value::from_array(([1usize, padded_len], input_ids.clone()))?;
         let attention_val = Value::from_array(([1usize, padded_len], attention_mask.clone()))?;
@@ -164,13 +200,116 @@ impl Embedder {
         }
     }
 
-    pub fn embed_batch(&mut self, texts: &[&str]) -> Result<Vec<Vec<f32>>, Box<dyn std::error::Error>> {
-        self.ensure_loaded()?;
+    pub fn embed_batch_documents(
+        &mut self,
+        texts: &[&str],
+    ) -> Result<Vec<Vec<f32>>, Box<dyn std::error::Error>> {
+        self.embed_batch_with_prefix(texts, DOCUMENT_PREFIX)
+    }
 
-        let mut results = Vec::with_capacity(texts.len());
-        for text in texts {
-            results.push(self.embed_one(text)?);
+    pub fn embed_batch_queries(
+        &mut self,
+        texts: &[&str],
+    ) -> Result<Vec<Vec<f32>>, Box<dyn std::error::Error>> {
+        self.embed_batch_with_prefix(texts, QUERY_PREFIX)
+    }
+
+    pub fn embed_batch(
+        &mut self,
+        texts: &[&str],
+    ) -> Result<Vec<Vec<f32>>, Box<dyn std::error::Error>> {
+        self.embed_batch_with_prefix(texts, "")
+    }
+
+    fn embed_batch_with_prefix(
+        &mut self,
+        texts: &[&str],
+        prefix: &str,
+    ) -> Result<Vec<Vec<f32>>, Box<dyn std::error::Error>> {
+        if texts.is_empty() {
+            return Ok(Vec::new());
         }
+
+        self.ensure_loaded()?;
+        let session = self.session.as_mut().unwrap();
+        let tokenizer = self.tokenizer.as_ref().unwrap();
+
+        let batch_size = texts.len();
+        let padded_len = texts
+            .iter()
+            .map(|t| {
+                let full = if prefix.is_empty() {
+                    t.to_string()
+                } else {
+                    format!("{}{}", prefix, t)
+                };
+                let enc = tokenizer
+                    .encode(full.as_str(), true)
+                    .map(|e| e.get_ids().len().min(MAX_SEQ_LEN))
+                    .unwrap_or(0);
+                enc.next_power_of_two().max(8)
+            })
+            .max()
+            .unwrap_or(8);
+
+        let mut all_input_ids = vec![0i64; batch_size * padded_len];
+        let mut all_attention = vec![0i64; batch_size * padded_len];
+        let all_token_types = vec![0i64; batch_size * padded_len];
+
+        for (i, text) in texts.iter().enumerate() {
+            let full_text = if prefix.is_empty() {
+                text.to_string()
+            } else {
+                format!("{}{}", prefix, text)
+            };
+            let encodings = tokenizer
+                .encode(full_text.as_str(), true)
+                .map_err(|e| format!("Tokenization failed: {e}"))?;
+            let ids = encodings.get_ids();
+            let seq_len = ids.len().min(MAX_SEQ_LEN);
+            let offset = i * padded_len;
+            for (j, &t) in ids.iter().take(seq_len).enumerate() {
+                all_input_ids[offset + j] = t as i64;
+                all_attention[offset + j] = 1;
+            }
+        }
+
+        let input_names: Vec<String> = session
+            .inputs()
+            .iter()
+            .map(|inp| inp.name().to_string())
+            .collect();
+
+        let input_ids_val = Value::from_array(([batch_size, padded_len], all_input_ids))?;
+        let attention_val = Value::from_array(([batch_size, padded_len], all_attention.clone()))?;
+        let token_types_val = Value::from_array(([batch_size, padded_len], all_token_types))?;
+
+        let inputs: Vec<(&str, Value)> = vec![
+            (input_names[0].as_str(), input_ids_val.into()),
+            (input_names[1].as_str(), attention_val.into()),
+            (input_names[2].as_str(), token_types_val.into()),
+        ];
+
+        let outputs = session.run(inputs)?;
+        let (_, data) = outputs[0].try_extract_tensor::<f32>()?;
+
+        let mut results = Vec::with_capacity(batch_size);
+        for i in 0..batch_size {
+            let mask_start = i * padded_len;
+            let mask: Vec<i64> = all_attention[mask_start..mask_start + padded_len].to_vec();
+            let hidden_start = i * padded_len * DIMS;
+            let hidden_end = hidden_start + padded_len * DIMS;
+            let hidden = &data[hidden_start..hidden_end];
+            let pooled = mean_pool(hidden, &mask, DIMS);
+            let norm: f32 = pooled.iter().map(|v| v * v).sum::<f32>().sqrt();
+            if norm > 0.0 {
+                let normalized: Vec<f32> = pooled.iter().map(|v| v / norm).collect();
+                results.push(normalized);
+            } else {
+                results.push(pooled);
+            }
+        }
+
         Ok(results)
     }
 
@@ -251,7 +390,11 @@ mod tests {
 
         assert_eq!(vec.len(), DIMS);
         let norm: f32 = vec.iter().map(|v| v * v).sum::<f32>().sqrt();
-        assert!((norm - 1.0).abs() < 0.01, "Should be unit normalized, got {}", norm);
+        assert!(
+            (norm - 1.0).abs() < 0.01,
+            "Should be unit normalized, got {}",
+            norm
+        );
         println!("Single embed: {:?} ({} dims)", elapsed, vec.len());
     }
 
@@ -263,7 +406,11 @@ mod tests {
             return;
         }
 
-        let texts = vec!["fn main() {}", "struct User { name: String }", "import React from 'react'"];
+        let texts = vec![
+            "fn main() {}",
+            "struct User { name: String }",
+            "import React from 'react'",
+        ];
         let start = Instant::now();
         let results = embedder.embed_batch(&texts).unwrap();
         let elapsed = start.elapsed();

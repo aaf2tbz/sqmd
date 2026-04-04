@@ -206,5 +206,27 @@ Validated the two riskiest dependencies before committing to the stack.
 | 5 — Relationship Graph | **COMPLETE** |
 | 6 — Agent API + Context Assembly | **COMPLETE** |
 | 7 — Knowledge Store | **COMPLETE** |
+| 8 — Production Hardening | **COMPLETE** |
 
 **v1.0.0 — all phases complete.**
+
+---
+
+## Phase 8: Production Hardening — COMPLETE
+
+**Goal:** Fix correctness issues and improve production readiness for the signet-sqmd integration.
+
+### What shipped
+
+- **Nomic query/document prefixes**: `embed_query()`, `embed_document()`, `embed_batch_documents()`, `embed_batch_queries()` use `search_query:` / `search_document:` prefixes for asymmetric retrieval
+- **Real batch ONNX embedding**: `embed_batch` stacks inputs into `[N, seq_len]` tensors for single forward pass (was a loop calling `embed_one`)
+- **vec_search filter parity**: `source_type_filter` and `agent_id_filter` now applied to vector search (were FTS-only, causing filter leakage)
+- **Unified SHA-256 hashing**: `Chunk::knowledge()` uses SHA-256 (was `DefaultHasher`/16-hex), matching the code indexing path (was SHA-256/64-hex)
+- **Temporal decay scoring**: Search scores multiplied by exponential decay factor (`e^(-rate * days)`, clamped to [0.1, 1.0]) based on `decay_rate` × days since `last_accessed`
+- **Multi-threaded daemon**: Each connection handled in its own thread with its own SQLite connection (was single-threaded, blocking concurrent access)
+- **chrono dependency** added for RFC3339 timestamp parsing in decay scoring
+
+### E2E validation
+
+- 61 tests (default), 70 tests (embed), 0 clippy warnings
+- Backward compatible: no schema migration needed

@@ -30,12 +30,17 @@ pub fn serve(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let listener = UnixListener::bind(&sock_path)?;
     eprintln!("sqmd daemon listening on {}", sock_path.display());
 
+    let root_owned = root.to_path_buf();
+
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {
-                if let Err(e) = handle_connection(stream, root) {
-                    eprintln!("Connection error: {e}");
-                }
+                let r = root_owned.clone();
+                std::thread::spawn(move || {
+                    if let Err(e) = handle_connection(stream, &r) {
+                        eprintln!("Connection error: {e}");
+                    }
+                });
             }
             Err(e) => eprintln!("Accept error: {e}"),
         }
@@ -59,22 +64,28 @@ fn handle_connection(stream: UnixStream, root: &Path) -> Result<(), Box<dyn std:
     let request: Request = match serde_json::from_str(line) {
         Ok(r) => r,
         Err(e) => {
-            write_response(&mut writer, Response {
-                ok: false,
-                result: None,
-                error: Some(format!("Invalid JSON: {e}")),
-            })?;
+            write_response(
+                &mut writer,
+                Response {
+                    ok: false,
+                    result: None,
+                    error: Some(format!("Invalid JSON: {e}")),
+                },
+            )?;
             return Ok(());
         }
     };
 
     let db_path = root.join(".sqmd/index.db");
     if !db_path.exists() {
-        write_response(&mut writer, Response {
-            ok: false,
-            result: None,
-            error: Some("No index found. Run sqmd init + sqmd index.".to_string()),
-        })?;
+        write_response(
+            &mut writer,
+            Response {
+                ok: false,
+                result: None,
+                error: Some("No index found. Run sqmd init + sqmd index.".to_string()),
+            },
+        )?;
         return Ok(());
     }
 
@@ -126,9 +137,14 @@ fn handle_search(db: &Connection, params: &serde_json::Value) -> Response {
     let alpha = params["alpha"].as_f64().unwrap_or(0.7);
     let file = params["file"].as_str().map(|s| s.to_string());
     let type_filter = params["type"].as_str().map(|s| s.to_string());
-    let source_types: Option<Vec<String>> = params.get("source_types")
+    let source_types: Option<Vec<String>> = params
+        .get("source_types")
         .and_then(|v| v.as_array())
-        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect());
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        });
     let agent_id = params["agent_id"].as_str().map(|s| s.to_string());
 
     if query.is_empty() {
@@ -167,7 +183,10 @@ fn handle_search(db: &Connection, params: &serde_json::Value) -> Response {
                 let serialized = serde_json::to_string(&results).unwrap_or_default();
                 Response {
                     ok: true,
-                    result: Some(serde_json::from_str(&serialized).unwrap_or(serde_json::Value::Array(vec![]))),
+                    result: Some(
+                        serde_json::from_str(&serialized)
+                            .unwrap_or(serde_json::Value::Array(vec![])),
+                    ),
                     error: None,
                 }
             }
@@ -185,7 +204,10 @@ fn handle_search(db: &Connection, params: &serde_json::Value) -> Response {
                 let serialized = serde_json::to_string(&results).unwrap_or_default();
                 Response {
                     ok: true,
-                    result: Some(serde_json::from_str(&serialized).unwrap_or(serde_json::Value::Array(vec![]))),
+                    result: Some(
+                        serde_json::from_str(&serialized)
+                            .unwrap_or(serde_json::Value::Array(vec![])),
+                    ),
                     error: None,
                 }
             }
@@ -204,16 +226,22 @@ fn handle_context(db: &Connection, params: &serde_json::Value) -> Response {
     let query = params["query"].as_str().unwrap_or("").to_string();
     let files: Vec<String> = params["files"]
         .as_array()
-        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
         .unwrap_or_default();
     let max_tokens = params["max_tokens"].as_u64().unwrap_or(8000) as usize;
     let include_deps = params["include_deps"].as_bool().unwrap_or(true);
     let dep_depth = params["dep_depth"].as_u64().unwrap_or(1) as usize;
     let top_k = params["top_k"].as_u64().unwrap_or(10) as usize;
 
-    let source_types: Option<Vec<String>> = params["source_types"]
-        .as_array()
-        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect());
+    let source_types: Option<Vec<String>> = params["source_types"].as_array().map(|arr| {
+        arr.iter()
+            .filter_map(|v| v.as_str().map(String::from))
+            .collect()
+    });
 
     let request = ContextRequest {
         query,
@@ -271,7 +299,15 @@ fn handle_get(db: &Connection, params: &serde_json::Value) -> Response {
         "SELECT line_start, line_end, name, language, content_raw FROM chunks
          WHERE file_path = ?1 AND line_start <= ?2 AND line_end >= ?2 LIMIT 1",
         rusqlite::params![file, line_num],
-        |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, r.get::<_, Option<String>>(2)?, r.get::<_, String>(3)?, r.get::<_, String>(4)?)),
+        |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, Option<String>>(2)?,
+                r.get::<_, String>(3)?,
+                r.get::<_, String>(4)?,
+            ))
+        },
     ) {
         Ok((start, end, name, language, content)) => {
             let mut md = String::new();
@@ -306,10 +342,18 @@ fn handle_get(db: &Connection, params: &serde_json::Value) -> Response {
 }
 
 fn handle_stats(db: &Connection) -> Response {
-    let files: i64 = db.query_row("SELECT COUNT(*) FROM files", [], |r| r.get(0)).unwrap_or(0);
-    let chunks: i64 = db.query_row("SELECT COUNT(*) FROM chunks", [], |r| r.get(0)).unwrap_or(0);
-    let rels: i64 = db.query_row("SELECT COUNT(*) FROM relationships", [], |r| r.get(0)).unwrap_or(0);
-    let embedded: i64 = db.query_row("SELECT COUNT(*) FROM embeddings", [], |r| r.get(0)).unwrap_or(0);
+    let files: i64 = db
+        .query_row("SELECT COUNT(*) FROM files", [], |r| r.get(0))
+        .unwrap_or(0);
+    let chunks: i64 = db
+        .query_row("SELECT COUNT(*) FROM chunks", [], |r| r.get(0))
+        .unwrap_or(0);
+    let rels: i64 = db
+        .query_row("SELECT COUNT(*) FROM relationships", [], |r| r.get(0))
+        .unwrap_or(0);
+    let embedded: i64 = db
+        .query_row("SELECT COUNT(*) FROM embeddings", [], |r| r.get(0))
+        .unwrap_or(0);
 
     Response {
         ok: true,
@@ -354,12 +398,24 @@ fn handle_embed(db: &mut Connection) -> Response {
 fn handle_embed_text(params: &serde_json::Value) -> Response {
     let text = match params["text"].as_str() {
         Some(t) => t,
-        None => return Response { ok: false, result: None, error: Some("Missing 'text' parameter".to_string()) },
+        None => {
+            return Response {
+                ok: false,
+                result: None,
+                error: Some("Missing 'text' parameter".to_string()),
+            }
+        }
     };
 
     let mut embedder = match crate::embed::Embedder::new() {
         Ok(e) => e,
-        Err(e) => return Response { ok: false, result: None, error: Some(format!("{e}")) },
+        Err(e) => {
+            return Response {
+                ok: false,
+                result: None,
+                error: Some(format!("{e}")),
+            }
+        }
     };
 
     match embedder.embed_one(text) {
@@ -372,28 +428,49 @@ fn handle_embed_text(params: &serde_json::Value) -> Response {
             })),
             error: None,
         },
-        Err(e) => Response { ok: false, result: None, error: Some(e.to_string()) },
+        Err(e) => Response {
+            ok: false,
+            result: None,
+            error: Some(e.to_string()),
+        },
     }
 }
 
 #[cfg(feature = "embed")]
 fn handle_embed_batch(params: &serde_json::Value) -> Response {
-    let texts: Vec<String> = match params.get("texts").and_then(|v| serde_json::from_value(v.clone()).ok()) {
+    let texts: Vec<String> = match params
+        .get("texts")
+        .and_then(|v| serde_json::from_value(v.clone()).ok())
+    {
         Some(v) => v,
-        None => return Response { ok: false, result: None, error: Some("Missing 'texts' array".to_string()) },
+        None => {
+            return Response {
+                ok: false,
+                result: None,
+                error: Some("Missing 'texts' array".to_string()),
+            }
+        }
     };
 
     if texts.is_empty() {
         return Response {
             ok: true,
-            result: Some(serde_json::json!({"embeddings": [], "dimensions": 768, "model": "nomic-embed-text-v1.5"})),
+            result: Some(
+                serde_json::json!({"embeddings": [], "dimensions": 768, "model": "nomic-embed-text-v1.5"}),
+            ),
             error: None,
         };
     }
 
     let mut embedder = match crate::embed::Embedder::new() {
         Ok(e) => e,
-        Err(e) => return Response { ok: false, result: None, error: Some(format!("{e}")) },
+        Err(e) => {
+            return Response {
+                ok: false,
+                result: None,
+                error: Some(format!("{e}")),
+            }
+        }
     };
 
     let text_refs: Vec<&str> = texts.iter().map(|s| s.as_str()).collect();
@@ -408,7 +485,11 @@ fn handle_embed_batch(params: &serde_json::Value) -> Response {
             })),
             error: None,
         },
-        Err(e) => Response { ok: false, result: None, error: Some(e.to_string()) },
+        Err(e) => Response {
+            ok: false,
+            result: None,
+            error: Some(e.to_string()),
+        },
     }
 }
 
@@ -440,7 +521,11 @@ fn handle_cat(db: &Connection, params: &serde_json::Value) -> Response {
     match crate::vfs::get_chunk_by_id(db, id) {
         Ok(Some(entry)) => {
             let content: String = db
-                .query_row("SELECT content_raw FROM chunks WHERE id = ?1", rusqlite::params![id], |r| r.get(0))
+                .query_row(
+                    "SELECT content_raw FROM chunks WHERE id = ?1",
+                    rusqlite::params![id],
+                    |r| r.get(0),
+                )
                 .unwrap_or_default();
             Response {
                 ok: true,
@@ -476,7 +561,13 @@ fn handle_cat(db: &Connection, params: &serde_json::Value) -> Response {
 fn handle_ingest(db: &Connection, params: &serde_json::Value) -> Response {
     let input: crate::index::KnowledgeChunk = match serde_json::from_value(params.clone()) {
         Ok(v) => v,
-        Err(e) => return Response { ok: false, result: None, error: Some(format!("Invalid ingest params: {e}")) },
+        Err(e) => {
+            return Response {
+                ok: false,
+                result: None,
+                error: Some(format!("Invalid ingest params: {e}")),
+            }
+        }
     };
 
     let ingestor = crate::index::KnowledgeIngestor::new(db);
@@ -486,14 +577,27 @@ fn handle_ingest(db: &Connection, params: &serde_json::Value) -> Response {
             result: Some(serde_json::to_value(&result).unwrap_or_default()),
             error: None,
         },
-        Err(e) => Response { ok: false, result: None, error: Some(e.to_string()) },
+        Err(e) => Response {
+            ok: false,
+            result: None,
+            error: Some(e.to_string()),
+        },
     }
 }
 
 fn handle_ingest_batch(db: &Connection, params: &serde_json::Value) -> Response {
-    let chunks: Vec<crate::index::KnowledgeChunk> = match params.get("chunks").and_then(|v| serde_json::from_value(v.clone()).ok()) {
+    let chunks: Vec<crate::index::KnowledgeChunk> = match params
+        .get("chunks")
+        .and_then(|v| serde_json::from_value(v.clone()).ok())
+    {
         Some(v) => v,
-        None => return Response { ok: false, result: None, error: Some("Missing 'chunks' array".to_string()) },
+        None => {
+            return Response {
+                ok: false,
+                result: None,
+                error: Some("Missing 'chunks' array".to_string()),
+            }
+        }
     };
 
     let ingestor = crate::index::KnowledgeIngestor::new(db);
@@ -503,14 +607,24 @@ fn handle_ingest_batch(db: &Connection, params: &serde_json::Value) -> Response 
             result: Some(serde_json::to_value(&result).unwrap_or_default()),
             error: None,
         },
-        Err(e) => Response { ok: false, result: None, error: Some(e.to_string()) },
+        Err(e) => Response {
+            ok: false,
+            result: None,
+            error: Some(e.to_string()),
+        },
     }
 }
 
 fn handle_forget(db: &Connection, params: &serde_json::Value) -> Response {
     let chunk_id = match params["id"].as_i64() {
         Some(id) => id,
-        None => return Response { ok: false, result: None, error: Some("Missing 'id' parameter".to_string()) },
+        None => {
+            return Response {
+                ok: false,
+                result: None,
+                error: Some("Missing 'id' parameter".to_string()),
+            }
+        }
     };
 
     let ingestor = crate::index::KnowledgeIngestor::new(db);
@@ -520,18 +634,29 @@ fn handle_forget(db: &Connection, params: &serde_json::Value) -> Response {
             result: Some(serde_json::json!({"deleted": found})),
             error: None,
         },
-        Err(e) => Response { ok: false, result: None, error: Some(e.to_string()) },
+        Err(e) => Response {
+            ok: false,
+            result: None,
+            error: Some(e.to_string()),
+        },
     }
 }
 
 fn handle_modify(db: &Connection, params: &serde_json::Value) -> Response {
     let chunk_id = match params["id"].as_i64() {
         Some(id) => id,
-        None => return Response { ok: false, result: None, error: Some("Missing 'id' parameter".to_string()) },
+        None => {
+            return Response {
+                ok: false,
+                result: None,
+                error: Some("Missing 'id' parameter".to_string()),
+            }
+        }
     };
 
     let importance = params["importance"].as_f64();
-    let tags: Option<Vec<String>> = params.get("tags")
+    let tags: Option<Vec<String>> = params
+        .get("tags")
         .and_then(|v| serde_json::from_value(v.clone()).ok());
 
     let ingestor = crate::index::KnowledgeIngestor::new(db);
@@ -541,7 +666,11 @@ fn handle_modify(db: &Connection, params: &serde_json::Value) -> Response {
             result: Some(serde_json::json!({"modified": true})),
             error: None,
         },
-        Err(e) => Response { ok: false, result: None, error: Some(e.to_string()) },
+        Err(e) => Response {
+            ok: false,
+            result: None,
+            error: Some(e.to_string()),
+        },
     }
 }
 

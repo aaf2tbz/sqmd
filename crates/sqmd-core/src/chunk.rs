@@ -139,11 +139,21 @@ impl ChunkType {
     pub fn is_code(&self) -> bool {
         matches!(
             self,
-            ChunkType::Function | ChunkType::Method | ChunkType::Class
-                | ChunkType::Interface | ChunkType::Type | ChunkType::Module
-                | ChunkType::Section | ChunkType::Import | ChunkType::Export
-                | ChunkType::Macro | ChunkType::Trait | ChunkType::Impl
-                | ChunkType::Enum | ChunkType::Struct | ChunkType::Constant
+            ChunkType::Function
+                | ChunkType::Method
+                | ChunkType::Class
+                | ChunkType::Interface
+                | ChunkType::Type
+                | ChunkType::Module
+                | ChunkType::Section
+                | ChunkType::Import
+                | ChunkType::Export
+                | ChunkType::Macro
+                | ChunkType::Trait
+                | ChunkType::Impl
+                | ChunkType::Enum
+                | ChunkType::Struct
+                | ChunkType::Constant
         )
     }
 
@@ -183,11 +193,10 @@ impl Chunk {
         importance: f64,
     ) -> Self {
         let hash = {
-            use std::collections::hash_map::DefaultHasher;
-            use std::hash::{Hash, Hasher};
-            let mut h = DefaultHasher::new();
-            content.hash(&mut h);
-            format!("{:016x}", h.finish())
+            use sha2::{Digest, Sha256};
+            let mut hasher = Sha256::new();
+            hasher.update(content.as_bytes());
+            format!("{:x}", hasher.finalize())
         };
         Self {
             file_path: format!("signet://{}", source_type.as_str()),
@@ -213,7 +222,9 @@ impl Chunk {
         if self.source_type != SourceType::Code {
             return self.render_knowledge_md();
         }
-        let sig_line = self.signature.as_deref()
+        let sig_line = self
+            .signature
+            .as_deref()
             .map(|s| format!("\n**Signature:** `{}`", s))
             .unwrap_or_default();
         format!(
@@ -236,7 +247,9 @@ impl Chunk {
     }
 
     fn render_knowledge_md(&self) -> String {
-        let tags_line = self.tags.as_ref()
+        let tags_line = self
+            .tags
+            .as_ref()
             .map(|t| format!("\n**Tags:** {}", t.join(", ")))
             .unwrap_or_default();
         format!(

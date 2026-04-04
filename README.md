@@ -230,7 +230,7 @@ agent query: "how does authentication work"
 
 1. **Raw code, not Markdown.** `content_raw` stores the original source. Markdown is derived on demand via `Chunk::render_md()`. Source of truth stays in the code.
 
-2. **Content-hash decision pipeline.** Every chunk gets a SHA-256 hash. On re-index, only changed chunks are updated. Zero-mutation runs produce zero writes.
+2. **Content-hash decision pipeline.** Every chunk gets a SHA-256 hash. On re-index, only changed chunks are updated. Zero-mutation runs produce zero writes. Code chunks and knowledge chunks both use SHA-256 — no algorithm mismatch.
 
 3. **Soft-delete with retention.** Deleted files are tombstoned, not hard-deleted. `sqmd prune --days N` purges old tombstones. Prevents data loss during re-indexes.
 
@@ -241,6 +241,12 @@ agent query: "how does authentication work"
 6. **Unified code + knowledge store.** Code chunks and knowledge chunks (facts, decisions, preferences) live in the same table with source type discrimination. One query searches both.
 
 7. **Single binary, zero network.** Everything runs locally. SQLite does the heavy lifting (FTS5, WAL mode, recursive CTEs). No server, no API keys, no external services.
+
+8. **Multi-threaded daemon.** Each client connection is handled in its own thread with its own SQLite connection (WAL mode supports concurrent readers + single writer). Pipeline, dreaming, and embedding health checks no longer block each other.
+
+9. **Asymmetric retrieval.** Nomic query/document prefixes (`search_query:`, `search_document:`) improve recall for Q&A workloads by encoding queries and documents differently.
+
+10. **Temporal decay.** Knowledge chunks can decay over time via an exponential decay function on `decay_rate` × days since `last_accessed`, preventing stale knowledge from dominating search results.
 
 ## Quick Start
 
@@ -413,8 +419,21 @@ sqmd blends two search modes with configurable alpha weighting:
 - **Vector KNN** (semantic): cosine similarity via sqlite-vec on 768-dim embeddings (nomic-embed-text-v1.5)
 - **Hint bridging**: prospective hints bridge the semantic gap between agent language and code names
 - **Graph boost**: entity graph density (in-degree, contains count) boosts structural importance
+- **Decay scoring**: knowledge chunks with a `decay_rate` lose relevance over time via exponential decay based on days since `last_accessed`
 
 Default: `alpha=0.7` (70% vector, 30% keyword). Single-source penalty (0.8) downranks chunks that appear in only one ranking.
+
+### Asymmetric Retrieval
+
+Embeddings use nomic-embed-text-v1.5's `search_query:` / `search_document:` prefixes for asymmetric retrieval. Documents are embedded with `search_document:` and queries with `search_query:`, which significantly improves recall quality for question-answering workloads.
+
+### Real Batch Embedding
+
+`embed_batch` performs actual batched ONNX inference — inputs are stacked into `[N, seq_len]` tensors and run in a single forward pass, rather than looping through `embed_one` N times. This provides meaningful throughput gains for bulk embedding operations.
+
+### Filter Parity
+
+Both FTS and vector search respect the same filters: `file`, `type`, `source_types`, and `agent_id`. Previously, vector search only accepted file and type filters, meaning `source_type` and `agent_id` scoping could leak non-matching code chunks into results.
 
 Embeddings use ONNX Runtime (ort) with a quantized model cached at `~/.sqmd/models/`. Auto-downloads on first `sqmd embed` if missing.
 
@@ -460,7 +479,7 @@ sqmd/
 
 ## Current Status
 
-v1.0.0. All 7 phases complete. 62 tests (default), 70 tests (embed), 0 clippy warnings, CI passing.
+v1.1.0. All 7 phases complete + production hardening. 61 tests (default), 70 tests (embed), 0 clippy warnings, CI passing.
 
 | Phase | What it adds |
 |-------|-------------|
@@ -472,6 +491,17 @@ v1.0.0. All 7 phases complete. 62 tests (default), 70 tests (embed), 0 clippy wa
 | 5 -- Relationship Graph | Cross-file call graph + recursive CTE depth traversal |
 | 6 -- Agent API | Daemon mode, context assembly, token budgets |
 | 7 -- Knowledge Store | Schema v4, knowledge types, ingest/forget/modify, unified search |
+
+### v1.1.0 Changes (production hardening)
+
+| Change | What it fixes |
+|--------|--------------|
+| **Nomic query/document prefixes** | `embed_query()` / `embed_document()` / `embed_batch_documents()` / `embed_batch_queries()` use `search_query:` / `search_document:` prefixes for asymmetric retrieval |
+| **Real batch ONNX embedding** | `embed_batch` stacks inputs into `[N, seq_len]` tensors for single forward pass instead of looping `embed_one` N times |
+| **vec_search filter parity** | `source_type_filter` and `agent_id_filter` now applied to vector search, not just FTS |
+| **Unified SHA-256 hashing** | `Chunk::knowledge()` now uses SHA-256 (64-hex) matching code indexing path, fixing dedup when same content enters via both paths |
+| **Temporal decay scoring** | Search scores multiplied by exponential decay factor based on `decay_rate` × days since `last_accessed` |
+| **Multi-threaded daemon** | Each connection handled in its own thread with its own SQLite connection (WAL mode) |
 
 ## Daemon Protocol
 

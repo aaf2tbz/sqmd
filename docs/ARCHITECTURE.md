@@ -125,7 +125,7 @@ sqmd prune --days N -> purge old tombstones
 
 ## SQLite Schema
 
-See [`schema.sql`](./schema.sql) for the base DDL. Schema v3 adds entity and soft-delete tables.
+See [`schema.sql`](./schema.sql) for the base DDL. Schema v4 adds entity, soft-delete, and knowledge tables.
 
 ### Tables
 
@@ -145,9 +145,9 @@ See [`schema.sql`](./schema.sql) for the base DDL. Schema v3 adds entity and sof
 
 ### Key Design Decisions
 
-1. **WAL mode** -- Enables concurrent reads during writes. Agent queries never block indexing.
+1. **WAL mode** -- Enables concurrent reads during writes. Agent queries never block indexing. Multi-threaded daemon opens one connection per client thread.
 
-2. **Content hash dedup** -- SHA-256 of the raw source text for each chunk. Decision pipeline uses this to SKIP unchanged chunks on re-index.
+2. **Content hash dedup** -- SHA-256 of the raw source text for each chunk. Used consistently for both code chunks and knowledge chunks. Decision pipeline uses this to SKIP unchanged chunks on re-index.
 
 3. **FTS5 content-sync triggers** -- `chunks_fts` stays in sync with `chunks` automatically via INSERT/UPDATE/DELETE triggers.
 
@@ -165,6 +165,16 @@ See [`schema.sql`](./schema.sql) for the base DDL. Schema v3 adds entity and sof
 
 10. **Structural importance** -- Graph density (in-degree, contains count, constraint count) boosts chunk importance scores. Highly-depended-upon code ranks higher in search.
 
+11. **Asymmetric retrieval** -- Query embeddings use `search_query:` prefix and document embeddings use `search_document:` prefix (nomic-embed-text-v1.5). This separates the embedding space for queries vs. documents, improving recall for question-answering workloads.
+
+12. **Real batch ONNX inference** -- `embed_batch` stacks inputs into `[N, seq_len]` tensors for a single forward pass rather than looping `embed_one` N times. Meaningful throughput gains for bulk embedding.
+
+13. **Temporal decay** -- Knowledge chunks can have a `decay_rate` (exponential decay per day since `last_accessed`). Search scores are multiplied by the decay factor, preventing stale knowledge from dominating results. Decay is clamped to [0.1, 1.0] to prevent total suppression.
+
+14. **Filter parity** -- Both FTS5 and vector search respect the same filter set: `file`, `type`, `source_type`, `agent_id`. No filter leakage between search modes.
+
+15. **Multi-threaded daemon** -- Each client connection spawns its own thread with its own SQLite connection. WAL mode handles concurrency. Pipeline operations, embedding health checks, and agent queries no longer block each other.
+
 ## Embedding Model
 
 **Model:** `nomic-embed-text-v1.5` (q8 quantized)
@@ -174,6 +184,14 @@ See [`schema.sql`](./schema.sql) for the base DDL. Schema v3 adds entity and sof
 **Cache:** `~/.sqmd/models/`
 
 Feature-gated behind `--features embed`. Default binary is ~10MB; embed binary is ~27MB.
+
+### Asymmetric Retrieval
+
+Documents are embedded with the `search_document:` prefix and queries with the `search_query:` prefix. This leverages nomic-embed-text-v1.5's task-specific instruction format to create separate embedding spaces for documents and queries, improving recall quality for question-answering workloads.
+
+### Batch Embedding
+
+`embed_batch` (and variants `embed_batch_documents` / `embed_batch_queries`) performs real batched inference. Inputs are tokenized and padded to the longest sequence in the batch, stacked into `[batch_size, seq_len]` tensors, and run through a single ONNX forward pass. Output is split per-sequence and individually mean-pooled and normalized.
 
 ## Pipeline Intelligence
 
@@ -219,17 +237,17 @@ sqmd/
 |   +-- sqmd-core/
 |   |   +-- src/
 |   |   |   +-- lib.rs
-|   |   |   +-- schema.rs          # SQLite DDL + migrations (v3)
-|   |   |   +-- chunk.rs           # Chunk struct + ChunkType + render_md()
+|   |   |   +-- schema.rs          # SQLite DDL + migrations (v4)
+|   |   |   +-- chunk.rs           # Chunk struct + ChunkType + SourceType + render_md()
 |   |   |   +-- chunker.rs         # LanguageChunker trait + FileChunker fallback
 |   |   |   +-- index.rs           # Transactional indexer + decision pipeline
 |   |   |   +-- entities.rs        # Entity/aspect/attribute model + hints + graph boost
 |   |   |   +-- embed.rs           # ONNX embedding (ort) + BPE tokenizer
-|   |   |   +-- search.rs          # FTS5 + hints + vector + hybrid search
+|   |   |   +-- search.rs          # FTS5 + hints + vector + hybrid + decay search
 |   |   |   +-- relationships.rs   # Import resolution + call graph + CTE traversal
 |   |   |   +-- context.rs         # Token-budgeted context assembly
 |   |   |   +-- vfs.rs             # Virtual file system: list, get, diff, tree
-|   |   |   +-- daemon.rs          # Unix socket daemon + JSON protocol
+|   |   |   +-- daemon.rs          # Unix socket daemon + JSON protocol (multi-threaded)
 |   |   |   +-- watcher.rs         # File watcher + debounce
 |   |   |   +-- files.rs           # Language detection + file walking + hashing
 |   |   |   +-- languages/
