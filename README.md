@@ -132,15 +132,18 @@ sqmd/
 | 2 — Tree-sitter | Done | TS/Rust/Python chunkers, relationships, importance |
 | 3 — Incremental | Next | File watcher, hash-based change detection |
 | 4 — Embeddings | MVP | Vector search, hybrid scoring |
-| 5 — Call graph | Future | Cross-file call graph + traversal |
-| 6 — Agent API | Future | Daemon mode, context assembly, token budgets |
-| 7 — Signet | Future | Replace LLM-heavy extraction pipeline |
+| 5 — Call graph | Done | Cross-file call graph + depth traversal |
+| 6 — Agent API | Done | Daemon mode, context assembly, token budgets |
 
-**28 tests, 0 clippy warnings, CI passing.** Binary: ~5MB release build.
+**51 tests, 0 clippy warnings, CI passing.** Binary: ~10MB release build.
+
+## How It's Used
+
+sqmd is a standalone SQLite + Markdown file system for code. Plug it into any AI agent, editor, or tool that needs fast, structured access to code. It replaces ad-hoc file reads and grep with semantically chunked, queryable code intelligence.
 
 ## What It Replaces
 
-sqmd is designed to replace LLM-heavy extraction pipelines (like Signet's) where per-session costs include 3-5 LLM calls for transcript extraction, fact extraction, decision-making, and synthesis. sqmd uses deterministic parsing, embedding, and scoring instead — cutting LLM costs by 60-80% with better recall.
+sqmd replaces ad-hoc file reads, blind grep searches, and manual context stitching. Instead of burning tokens on entire files, agents query sqmd for the exact chunks they need — with dependencies and structure — assembled into token-budgeted Markdown.
 
 ## License
 

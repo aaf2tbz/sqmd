@@ -180,36 +180,6 @@ Given a query or working files:
 
 ---
 
-## Phase 7: Signet Integration (Future)
-
-**Goal:** Replace Signet's LLM-heavy extraction pipeline with sqmd.
-
-### 7.1 Replace extraction worker
-
-- Current: transcript → LLM extract → LLM decide → write (3 calls)
-- New: transcript → sqmd chunk → embed → deterministic dedup → write (0 calls)
-
-### 7.2 Replace decision worker
-
-- Content hash dedup (exact match)
-- Cosine similarity dedup (threshold 0.95)
-- Importance scoring: recency + turn density + error count (from transcript structure)
-
-### 7.3 Replace synthesis worker
-
-- Query sqmd for top-scored recent chunks
-- Template-based MEMORY.md assembly (no LLM render)
-- Optional: single lightweight LLM pass for prose smoothing
-
-### 7.4 Migration path
-
-- Add `chunks` table to existing `memories.db`
-- Parallel indexing (sqmd + legacy) during transition
-- Switch read path to sqmd chunks
-- Deprecate legacy extraction pipeline
-
----
-
 ## Dependency Risk Matrix
 
 | Dependency | Risk | Status |
@@ -236,6 +206,5 @@ Given a query or working files:
 | 4 — Embeddings + Vector Search | **COMPLETE** |
 | 5 — Relationship Graph | Future |
 | 6 — Agent API + Context Assembly | Future |
-| 7 — Signet Integration | Future |
 
-**MVP (usable by agents) after Phase 4.**
+**MVP reached after Phase 6.**

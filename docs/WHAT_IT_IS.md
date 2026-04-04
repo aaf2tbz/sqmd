@@ -10,7 +10,7 @@ Every AI agent that reads code does it poorly. Here's why:
 
 3. **No structural awareness.** When an agent finds the auth middleware, it has no idea what the middleware imports, what calls it, or what it depends on. It has to make separate tool calls to trace each dependency manually.
 
-4. **LLM-burning extraction pipelines.** Systems like Signet use 3-5 LLM calls per session to extract, classify, decide on, and synthesize memories from transcripts. This is slow, expensive, and often wrong.
+4. **Expensive extraction pipelines.** Many code intelligence tools rely on cloud APIs or LLM calls for code understanding — slow, expensive, and offline-incapable.
 
 5. **Context assembly is ad hoc.** Agents manually stitch together file reads, grep results, and glob matches into something coherent. There's no system that assembles a token-budgeted, structured context from a codebase.
 
@@ -72,5 +72,3 @@ sqmd is a local-first code index that makes codebases fully queryable by agents 
 **Primary:** Agent context retrieval — the system that answers "what code do I need to read right now?" for AI coding assistants.
 
 **Secondary:** Codebase navigation for humans — a CLI that understands code structure better than any grep.
-
-**Integration target:** Memory and extraction pipelines (Signet, etc.) that currently rely on LLM calls for code understanding.
