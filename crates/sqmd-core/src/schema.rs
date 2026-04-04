@@ -26,6 +26,12 @@ pub fn init(db: &mut Connection) -> SqlResult<()> {
 
     if version == 0 {
         db.execute_batch(include_str!("../../../docs/schema.sql"))?;
+        db.execute_batch("CREATE VIRTUAL TABLE IF NOT EXISTS chunks_vec USING vec0(embedding float[768]);").ok();
+        db.execute_batch(&format!(
+            "INSERT OR IGNORE INTO schema_version (version) VALUES ({})",
+            CURRENT_VERSION
+        ))?;
+        return Ok(());
     }
 
     if version < 2 {
@@ -442,6 +448,12 @@ mod tests {
 
     #[test]
     fn test_schema_creates_tables() {
+        #[allow(clippy::missing_transmute_annotations)]
+        unsafe {
+            rusqlite::ffi::sqlite3_auto_extension(Some(std::mem::transmute(
+                sqlite3_vec_init as *const (),
+            )));
+        }
         let mut db = Connection::open_in_memory().unwrap();
         init(&mut db).unwrap();
         let files: i64 = db
