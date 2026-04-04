@@ -137,34 +137,83 @@ sqmd's overhead is the cost of making code actually queryable. At 2.1x raw sourc
 
 ## How sqmd Works
 
+### Index
+
 ```
-source files
+source files (TS, Rust, Python, Go, Java, or fallback line-based)
     |
-    v tree-sitter (per-language AST)
-+------------------------------+
-|  Chunk: raw code + metadata  |
-|  name, signature, type,      |
-|  line range, importance,     |
-|  file path, language         |
-+------+-----------------------+
-       |
-       +--> SQLite chunks table (structured data + raw code)
-       +--> FTS5 index (keyword search on code + names)
-       +--> sqlite-vec (768-dim vector embeddings, KNN)
-       +--> relationships table (imports + contains + calls)
-                    |
-                    v
-           Hybrid Search Engine
-           (FTS5 + vector + graph)
-                    |
-                    v
-           Chunk::render_md() -> on-demand Markdown
-                    |
-                    v
-           Agent context injection
+    v tree-sitter (per-language grammar -> AST)
+    |
+    v AST walker extracts declarations
+    |
+    +--> function, method, class, struct, trait, enum,
+    |    interface, type, import, module chunks
+    |
+    +--> each chunk stores:
+    |    content_raw (original source code, NOT markdown)
+    |    name, signature, chunk_type
+    |    file_path, language, line_start, line_end
+    |    content_hash (SHA-256), importance (0.0-1.0)
+    |
+    v decision pipeline (content_hash comparison)
+    +--> SKIP:     hash unchanged -> 0 mutations
+    +--> UPDATE:   hash changed   -> re-chunk, update DB
+    +--> TOMBSTONE: file deleted  -> soft-delete (is_deleted=1)
 ```
 
-**Key design choice:** sqmd stores raw source code in the database, not pre-rendered Markdown. Markdown is derived on demand via `Chunk::render_md()` at query time. This keeps the source of truth in the code itself and avoids stale renderings.
+### Store
+
+```
+chunk
+    |
+    +--> chunks table       (raw code + metadata)
+    +--> chunks_fts          (FTS5 auto-sync via triggers)
+    +--> relationships       (imports, contains, calls)
+    +--> entities            (files, structs, functions, etc.)
+    +--> entity_aspects      (exports, implementation, constraints)
+    +--> entity_attributes   (per-chunk annotations linked to entities)
+    +--> entity_dependencies (entity-level dependency edges)
+    +--> hints + hints_fts   (prospective natural-language queries)
+    +--> structural importance (graph density: in-degree, contains count)
+    +--> chunks_vec          (768-dim embeddings via sqlite-vec, optional)
+```
+
+### Query
+
+```
+agent query: "how does authentication work"
+    |
+    +--> FTS5 MATCH          (keyword search on chunks_fts)
+    +--> hints_fts MATCH     (prospective hint bridging)
+    +--> graph boost         (entity graph density ranking)
+    +--> sqlite-vec KNN      (cosine similarity, optional)
+    |
+    v normalize + alpha-blend (default 70% vector / 30% keyword)
+    |
+    v top-K results
+    |
+    v optional: dependency expansion (recursive CTE, depth N)
+    |
+    v token budget -> trim to limit
+    |
+    v Chunk::render_md() -> on-demand Markdown for each chunk
+    |
+    v assembled context -> agent
+```
+
+### Key Design Decisions
+
+1. **Raw code, not Markdown.** `content_raw` stores the original source. Markdown is derived on demand via `Chunk::render_md()`. Source of truth stays in the code.
+
+2. **Content-hash decision pipeline.** Every chunk gets a SHA-256 hash. On re-index, only changed chunks are updated. Zero-mutation runs produce zero writes.
+
+3. **Soft-delete with retention.** Deleted files are tombstoned, not hard-deleted. `sqmd prune --days N` purges old tombstones. Prevents data loss during re-indexes.
+
+4. **Prospective hints.** Natural-language queries like "how does authenticate work" are generated per chunk and indexed in FTS5. Bridges the gap between code names and agent language.
+
+5. **Graph density as relevance signal.** Highly-depended-upon code (high in-degree, many contains edges) gets boosted in search. A utility function called by 50 modules ranks higher than a private helper.
+
+6. **Single binary, zero network.** Everything runs locally. SQLite does the heavy lifting (FTS5, WAL mode, recursive CTEs). No server, no API keys, no external services.
 
 ## Quick Start
 
