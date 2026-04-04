@@ -154,6 +154,31 @@ Validated the two riskiest dependencies before committing to the stack.
 
 ---
 
+## Phase 7: Knowledge Store — COMPLETE
+
+**Goal:** Unified code + knowledge store with external ingest API.
+
+### What shipped
+
+- **Schema v4 migration**: extends chunks table with 6 new columns (source_type, agent_id, tags, decay_rate, last_accessed, created_by)
+- **6 new chunk types**: fact, summary, entity_description, document_section, preference, decision
+- **5 new source types**: code, memory, transcript, document, entity
+- **SourceType enum** with `as_str()` / `from_str_name()` and `#[default]`
+- **6 new relationship types**: contradicts, supersedes, elaborates, derived_from, mentioned_in, relates_to
+- **KnowledgeIngestor**: `ingest()`, `ingest_batch()`, `forget()`, `modify()` with content-hash dedup
+- **CLI commands**: `sqmd ingest`, `sqmd forget`, `sqmd modify`
+- **Daemon methods**: `ingest`, `ingest_batch`, `forget`, `modify`, `embed_text`, `embed_batch`
+- **Search filters**: `--source-type`, `--agent-id` for scoped queries
+- **Integration test**: knowledge ingest + unified search E2E
+
+### E2E validation
+
+- 62 tests (default), 70 tests (embed), 0 clippy warnings
+- Knowledge chunks coexist with code chunks in unified search
+- Content-hash dedup prevents duplicate ingest
+
+---
+
 ## Dependency Risk Matrix
 
 | Dependency | Risk | Status |
@@ -180,5 +205,6 @@ Validated the two riskiest dependencies before committing to the stack.
 | 4 — Embeddings + Vector Search | **COMPLETE** |
 | 5 — Relationship Graph | **COMPLETE** |
 | 6 — Agent API + Context Assembly | **COMPLETE** |
+| 7 — Knowledge Store | **COMPLETE** |
 
-**MVP reached after Phase 6.**
+**v1.0.0 — all phases complete.**

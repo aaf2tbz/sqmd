@@ -1,12 +1,12 @@
 # sqmd
 
-**Local-first code intelligence for AI agents. A single Rust binary, zero network.**
+**Local-first code and knowledge intelligence for AI agents. A single Rust binary, zero network.**
 
-sqmd indexes any codebase into a SQLite database of semantically chunked source code with tree-sitter parsing, FTS5 keyword search, vector embeddings, and an import/call relationship graph. Zero external services. Works offline.
+sqmd indexes any codebase into a SQLite database of semantically chunked source code with tree-sitter parsing, FTS5 keyword search, vector embeddings, and an import/call relationship graph. It also accepts external knowledge — facts, decisions, preferences, transcripts — alongside code chunks. Zero external services. Works offline.
 
 | Build | Stripped size | What's included |
 |-------|--------------|-----------------|
-| `cargo build --release` | ~10MB | Chunking, FTS5, relationships, call graph, daemon |
+| `cargo build --release` | ~10MB | Chunking, FTS5, relationships, call graph, daemon, knowledge ingest |
 | `cargo build --release --features embed` | ~27MB | + ONNX Runtime, vector search, hybrid scoring |
 
 ## Benchmarks
@@ -24,10 +24,10 @@ All measurements taken on the sqmd codebase itself (27 files, 20 `.rs` source fi
 | Full context markdown | 387 KB | 1.8x | All code + metadata, no search, no query |
 | JSONL vector store (no embeddings) | 408 KB | 1.9x | Documents + metadata, needs external DB |
 | JSONL + vector embeddings (768d) | 1,660 KB | 7.8x | Vectors + content, needs Chroma/Pinecone |
-| **sqmd (default)** | **904 KB** | **4.2x** | Chunks + FTS5 + relationships + contains + call graph |
+| **sqmd (default)** | **904 KB** | **4.2x** | Chunks + FTS5 + relationships + contains + call graph + knowledge |
 | **sqmd (with embeddings)** | **~2.5 MB** | **11.7x** | All above + 768-dim vector search + hybrid scoring |
 
-sqmd at 4.2x raw source stores everything needed: chunked code with names, signatures, types, importance scores, FTS5 full-text index, import/call/contains relationships, and a query engine. No external services.
+sqmd at 4.2x raw source stores everything needed: chunked code with names, signatures, types, importance scores, FTS5 full-text index, import/call/contains relationships, entity graph, prospective hints, and a unified knowledge store. No external services.
 
 ### Token Efficiency
 
@@ -67,6 +67,7 @@ Most code intelligence approaches fall into three categories. Here's how they co
 | **Token efficiency** | Dump everything | Query but no relevance ranking | Relevance-ranked + budget-aware |
 | **Entity graph** | None | Manual tables | Auto-built from code structure |
 | **Semantic hints** | None | None | Prospective FTS5 bridge |
+| **Knowledge ingest** | Manual | Manual | Built-in API (facts, decisions, preferences) |
 | **Offline** | Yes | Yes | Yes |
 | **Network required** | No | No | No |
 | **External services** | None | None | None |
@@ -88,13 +89,15 @@ Agents today often get code context as markdown files -- concatenated source, ha
 You could build a SQLite database yourself. But you'd need to:
 
 1. Write a code parser or use tree-sitter bindings in your language
-2. Design a schema that handles chunks, relationships, embeddings, entities
+2. Design a schema that handles chunks, relationships, embeddings, entities, knowledge
 3. Build an FTS5 index with content-sync triggers
 4. Implement a vector search extension (sqlite-vec)
 5. Write an embedding pipeline with ONNX Runtime
 6. Build a change detection system (content hashes, decision pipeline)
 7. Implement a relationship extractor (imports, calls, contains)
 8. Build a token-budgeting context assembler
+9. Add entity graph with aspects and attributes
+10. Build knowledge ingest with source type discrimination
 
 That's everything sqmd already does, in a single binary.
 
@@ -114,6 +117,8 @@ That's everything sqmd already does, in a single binary.
 | Prospective hint indexing | No | No | Built-in |
 | Graph-boosted search ranking | No | DIY | Built-in |
 | Soft-delete with retention decay | No | DIY | Built-in |
+| Knowledge ingest (facts, decisions, etc.) | No | DIY | Built-in |
+| Multi-agent scoping (agent_id) | No | DIY | Built-in |
 | Token-budgeted context assembly | No | DIY | Built-in |
 | On-demand Markdown rendering | N/A | N/A | Built-in |
 | Unix socket daemon + JSON protocol | No | DIY | Built-in |
@@ -129,11 +134,11 @@ Measured on a 243-file TypeScript codebase (~45K lines, 986 KB source):
 | Concatenated markdown | 1,024 KB | No | grep only |
 | Custom SQLite (chunks + FTS5 only) | ~1.8 MB | Partial | Keyword only |
 | Custom SQLite (chunks + FTS5 + relationships) | ~2.4 MB | Partial | + graph traversal |
-| **sqmd (default)** | **~2.1 MB** | **Full** | **FTS5 + hints + graph** |
+| **sqmd (default)** | **~2.1 MB** | **Full** | **FTS5 + hints + graph + knowledge** |
 | **sqmd (embed)** | **~4.8 MB** | **Full** | **+ vector hybrid** |
 | Custom SQLite (all features, hand-built) | ~5 MB+ | Full | Depends on implementation |
 
-sqmd's overhead is the cost of making code actually queryable. At 2.1x raw source (default) or 4.9x (with embeddings), you get structured search, relationship traversal, entity graph, and token-efficient context assembly. Building equivalent functionality yourself costs more in storage and orders of magnitude more in development time.
+sqmd's overhead is the cost of making code and knowledge actually queryable. At 2.1x raw source (default) or 4.9x (with embeddings), you get structured search, relationship traversal, entity graph, knowledge types, and token-efficient context assembly. Building equivalent functionality yourself costs more in storage and orders of magnitude more in development time.
 
 ## How sqmd Works
 
@@ -151,9 +156,10 @@ source files (TS, Rust, Python, Go, Java, or fallback line-based)
     |
     +--> each chunk stores:
     |    content_raw (original source code, NOT markdown)
-    |    name, signature, chunk_type
+    |    name, signature, chunk_type, source_type
     |    file_path, language, line_start, line_end
     |    content_hash (SHA-256), importance (0.0-1.0)
+    |    agent_id, tags, decay_rate, created_by
     |
     v decision pipeline (content_hash comparison)
     +--> SKIP:     hash unchanged -> 0 mutations
@@ -161,14 +167,31 @@ source files (TS, Rust, Python, Go, Java, or fallback line-based)
     +--> TOMBSTONE: file deleted  -> soft-delete (is_deleted=1)
 ```
 
+### Knowledge Ingest (external API)
+
+```
+external system (Signet, agent, user)
+    |
+    v KnowledgeChunk { content, chunk_type, source_type, ... }
+    |
+    +--> fact, summary, decision, preference,
+    |    entity_description, document_section
+    |
+    v content-hash dedup -> skip if exists
+    |
+    v INSERT into chunks table
+    v generate prospective hints
+    v create optional relationships
+```
+
 ### Store
 
 ```
-chunk
+chunk (code or knowledge)
     |
-    +--> chunks table       (raw code + metadata)
+    +--> chunks table       (raw code + metadata + knowledge fields)
     +--> chunks_fts          (FTS5 auto-sync via triggers)
-    +--> relationships       (imports, contains, calls)
+    +--> relationships       (imports, contains, calls, contradicts, ...)
     +--> entities            (files, structs, functions, etc.)
     +--> entity_aspects      (exports, implementation, constraints)
     +--> entity_attributes   (per-chunk annotations linked to entities)
@@ -189,6 +212,8 @@ agent query: "how does authentication work"
     +--> sqlite-vec KNN      (cosine similarity, optional)
     |
     v normalize + alpha-blend (default 70% vector / 30% keyword)
+    |
+    v filter by source_type, agent_id, tags
     |
     v top-K results
     |
@@ -213,7 +238,9 @@ agent query: "how does authentication work"
 
 5. **Graph density as relevance signal.** Highly-depended-upon code (high in-degree, many contains edges) gets boosted in search. A utility function called by 50 modules ranks higher than a private helper.
 
-6. **Single binary, zero network.** Everything runs locally. SQLite does the heavy lifting (FTS5, WAL mode, recursive CTEs). No server, no API keys, no external services.
+6. **Unified code + knowledge store.** Code chunks and knowledge chunks (facts, decisions, preferences) live in the same table with source type discrimination. One query searches both.
+
+7. **Single binary, zero network.** Everything runs locally. SQLite does the heavy lifting (FTS5, WAL mode, recursive CTEs). No server, no API keys, no external services.
 
 ## Quick Start
 
@@ -247,6 +274,8 @@ sqmd search "User" --type Struct             # filter by chunk type
 sqmd search "config" --file src/config.rs    # filter by file
 sqmd search "parsing" --alpha 0.8            # vector weight (requires embed feature)
 sqmd search "authenticate" --keyword         # keyword-only (skip vector)
+sqmd search "decision" --source-type memory # search only knowledge chunks
+sqmd search "auth" --agent-id agent-1        # scope to an agent
 ```
 
 ### Browsing
@@ -259,6 +288,15 @@ sqmd ls --type function              # filter by type
 sqmd cat 42                          # get chunk by database ID
 sqmd get src/auth.ts:42              # get chunk at file:line
 sqmd diff "2025-01-01T00:00:00"      # chunks modified since timestamp
+```
+
+### Knowledge Ingest
+
+```bash
+sqmd ingest --content "User prefers dark mode" --type preference --tags "ui,display"
+sqmd ingest --content "Auth uses JWT tokens" --type fact --source-type memory --importance 0.8
+sqmd forget 42                        # soft-delete a knowledge chunk
+sqmd modify 42 --importance 0.9 --tags "security,auth"
 ```
 
 ### Maintenance
@@ -296,6 +334,8 @@ sqmd --json search "auth"   # machine-readable results
 
 ## What Gets Indexed
 
+### Code Chunk Types
+
 | Chunk Type | Examples | Importance |
 |-----------|----------|------------|
 | Function | `fn main()`, `def process()`, `const authenticate = ()`, `func Handle()` | 0.9 |
@@ -306,7 +346,30 @@ sqmd --json search "auth"   # machine-readable results
 | Import | `import { X }`, `use crate::module`, `from module import X` | 0.3 |
 | Module/Section | Top-level unclaimed code, file-level constants | 0.2-0.5 |
 
-Each chunk stores: raw source code, file path, language, line range, name, signature, importance score. Unclaimed lines between declarations are grouped into section chunks (max ~50 lines).
+### Knowledge Chunk Types
+
+| Chunk Type | Source | Importance |
+|-----------|--------|------------|
+| Decision | memory | 0.8 |
+| Preference | memory | 0.75 |
+| Fact | memory / transcript | 0.7 |
+| Entity description | entity | 0.65 |
+| Summary | document | 0.6 |
+| Document section | document | 0.5 |
+
+### Source Types
+
+| Source Type | Origin | Description |
+|------------|--------|-------------|
+| `code` | tree-sitter indexer | Parsed source code chunks |
+| `memory` | external ingest | Facts, decisions, preferences |
+| `transcript` | external ingest | Conversation summaries |
+| `document` | external ingest | Document sections, summaries |
+| `entity` | external ingest | Entity descriptions |
+
+### Knowledge Columns
+
+Each chunk stores: raw content, source type, optional agent ID (multi-agent scoping), JSON tags, decay rate (for retention scoring), last accessed timestamp, and created-by pipeline stage.
 
 ## Languages Supported
 
@@ -323,11 +386,22 @@ Other languages fall back to a line-based `FileChunker` that splits at section b
 
 ## Relationships
 
-sqmd extracts three kinds of relationships automatically:
+sqmd extracts relationships automatically from code and supports manual creation for knowledge:
+
+### Code Relationships
 
 - **`imports`** -- cross-file: `import { X } from './path'`, `use crate::module::Item`, `from module import X`, `"fmt"`, `import java.net.http`
 - **`contains`** -- intra-file: class->method, impl->method, module->function, trait->method, struct->fields
 - **`calls`** -- cross-file: regex-based call graph extraction resolved against imported symbols
+
+### Knowledge Relationships
+
+- **`contradicts`** -- knowledge chunks that conflict
+- **`supersedes`** -- newer chunk replaces older
+- **`elaborates`** -- chunk expands on another
+- **`derived_from`** -- chunk was derived from source material
+- **`mentioned_in`** -- chunk is referenced by another
+- **`relates_to`** -- generic association
 
 Query with `sqmd deps <file> --depth N` to traverse the graph bidirectionally.
 
@@ -337,6 +411,8 @@ sqmd blends two search modes with configurable alpha weighting:
 
 - **FTS5** (keyword): fast exact/near-match on code text, function names, signatures
 - **Vector KNN** (semantic): cosine similarity via sqlite-vec on 768-dim embeddings (nomic-embed-text-v1.5)
+- **Hint bridging**: prospective hints bridge the semantic gap between agent language and code names
+- **Graph boost**: entity graph density (in-degree, contains count) boosts structural importance
 
 Default: `alpha=0.7` (70% vector, 30% keyword). Single-source penalty (0.8) downranks chunks that appear in only one ranking.
 
@@ -349,17 +425,17 @@ sqmd/
 +-- crates/
 |   +-- sqmd-core/          # library
 |   |   +-- src/
-|   |   |   +-- schema.rs        # SQLite schema + migrations + chunks_vec
-|   |   |   +-- chunk.rs         # Chunk struct + ChunkType + render_md()
+|   |   |   +-- schema.rs        # SQLite DDL + migrations (v4)
+|   |   |   +-- chunk.rs         # Chunk struct + ChunkType + SourceType + render_md()
 |   |   |   +-- chunker.rs       # LanguageChunker trait + FileChunker fallback
-|   |   |   +-- index.rs         # Transactional indexer (chunks + contains + calls)
+|   |   |   +-- index.rs         # Transactional indexer + decision pipeline + KnowledgeIngestor
 |   |   |   +-- embed.rs         # ONNX embedding (ort) + BPE tokenizer + auto-download
 |   |   |   +-- search.rs        # FTS5 + vector hybrid search engine
 |   |   |   +-- relationships.rs  # Import resolution + call graph + CTE depth traversal
-|   |   |   +-- entities.rs     # Entity/aspect/attribute model + hints + graph boost
+|   |   |   +-- entities.rs      # Entity/aspect/attribute model + hints + graph boost
 |   |   |   +-- context.rs       # Context assembly + token budgeting
 |   |   |   +-- vfs.rs           # Virtual file system: list, get, diff, tree rendering
-|   |   |   +-- daemon.rs        # Unix socket daemon + JSON protocol
+|   |   |   +-- daemon.rs        # Unix socket daemon + JSON protocol + knowledge handlers
 |   |   |   +-- watcher.rs       # notify file watcher + 200ms debounce
 |   |   |   +-- files.rs         # Language detection + file walking + hashing
 |   |   |   +-- languages/
@@ -368,6 +444,8 @@ sqmd/
 |   |   |       +-- python.rs      # Python chunker + import extraction
 |   |   |       +-- go.rs          # Go chunker + func/type/import extraction
 |   |   |       +-- java.rs        # Java chunker + class/interface/enum + imports
+|   |   +-- tests/
+|   |   |   +-- knowledge_integration.rs  # Knowledge ingest + search E2E test
 |   |   +-- Cargo.toml
 |   +-- sqmd-cli/           # binary (named `sqmd`)
 |       +-- Cargo.toml
@@ -382,7 +460,7 @@ sqmd/
 
 ## Current Status
 
-All 6 phases complete. Pipeline intelligence features added. 61 tests (default), 69 tests (embed), 0 clippy warnings, CI passing.
+v1.0.0. All 7 phases complete. 62 tests (default), 70 tests (embed), 0 clippy warnings, CI passing.
 
 | Phase | What it adds |
 |-------|-------------|
@@ -393,6 +471,7 @@ All 6 phases complete. Pipeline intelligence features added. 61 tests (default),
 | 4 -- Embeddings | Vector search, hybrid scoring, model auto-download |
 | 5 -- Relationship Graph | Cross-file call graph + recursive CTE depth traversal |
 | 6 -- Agent API | Daemon mode, context assembly, token budgets |
+| 7 -- Knowledge Store | Schema v4, knowledge types, ingest/forget/modify, unified search |
 
 ## Daemon Protocol
 
@@ -400,15 +479,22 @@ All 6 phases complete. Pipeline intelligence features added. 61 tests (default),
 
 ```json
 {"method": "search", "params": {"query": "authentication", "top_k": 10}}
+{"method": "search", "params": {"query": "decision", "source_types": ["memory"]}}
 {"method": "context", "params": {"query": "how does auth work", "max_tokens": 8000, "include_deps": true}}
 {"method": "stats", "params": {}}
 {"method": "index_file", "params": {"path": "src/main.rs"}}
 {"method": "embed", "params": {}}
+{"method": "embed_text", "params": {"text": "hello world"}}
+{"method": "embed_batch", "params": {"texts": ["hello", "world"]}}
+{"method": "ingest", "params": {"content": "User prefers dark mode", "chunk_type": "preference", "tags": ["ui"]}}
+{"method": "ingest_batch", "params": {"chunks": [...]}}
+{"method": "forget", "params": {"id": 42}}
+{"method": "modify", "params": {"id": 42, "importance": 0.9, "tags": ["security"]}}
 {"method": "ls", "params": {"file": "src/auth.ts", "depth": 1}}
 {"method": "cat", "params": {"id": 42}}
 ```
 
-> `embed` method and hybrid search require `--features embed`. Without it, `search` uses FTS5 keyword matching.
+> `embed`, `embed_text`, `embed_batch` methods and hybrid search require `--features embed`. Without it, `search` uses FTS5 keyword matching.
 
 ## License
 
