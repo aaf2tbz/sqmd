@@ -69,7 +69,9 @@ impl PythonChunker {
                 }
 
                 let node_to_chunk = if child.kind() == "decorated_definition" { child } else { fn_node };
-                chunks.push(make_chunk(source, node_to_chunk, file_path, "python", ChunkType::Method, name.as_deref(), sig.as_deref(), metadata));
+                if let Some(chunk) = make_chunk(source, node_to_chunk, file_path, "python", ChunkType::Method, name.as_deref(), sig.as_deref(), metadata) {
+                    chunks.push(chunk);
+                }
             }
         }
     }
@@ -92,18 +94,24 @@ impl LanguageChunker for PythonChunker {
 
             match kind {
                 "import_statement" | "import_from_statement" | "future_import_statement" => {
-                    chunks.push(make_chunk(source, child, file_path, "python", ChunkType::Import, None, None, serde_json::Map::new()));
+                    if let Some(chunk) = make_chunk(source, child, file_path, "python", ChunkType::Import, None, None, serde_json::Map::new()) {
+                        chunks.push(chunk);
+                    }
                 }
                 "function_definition" => {
                     let name = self.extract_name(child, source);
                     let sig = self.extract_signature(child, source);
 
                     let metadata = serde_json::Map::new();
-                    chunks.push(make_chunk(source, child, file_path, "python", ChunkType::Function, name.as_deref(), sig.as_deref(), metadata));
+                    if let Some(chunk) = make_chunk(source, child, file_path, "python", ChunkType::Function, name.as_deref(), sig.as_deref(), metadata) {
+                        chunks.push(chunk);
+                    }
                 }
                 "class_definition" => {
                     let name = self.extract_name(child, source);
-                    chunks.push(make_chunk(source, child, file_path, "python", ChunkType::Class, name.as_deref(), None, serde_json::Map::new()));
+                    if let Some(chunk) = make_chunk(source, child, file_path, "python", ChunkType::Class, name.as_deref(), None, serde_json::Map::new()) {
+                        chunks.push(chunk);
+                    }
                     self.extract_class_methods(child, source, file_path, chunks);
                 }
                 "expression_statement" => {
@@ -116,7 +124,9 @@ impl LanguageChunker for PythonChunker {
                                 if name.chars().all(|c| c.is_uppercase() || c == '_') && name.contains('_') {
                                     let mut metadata = serde_json::Map::new();
                                     metadata.insert("constant".to_string(), serde_json::Value::Bool(true));
-                                    chunks.push(make_chunk(source, child, file_path, "python", ChunkType::Constant, Some(name), None, metadata));
+                                    if let Some(chunk) = make_chunk(source, child, file_path, "python", ChunkType::Constant, Some(name), None, metadata) {
+                                        chunks.push(chunk);
+                                    }
                                 }
                             }
                         }
@@ -145,6 +155,7 @@ impl LanguageChunker for PythonChunker {
                 if effective_end > effective_start {
                     let text: String = source_lines[effective_start..effective_end].join("\n");
                     if !text.trim().is_empty() {
+                        let hash = crate::files::content_hash(text.as_bytes());
                         chunks.push(Chunk {
                             file_path: file_path.to_string(),
                             language: "python".to_string(),
@@ -153,11 +164,9 @@ impl LanguageChunker for PythonChunker {
                             signature: None,
                             line_start: effective_start,
                             line_end: effective_end,
-                            content_md: format!(
-                                "### (unclaimed)\n\n**File:** `{}`\n**Lines:** {}-{}\n\n```\n{}\n```",
-                                file_path, effective_start + 1, effective_end + 1, text
-                            ),
-                            content_hash: crate::files::content_hash(text.as_bytes()),
+                            content_raw: text,
+                            content_hash: hash,
+                            importance: ChunkType::Section.importance(),
                             metadata: serde_json::Map::new(),
                         });
                     }
@@ -170,6 +179,7 @@ impl LanguageChunker for PythonChunker {
             let effective_end = std::cmp::min(total_lines, gap_start + max_gap);
             let text: String = source_lines[gap_start..effective_end].join("\n");
             if !text.trim().is_empty() {
+                let hash = crate::files::content_hash(text.as_bytes());
                 chunks.push(Chunk {
                     file_path: file_path.to_string(),
                     language: "python".to_string(),
@@ -178,11 +188,9 @@ impl LanguageChunker for PythonChunker {
                     signature: None,
                     line_start: gap_start,
                     line_end: effective_end,
-                    content_md: format!(
-                        "### (unclaimed)\n\n**File:** `{}`\n**Lines:** {}-{}\n\n```\n{}\n```",
-                        file_path, gap_start + 1, effective_end + 1, text
-                    ),
-                    content_hash: crate::files::content_hash(text.as_bytes()),
+                    content_raw: text,
+                    content_hash: hash,
+                    importance: ChunkType::Section.importance(),
                     metadata: serde_json::Map::new(),
                 });
             }

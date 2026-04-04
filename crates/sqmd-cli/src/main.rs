@@ -127,7 +127,7 @@ fn cmd_index(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
         "  {} files scanned, {} indexed, {} skipped, {} deleted",
         stats.files_scanned, stats.files_indexed, stats.files_skipped, stats.files_deleted
     );
-    println!("  {} total chunks", stats.chunks_total);
+    println!("  {} total chunks, {} relationships", stats.chunks_total, stats.relationships_total);
 
     Ok(())
 }
@@ -135,7 +135,7 @@ fn cmd_index(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
 fn cmd_search(query: &str, top_k: usize) -> Result<(), Box<dyn std::error::Error>> {
     let db = ensure_db()?;
     let mut stmt = db.prepare(
-        "SELECT c.file_path, c.name, c.line_start, c.line_end, c.chunk_type, snippet(chunks_fts, 0, '>>>', '<<<', '...', 24)
+        "SELECT c.file_path, c.name, c.line_start, c.line_end, c.chunk_type, snippet(chunks_fts, 2, '>>>', '<<<', '...', 32)
          FROM chunks_fts f JOIN chunks c ON f.rowid = c.id
          WHERE chunks_fts MATCH ?1
          ORDER BY f.rank
@@ -183,6 +183,7 @@ fn cmd_stats() -> Result<(), Box<dyn std::error::Error>> {
 
     let files: i64 = db.query_row("SELECT COUNT(*) FROM files", [], |r| r.get(0))?;
     let chunks: i64 = db.query_row("SELECT COUNT(*) FROM chunks", [], |r| r.get(0))?;
+    let rels: i64 = db.query_row("SELECT COUNT(*) FROM relationships", [], |r| r.get(0))?;
     let langs: Vec<(String, i64)> = {
         let mut stmt = db.prepare(
             "SELECT language, COUNT(*) FROM chunks GROUP BY language ORDER BY COUNT(*) DESC LIMIT 10"
@@ -203,6 +204,7 @@ fn cmd_stats() -> Result<(), Box<dyn std::error::Error>> {
     println!("=====================");
     println!("Files indexed: {}", files);
     println!("Total chunks:  {}", chunks);
+    println!("Relationships:  {}", rels);
     println!("DB size:       {} KB", db_size / 1024);
     println!();
     println!("By language:");
@@ -226,18 +228,20 @@ fn cmd_get(location: &str) -> Result<(), Box<dyn std::error::Error>> {
     let line_num: i64 = line.parse()?;
 
     let db = ensure_db()?;
-    let result: Option<(i64, i64, String, String)> = db.query_row(
-        "SELECT line_start, line_end, name, content_md FROM chunks
+    let result: Option<(i64, i64, String, String, String)> = db.query_row(
+        "SELECT line_start, line_end, name, language, content_raw FROM chunks
          WHERE file_path = ?1 AND line_start <= ?2 AND line_end >= ?2
          LIMIT 1",
         rusqlite::params![file, line_num],
-        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
     ).ok();
 
     match result {
-        Some((start, end, name, content)) => {
+        Some((start, end, name, language, content)) => {
             println!("Chunk: {} (lines {}-{})", name, start + 1, end + 1);
+            println!("```{}", language);
             println!("{}", content);
+            println!("```");
         }
         None => {
             println!("No chunk found at {}:{}", file, line);
@@ -305,7 +309,6 @@ fn cmd_reset() -> Result<(), Box<dyn std::error::Error>> {
         std::fs::remove_file(&path)?;
         println!("Removed index at {}", path.display());
     }
-    // Also remove WAL/SHM
     let wal = path.with_extension("db-wal");
     let shm = path.with_extension("db-shm");
     let _ = std::fs::remove_file(&wal);

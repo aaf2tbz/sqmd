@@ -74,7 +74,7 @@ impl LanguageChunker for TypeScriptChunker {
             let kind = child.kind();
 
             if kind == "import_statement" || kind == "import_declaration" {
-                chunks.push(make_chunk(
+                if let Some(chunk) = make_chunk(
                     source,
                     child,
                     file_path,
@@ -83,7 +83,9 @@ impl LanguageChunker for TypeScriptChunker {
                     None,
                     None,
                     serde_json::Map::new(),
-                ));
+                ) {
+                    chunks.push(chunk);
+                }
                 continue;
             }
 
@@ -110,19 +112,21 @@ impl LanguageChunker for TypeScriptChunker {
                         let mut metadata = serde_json::Map::new();
                         metadata.insert("exported".to_string(), serde_json::Value::Bool(true));
 
-                        let mut all_chunks = Vec::new();
+                        let mut all_chunks: Vec<Option<Chunk>> = Vec::new();
                         all_chunks.push(make_chunk(source, named_child, file_path, "typescript", ct, name.as_deref(), sig.as_deref(), metadata));
 
                         if inner_kind == "class_declaration" {
                             Self::extract_class_members(named_child, source, file_path, &mut all_chunks);
                         }
 
-                        chunks.extend(all_chunks);
+                        chunks.extend(all_chunks.into_iter().flatten());
                         continue;
                     }
                 }
                 let name = self.extract_name(child, source);
-                chunks.push(make_chunk(source, child, file_path, "typescript", ChunkType::Export, name.as_deref(), None, serde_json::Map::new()));
+                if let Some(chunk) = make_chunk(source, child, file_path, "typescript", ChunkType::Export, name.as_deref(), None, serde_json::Map::new()) {
+                    chunks.push(chunk);
+                }
                 continue;
             }
 
@@ -144,14 +148,15 @@ impl LanguageChunker for TypeScriptChunker {
                     metadata.insert("exported".to_string(), serde_json::Value::Bool(true));
                 }
 
-                let mut all_chunks = Vec::new();
+                let mut all_chunks: Vec<Option<Chunk>> = Vec::new();
                 all_chunks.push(make_chunk(source, child, file_path, "typescript", ct, name.as_deref(), sig.as_deref(), metadata));
+
 
                 if kind == "class_declaration" {
                     Self::extract_class_members(child, source, file_path, &mut all_chunks);
                 }
 
-                chunks.extend(all_chunks);
+                chunks.extend(all_chunks.into_iter().flatten());
                 continue;
             }
         }
@@ -232,7 +237,7 @@ impl LanguageChunker for TypeScriptChunker {
                     if effective_end > effective_start {
                         let text: String = source_lines[effective_start..effective_end].join("\n");
                         if !text.trim().is_empty() {
-                            chunks.push(make_chunk(
+                            if let Some(chunk) = make_chunk(
                                 source,
                                 tree.root_node(),
                                 file_path,
@@ -241,7 +246,9 @@ impl LanguageChunker for TypeScriptChunker {
                                 None,
                                 None,
                                 serde_json::Map::new(),
-                            ));
+                            ) {
+                                chunks.push(chunk);
+                            }
                         }
                     }
                 }
@@ -261,13 +268,14 @@ impl LanguageChunker for TypeScriptChunker {
                     signature: None,
                     line_start: gap_start,
                     line_end: effective_end,
-                    content_md: format!(
+                    content_raw: format!(
                         "### (unclaimed)\n\n**File:** `{}`\n**Lines:** {}-{}\n\n```\n{}\n```",
                         file_path,
                         gap_start + 1,
                         effective_end + 1,
                         text
                     ),
+                    importance: ChunkType::Section.importance(),
                     content_hash: crate::files::content_hash(text.as_bytes()),
                     metadata: serde_json::Map::new(),
                 });
@@ -277,7 +285,7 @@ impl LanguageChunker for TypeScriptChunker {
 }
 
 impl TypeScriptChunker {
-    fn extract_class_members(class_node: Node, source: &str, file_path: &str, chunks: &mut Vec<Chunk>) {
+    fn extract_class_members(class_node: Node, source: &str, file_path: &str, chunks: &mut Vec<Option<Chunk>>) {
         let body = match class_node.child_by_field_name("body") {
             Some(b) => b,
             None => return,
@@ -343,7 +351,7 @@ const MAX_RETRIES = 3;
         assert!(func.is_some(), "Should find a function chunk");
         let func = func.unwrap();
         assert_eq!(func.name.as_deref(), Some("authenticateUser"));
-        assert!(func.content_md.contains("async function authenticateUser"));
+        assert!(func.content_raw.contains("async function authenticateUser"));
         assert!(func.metadata.contains_key("exported"));
 
         let imp = chunks.iter().find(|c| c.chunk_type == ChunkType::Import);

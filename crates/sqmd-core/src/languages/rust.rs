@@ -63,7 +63,9 @@ impl RustChunker {
                         let mut metadata = serde_json::Map::new();
                         metadata.insert("impl_member".to_string(), serde_json::Value::Bool(true));
 
-                        chunks.push(make_chunk(source, item, file_path, "rust", ct, name.as_deref(), sig.as_deref(), metadata));
+                        if let Some(chunk) = make_chunk(source, item, file_path, "rust", ct, name.as_deref(), sig.as_deref(), metadata) {
+                            chunks.push(chunk);
+                        }
                     }
                 }
             }
@@ -85,7 +87,9 @@ impl RustChunker {
                     let mut metadata = serde_json::Map::new();
                     metadata.insert("impl_member".to_string(), serde_json::Value::Bool(true));
 
-                    chunks.push(make_chunk(source, child, file_path, "rust", ct, name.as_deref(), sig.as_deref(), metadata));
+                    if let Some(chunk) = make_chunk(source, child, file_path, "rust", ct, name.as_deref(), sig.as_deref(), metadata) {
+                        chunks.push(chunk);
+                    }
                 }
             }
         }
@@ -109,7 +113,9 @@ impl LanguageChunker for RustChunker {
 
             match kind {
                 "use_declaration" => {
-                    chunks.push(make_chunk(source, child, file_path, "rust", ChunkType::Import, None, None, serde_json::Map::new()));
+                    if let Some(chunk) = make_chunk(source, child, file_path, "rust", ChunkType::Import, None, None, serde_json::Map::new()) {
+                        chunks.push(chunk);
+                    }
                 }
                 "function_item" => {
                     let name = self.extract_name(child, source);
@@ -117,55 +123,73 @@ impl LanguageChunker for RustChunker {
                     let is_pub = self.extract_visibility(child);
                     let mut metadata = serde_json::Map::new();
                     metadata.insert("public".to_string(), serde_json::Value::Bool(is_pub));
-                    chunks.push(make_chunk(source, child, file_path, "rust", ChunkType::Function, name.as_deref(), sig.as_deref(), metadata));
+                    if let Some(chunk) = make_chunk(source, child, file_path, "rust", ChunkType::Function, name.as_deref(), sig.as_deref(), metadata) {
+                        chunks.push(chunk);
+                    }
                 }
                 "struct_item" => {
                     let name = self.extract_name(child, source);
                     let is_pub = self.extract_visibility(child);
                     let mut metadata = serde_json::Map::new();
                     metadata.insert("public".to_string(), serde_json::Value::Bool(is_pub));
-                    chunks.push(make_chunk(source, child, file_path, "rust", ChunkType::Struct, name.as_deref(), None, metadata));
+                    if let Some(chunk) = make_chunk(source, child, file_path, "rust", ChunkType::Struct, name.as_deref(), None, metadata) {
+                        chunks.push(chunk);
+                    }
                 }
                 "enum_item" => {
                     let name = self.extract_name(child, source);
                     let is_pub = self.extract_visibility(child);
                     let mut metadata = serde_json::Map::new();
                     metadata.insert("public".to_string(), serde_json::Value::Bool(is_pub));
-                    chunks.push(make_chunk(source, child, file_path, "rust", ChunkType::Enum, name.as_deref(), None, metadata));
+                    if let Some(chunk) = make_chunk(source, child, file_path, "rust", ChunkType::Enum, name.as_deref(), None, metadata) {
+                        chunks.push(chunk);
+                    }
                 }
                 "trait_item" => {
                     let name = self.extract_name(child, source);
-                    chunks.push(make_chunk(source, child, file_path, "rust", ChunkType::Trait, name.as_deref(), None, serde_json::Map::new()));
+                    if let Some(chunk) = make_chunk(source, child, file_path, "rust", ChunkType::Trait, name.as_deref(), None, serde_json::Map::new()) {
+                        chunks.push(chunk);
+                    }
                     self.extract_impl_items(child, source, file_path, chunks);
                 }
                 "impl_item" => {
                     let name = self.extract_name(child, source);
-                    chunks.push(make_chunk(source, child, file_path, "rust", ChunkType::Impl, name.as_deref(), None, serde_json::Map::new()));
+                    if let Some(chunk) = make_chunk(source, child, file_path, "rust", ChunkType::Impl, name.as_deref(), None, serde_json::Map::new()) {
+                        chunks.push(chunk);
+                    }
                     self.extract_impl_items(child, source, file_path, chunks);
                 }
                 "mod_item" => {
                     let name = self.extract_name(child, source);
-                    chunks.push(make_chunk(source, child, file_path, "rust", ChunkType::Module, name.as_deref(), None, serde_json::Map::new()));
+                    if let Some(chunk) = make_chunk(source, child, file_path, "rust", ChunkType::Module, name.as_deref(), None, serde_json::Map::new()) {
+                        chunks.push(chunk);
+                    }
                 }
                 "const_item" | "static_item" => {
                     let name = self.extract_name(child, source);
                     let is_pub = self.extract_visibility(child);
                     let mut metadata = serde_json::Map::new();
                     metadata.insert("public".to_string(), serde_json::Value::Bool(is_pub));
-                    chunks.push(make_chunk(source, child, file_path, "rust", ChunkType::Constant, name.as_deref(), None, metadata));
+                    if let Some(chunk) = make_chunk(source, child, file_path, "rust", ChunkType::Constant, name.as_deref(), None, metadata) {
+                        chunks.push(chunk);
+                    }
                 }
                 "type_item" => {
                     let name = self.extract_name(child, source);
                     let is_pub = self.extract_visibility(child);
                     let mut metadata = serde_json::Map::new();
                     metadata.insert("public".to_string(), serde_json::Value::Bool(is_pub));
-                    chunks.push(make_chunk(source, child, file_path, "rust", ChunkType::Type, name.as_deref(), None, metadata));
+                    if let Some(chunk) = make_chunk(source, child, file_path, "rust", ChunkType::Type, name.as_deref(), None, metadata) {
+                        chunks.push(chunk);
+                    }
                 }
                 "macro_invocation" => {
                     let text = child.utf8_text(source.as_bytes()).unwrap_or("");
                     let name = text.lines().next().unwrap_or("").trim();
                     if name.len() <= 80 && !name.starts_with('#') {
-                        chunks.push(make_chunk(source, child, file_path, "rust", ChunkType::Macro, Some(name), None, serde_json::Map::new()));
+                        if let Some(chunk) = make_chunk(source, child, file_path, "rust", ChunkType::Macro, Some(name), None, serde_json::Map::new()) {
+                            chunks.push(chunk);
+                        }
                     }
                 }
                 _ => {}
@@ -229,10 +253,8 @@ impl LanguageChunker for RustChunker {
                             signature: None,
                             line_start: effective_start,
                             line_end: effective_end,
-                            content_md: format!(
-                                "### (unclaimed)\n\n**File:** `{}`\n**Lines:** {}-{}\n\n```\n{}\n```",
-                                file_path, effective_start + 1, effective_end + 1, text
-                            ),
+                            content_raw: text.clone(),
+                            importance: ChunkType::Section.importance(),
                             content_hash: crate::files::content_hash(text.as_bytes()),
                             metadata: serde_json::Map::new(),
                         });
@@ -254,10 +276,8 @@ impl LanguageChunker for RustChunker {
                     signature: None,
                     line_start: gap_start,
                     line_end: effective_end,
-                    content_md: format!(
-                        "### (unclaimed)\n\n**File:** `{}`\n**Lines:** {}-{}\n\n```\n{}\n```",
-                        file_path, gap_start + 1, effective_end + 1, text
-                    ),
+                    content_raw: text.clone(),
+                    importance: ChunkType::Section.importance(),
                     content_hash: crate::files::content_hash(text.as_bytes()),
                     metadata: serde_json::Map::new(),
                 });

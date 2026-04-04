@@ -1,10 +1,6 @@
 -- sqmd SQLite Schema
 -- Source: https://github.com/user/sqmd
--- Version: 0.1.0
-
-PRAGMA journal_mode = WAL;
-PRAGMA foreign_keys = ON;
-PRAGMA busy_timeout = 5000;
+-- Version: 0.2.0
 
 -- ============================================================
 -- Source file metadata
@@ -19,7 +15,6 @@ CREATE TABLE IF NOT EXISTS files (
     indexed_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
-CREATE INDEX IF NOT EXISTS idx_files_hash ON files(hash);
 CREATE INDEX IF NOT EXISTS idx_files_language ON files(language);
 
 -- ============================================================
@@ -39,10 +34,10 @@ CREATE TABLE IF NOT EXISTS chunks (
     signature    TEXT,
     line_start   INTEGER NOT NULL,
     line_end     INTEGER NOT NULL,
-    content_md   TEXT NOT NULL,
+    content_raw  TEXT NOT NULL,
     content_hash TEXT NOT NULL,
-    metadata     TEXT,
     importance   REAL NOT NULL DEFAULT 0.5 CHECK(importance >= 0.0 AND importance <= 1.0),
+    metadata     TEXT,
     created_at   TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at   TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -91,44 +86,34 @@ CREATE TABLE IF NOT EXISTS embeddings (
 -- ============================================================
 
 CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
-    content_md,
     name,
     signature,
+    content_raw,
     file_path,
     content='chunks',
     content_rowid='id',
-    tokenize='porter unicode61'
+    tokenize='unicode61'
 );
 
--- Triggers to keep FTS5 in sync with chunks table
-
 CREATE TRIGGER IF NOT EXISTS chunks_fts_insert AFTER INSERT ON chunks BEGIN
-    INSERT INTO chunks_fts(rowid, content_md, name, signature, file_path)
-    VALUES (new.id, new.content_md, new.name, new.signature, new.file_path);
+    INSERT INTO chunks_fts(rowid, name, signature, content_raw, file_path)
+    VALUES (new.id, new.name, new.signature, new.content_raw, new.file_path);
 END;
 
 CREATE TRIGGER IF NOT EXISTS chunks_fts_delete AFTER DELETE ON chunks BEGIN
-    INSERT INTO chunks_fts(chunks_fts, rowid, content_md, name, signature, file_path)
-    VALUES ('delete', old.id, old.content_md, old.name, old.signature, old.file_path);
+    INSERT INTO chunks_fts(chunks_fts, rowid, name, signature, content_raw, file_path)
+    VALUES ('delete', old.id, old.name, old.signature, old.content_raw, old.file_path);
 END;
 
 CREATE TRIGGER IF NOT EXISTS chunks_fts_update AFTER UPDATE ON chunks BEGIN
-    INSERT INTO chunks_fts(chunks_fts, rowid, content_md, name, signature, file_path)
-    VALUES ('delete', old.id, old.content_md, old.name, old.signature, old.file_path);
-    INSERT INTO chunks_fts(rowid, content_md, name, signature, file_path)
-    VALUES (new.id, new.content_md, new.name, new.signature, new.file_path);
+    INSERT INTO chunks_fts(chunks_fts, rowid, name, signature, content_raw, file_path)
+    VALUES ('delete', old.id, old.name, old.signature, old.content_raw, old.file_path);
+    INSERT INTO chunks_fts(rowid, name, signature, content_raw, file_path)
+    VALUES (new.id, new.name, new.signature, new.content_raw, new.file_path);
 END;
 
 -- ============================================================
--- sqlite-vec vector search (loaded dynamically)
--- If sqlite-vec is not available, use embeddings table + Rust KNN
--- ============================================================
-
--- This table is created at runtime if sqlite-vec extension loads:
--- CREATE VIRTUAL TABLE chunks_vec USING vec0(embedding float[768]);
-
--- ============================================================
--- Indexing metadata
+-- Schema versioning
 -- ============================================================
 
 CREATE TABLE IF NOT EXISTS schema_version (

@@ -2,32 +2,95 @@ use rusqlite::{Connection, Result as SqlResult};
 use sqlite_vec::sqlite3_vec_init;
 use std::path::Path;
 
-pub const SCHEMA_SQL: &str = include_str!("../../../docs/schema.sql");
+const CURRENT_VERSION: i64 = 2;
 
-#[allow(clippy::missing_transmute_annotations)]
 pub fn init(db: &mut Connection) -> SqlResult<()> {
+    #[allow(clippy::missing_transmute_annotations)]
     unsafe {
         rusqlite::ffi::sqlite3_auto_extension(Some(std::mem::transmute(
             sqlite3_vec_init as *const (),
         )));
     }
-    db.execute_batch("SELECT 1;")?;
     db.execute_batch("PRAGMA journal_mode = WAL;")?;
     db.execute_batch("PRAGMA foreign_keys = ON;")?;
     db.execute_batch("PRAGMA busy_timeout = 5000;")?;
 
-    let has_schema: bool = db
+    let version: i64 = db
         .query_row(
-            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='files'",
+            "SELECT COALESCE(MAX(version), 0) FROM schema_version",
             [],
-            |r| r.get::<_, i64>(0),
+            |r| r.get(0),
         )
+        .unwrap_or(0);
+
+    if version == 0 {
+        db.execute_batch(include_str!("../../../docs/schema.sql"))?;
+    }
+
+    if version < 2 {
+        migrate_v2(db)?;
+    }
+
+    Ok(())
+}
+
+fn migrate_v2(db: &mut Connection) -> SqlResult<()> {
+    let has_raw: bool = db
+        .prepare("SELECT COUNT(*) FROM pragma_table_info('chunks') WHERE name='content_raw'")?
+        .query_row([], |r| r.get::<_, i64>(0))
         .map(|c| c > 0)
         .unwrap_or(false);
 
-    if !has_schema {
-        db.execute_batch(SCHEMA_SQL)?;
+    if !has_raw {
+        db.execute_batch("ALTER TABLE chunks ADD COLUMN content_raw TEXT;")?;
+        db.execute_batch("UPDATE chunks SET content_raw = '' WHERE content_raw IS NULL;")?;
     }
+
+    let has_importance: bool = db
+        .prepare("SELECT COUNT(*) FROM pragma_table_info('chunks') WHERE name='importance'")?
+        .query_row([], |r| r.get::<_, i64>(0))
+        .map(|c| c > 0)
+        .unwrap_or(false);
+
+    if !has_importance {
+        db.execute_batch("ALTER TABLE chunks ADD COLUMN importance REAL NOT NULL DEFAULT 0.5;")?;
+    }
+
+    db.execute_batch("DROP TABLE IF EXISTS chunks_fts;")?;
+    db.execute_batch(
+        "CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
+            name, signature, content_raw, file_path,
+            content='chunks', content_rowid='id',
+            tokenize='unicode61'
+        );",
+    )?;
+    db.execute_batch(
+        "CREATE TRIGGER IF NOT EXISTS chunks_fts_insert AFTER INSERT ON chunks BEGIN
+            INSERT INTO chunks_fts(rowid, name, signature, content_raw, file_path)
+            VALUES (new.id, new.name, new.signature, new.content_raw, new.file_path);
+        END;",
+    )?;
+    db.execute_batch(
+        "CREATE TRIGGER IF NOT EXISTS chunks_fts_delete AFTER DELETE ON chunks BEGIN
+            INSERT INTO chunks_fts(chunks_fts, rowid, name, signature, content_raw, file_path)
+            VALUES ('delete', old.id, old.name, old.signature, old.content_raw, old.file_path);
+        END;",
+    )?;
+    db.execute_batch(
+        "CREATE TRIGGER IF NOT EXISTS chunks_fts_update AFTER UPDATE ON chunks BEGIN
+            INSERT INTO chunks_fts(chunks_fts, rowid, name, signature, content_raw, file_path)
+            VALUES ('delete', old.id, old.name, old.signature, old.content_raw, old.file_path);
+            INSERT INTO chunks_fts(rowid, name, signature, content_raw, file_path)
+            VALUES (new.id, new.name, new.signature, new.content_raw, new.file_path);
+        END;",
+    )?;
+
+    db.execute_batch("CREATE VIRTUAL TABLE IF NOT EXISTS chunks_vec USING vec0(embedding float[768]);").ok();
+
+    db.execute_batch(&format!(
+        "INSERT INTO schema_version (version) VALUES ({})",
+        CURRENT_VERSION
+    ))?;
 
     Ok(())
 }
@@ -60,13 +123,40 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='chunks_fts'", [], |r| r.get(0))
             .unwrap();
         assert!(fts > 0);
+
+        let vec_table: i64 = db
+            .query_row("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='chunks_vec'", [], |r| r.get(0))
+            .unwrap();
+        assert!(vec_table > 0);
+    }
+
+    #[test]
+    fn test_schema_version() {
+        let mut db = Connection::open_in_memory().unwrap();
+        init(&mut db).unwrap();
+        let version: i64 = db
+            .query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, CURRENT_VERSION);
+    }
+
+    #[test]
+    fn test_chunks_has_content_raw() -> Result<(), Box<dyn std::error::Error>> {
+        let mut db = Connection::open_in_memory().unwrap();
+        init(&mut db).unwrap();
+        let has_raw: bool = db
+            .prepare("SELECT COUNT(*) FROM pragma_table_info('chunks') WHERE name='content_raw'")?
+            .query_row([], |r| r.get::<_, i64>(0))
+            .map(|c| c > 0)
+            .unwrap();
+        assert!(has_raw);
+        Ok(())
     }
 
     #[test]
     fn test_vec0_knn() {
         init(&mut Connection::open_in_memory().unwrap()).unwrap();
         let db = Connection::open_in_memory().unwrap();
-        db.execute_batch("PRAGMA journal_mode = WAL;").unwrap();
 
         db.execute_batch(
             "CREATE VIRTUAL TABLE IF NOT EXISTS vec_items USING vec0(embedding float[4]);",
