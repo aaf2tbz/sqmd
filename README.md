@@ -9,6 +9,47 @@ sqmd indexes any codebase into a SQLite database of semantically chunked source 
 | `cargo build --release` | ~10MB | Chunking, FTS5, relationships, call graph, daemon |
 | `cargo build --release --features embed` | ~27MB | + ONNX Runtime, vector search, hybrid scoring |
 
+## Benchmarks
+
+All measurements taken on the sqmd codebase itself (27 files, 20 `.rs` source files, ~219 KB raw source).
+
+### Storage Size
+
+| Method | Size | vs raw source | What you get |
+|--------|------|--------------|--------------|
+| Raw source files | 214 KB | 1.0x | Files on disk, nothing indexed |
+| LSP symbol JSON | 53 KB | 0.2x | Names + positions only, no content |
+| Tree-sitter JSON AST | 642-1071 KB | 3-5x | Full AST, no search, no relationships |
+| Flat markdown dump | 216 KB | 1.0x | All code in one file, no structure, no search |
+| Full context markdown | 387 KB | 1.8x | All code + metadata, no search, no query |
+| JSONL vector store (no embeddings) | 408 KB | 1.9x | Documents + metadata, needs external DB |
+| JSONL + vector embeddings (768d) | 1,660 KB | 7.8x | Vectors + content, needs Chroma/Pinecone |
+| **sqmd (default)** | **904 KB** | **4.2x** | Chunks + FTS5 + relationships + contains + call graph |
+| **sqmd (with embeddings)** | **~2.5 MB** | **11.7x** | All above + 768-dim vector search + hybrid scoring |
+
+sqmd at 4.2x raw source stores everything needed: chunked code with names, signatures, types, importance scores, FTS5 full-text index, import/call/contains relationships, and a query engine. No external services.
+
+### Token Efficiency
+
+| Approach | Tokens an LLM must process | Notes |
+|----------|--------------------------|-------|
+| Read every file | ~55,000 | Dumps entire codebase into context |
+| Flat markdown dump | ~55,000 | Same content, marginal formatting overhead |
+| Full context markdown | ~99,000 | Worse -- metadata bloat, no filtering |
+| JSONL + embeddings | ~425,000 | Never meant for direct LLM consumption |
+| **sqmd selective query (10 chunks)** | **~4,000** | **96% fewer tokens than full dump** |
+
+The point: you don't need to read the whole index. sqmd queries return only the relevant chunks -- with dependencies -- inside a token budget. A 10-chunk context window (~4K tokens) typically answers most "how does X work" questions.
+
+### Query Speed
+
+| Approach | Latency | Notes |
+|----------|---------|-------|
+| `grep -R` | ~10ms | Linear scan, no structure awareness |
+| `ripgrep` | ~19ms | Faster grep, still no structure |
+| `sqmd fts_search` | ~20ms | Structured results with chunk types, names, line ranges |
+| `sqmd hybrid_search` | ~40ms | FTS5 + vector KNN combined |
+
 ## The Problem
 
 AI agents read code one file at a time, grep for keywords without understanding structure, and burn tokens on irrelevant context. There's no fast, offline way to ask "find the auth middleware and everything it depends on" and get a precise, token-efficient answer.
