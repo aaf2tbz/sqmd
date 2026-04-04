@@ -2,7 +2,7 @@
 
 **Local-first code intelligence for AI agents. A single Rust binary, zero network.**
 
-sqmd indexes any codebase into a SQLite database of semantically chunked source code with tree-sitter parsing, FTS5 keyword search, vector embeddings, and an import/call relationship graph. Query in milliseconds.
+sqmd indexes any codebase into a SQLite database of semantically chunked source code with tree-sitter parsing, FTS5 keyword search, vector embeddings, and an import/call relationship graph. Zero external services. Works offline.
 
 | Build | Stripped size | What's included |
 |-------|--------------|-----------------|
@@ -17,29 +17,29 @@ AI agents read code one file at a time, grep for keywords without understanding 
 
 ```
 source files
-    │
-    ▼ tree-sitter (per-language AST)
-┌──────────────────────────────┐
-│  Chunk: raw code + metadata  │
-│  name, signature, type,      │
-│  line range, importance,     │
-│  file path, language         │
-└──────┬───────────────────────┘
-       │
-       ├──► SQLite chunks table (structured data + raw code)
-       ├──► FTS5 index (keyword search on code + names)
-       ├──► sqlite-vec (768-dim vector embeddings, KNN)
-       └──► relationships table (imports + contains + calls)
-                   │
-                   ▼
-          Hybrid Search Engine
-          (FTS5 + vector + graph)
-                   │
-                   ▼
-          Chunk::render_md() → on-demand Markdown
-                   │
-                   ▼
-          Agent context injection
+    |
+    v tree-sitter (per-language AST)
++------------------------------+
+|  Chunk: raw code + metadata  |
+|  name, signature, type,      |
+|  line range, importance,     |
+|  file path, language         |
++------+-----------------------+
+       |
+       +--> SQLite chunks table (structured data + raw code)
+       +--> FTS5 index (keyword search on code + names)
+       +--> sqlite-vec (768-dim vector embeddings, KNN)
+       +--> relationships table (imports + contains + calls)
+                    |
+                    v
+           Hybrid Search Engine
+           (FTS5 + vector + graph)
+                    |
+                    v
+           Chunk::render_md() -> on-demand Markdown
+                    |
+                    v
+           Agent context injection
 ```
 
 **Key design choice:** sqmd stores raw source code in the database, not pre-rendered Markdown. Markdown is derived on demand via `Chunk::render_md()` at query time. This keeps the source of truth in the code itself and avoids stale renderings.
@@ -47,47 +47,70 @@ source files
 ## Quick Start
 
 ```bash
-# Build from source
 cargo build --release                          # ~10MB: FTS5 + graph + chunking
 cargo build --release --features embed          # ~27MB: + vector embeddings + hybrid search
-# Binary at target/release/sqmd
 
-# Index your project
 cd /path/to/your/project
 sqmd init          # creates .sqmd/index.db, updates .gitignore
-sqmd index         # tree-sitter parse → chunk → store
+sqmd index         # tree-sitter parse -> chunk -> store
+```
 
-# Search (FTS5 keyword — available in default build)
-sqmd search "error handling"               # keyword search
-sqmd search "User" --type Struct           # filter by chunk type
-sqmd search "config" --file src/config.rs  # filter by file
+## Commands
 
-# With --features embed: hybrid search + embeddings
-# sqmd index --embed                        # index + generate vector embeddings
-# sqmd embed                                # embed all unembedded chunks
-# sqmd search "error handling"               # hybrid (FTS5 + vector)
-# sqmd search "authenticate" --keyword       # keyword-only
-# sqmd search "parsing" --alpha 0.8          # weight vector over FTS5
+### Indexing
 
-# Get a specific chunk
-sqmd get src/auth.ts:42       # chunk at file:line (renders with language fence)
+```bash
+sqmd init                        # create index at .sqmd/index.db
+sqmd index                       # full index (current directory)
+sqmd index ./src                 # index a subdirectory
+sqmd index --embed               # index + generate vector embeddings (requires --features embed)
+sqmd embed                       # embed any unembedded chunks
+sqmd reset                       # delete index and start fresh
+```
 
-# Dependency graph
-sqmd deps src/auth.ts         # what this file imports + what imports it
-sqmd deps src/auth.ts --depth 2  # traverse 2 levels deep
+### Searching
 
-# Context assembly (for agents)
-sqmd context --query "how does auth work" --max-tokens 8000 --deps --dep-depth 1
+```bash
+sqmd search "error handling"                 # keyword search (FTS5)
+sqmd search "User" --type Struct             # filter by chunk type
+sqmd search "config" --file src/config.rs    # filter by file
+sqmd search "parsing" --alpha 0.8            # vector weight (requires embed feature)
+sqmd search "authenticate" --keyword         # keyword-only (skip vector)
+```
+
+### Browsing
+
+```bash
+sqmd ls                              # list all top-level chunks
+sqmd ls --depth 2                    # hierarchical tree (2 levels)
+sqmd ls --file src/auth.ts           # chunks from one file
+sqmd ls --type function              # filter by type
+sqmd cat 42                          # get chunk by database ID
+sqmd get src/auth.ts:42              # get chunk at file:line
+sqmd diff "2025-01-01T00:00:00"      # chunks modified since timestamp
+```
+
+### Dependencies & Context
+
+```bash
+sqmd deps src/auth.ts                    # imports + dependents
+sqmd deps src/auth.ts --depth 2          # traverse 2 levels deep
+sqmd context --query "how does auth work" --max-tokens 8000 --deps
 sqmd context --files src/auth.ts,src/middleware.ts --max-tokens 4000
+```
 
-# Daemon mode (Unix socket)
-sqmd serve    # starts background watcher + incremental re-index, listens on ~/.sqmd/daemon.sock
+### Daemon & Watch
 
-# Watch mode
+```bash
+sqmd serve    # background daemon on ~/.sqmd/daemon.sock
 sqmd watch    # live re-index on file changes
+```
 
-# Reset and rebuild
-sqmd reset && sqmd index
+### Global Flags
+
+```bash
+sqmd --json stats           # JSON output (works on stats, search, get, ls, cat, diff)
+sqmd --json search "auth"   # machine-readable results
 ```
 
 ## What Gets Indexed
@@ -95,10 +118,10 @@ sqmd reset && sqmd index
 | Chunk Type | Examples | Importance |
 |-----------|----------|------------|
 | Function | `fn main()`, `def process()`, `const authenticate = ()`, `func Handle()` | 0.9 |
-| Method | `impl Block for Transaction { fn execute() }`, `func (s *Server) Start()` | 0.85 |
+| Method | `impl Block for Transaction { fn execute() }`, `func (s *Server) Start()` | 0.9 |
 | Class/Struct/Enum | `struct User`, `class Database`, `enum Result`, `type Config struct` | 0.85 |
 | Interface/Trait/Type | `trait Read`, `interface Handler`, `type Config` | 0.8 |
-| Impl block | `impl User { ... }` | 0.7 |
+| Impl block | `impl User { ... }` | 0.8 |
 | Import | `import { X }`, `use crate::module`, `from module import X` | 0.3 |
 | Module/Section | Top-level unclaimed code, file-level constants | 0.2-0.5 |
 
@@ -121,9 +144,9 @@ Other languages fall back to a line-based `FileChunker` that splits at section b
 
 sqmd extracts three kinds of relationships automatically:
 
-- **`imports`** — cross-file: `import { X } from './path'`, `use crate::module::Item`, `from module import X`, `"fmt"`, `import java.net.http`
-- **`contains`** — intra-file: class→method, impl→method, module→function, trait→method, struct→fields
-- **`calls`** — cross-file: regex-based call graph extraction resolved against imported symbols
+- **`imports`** -- cross-file: `import { X } from './path'`, `use crate::module::Item`, `from module import X`, `"fmt"`, `import java.net.http`
+- **`contains`** -- intra-file: class->method, impl->method, module->function, trait->method, struct->fields
+- **`calls`** -- cross-file: regex-based call graph extraction resolved against imported symbols
 
 Query with `sqmd deps <file> --depth N` to traverse the graph bidirectionally.
 
@@ -142,55 +165,54 @@ Embeddings use ONNX Runtime (ort) with a quantized model cached at `~/.sqmd/mode
 
 ```
 sqmd/
-├── crates/
-│   ├── sqmd-core/          # library
-│   │   ├── src/
-│   │   │   ├── schema.rs       # SQLite schema + migrations + chunks_vec
-│   │   │   ├── chunk.rs        # Chunk struct + ChunkType + render_md()
-│   │   │   ├── chunker.rs      # LanguageChunker trait + FileChunker fallback
-│   │   │   ├── index.rs        # Transactional indexer (chunks + contains + calls)
-│   │   │   ├── embed.rs        # ONNX embedding (ort) + auto-download
-│   │   │   ├── search.rs       # FTS5 + vector hybrid search engine
-│   │   │   ├── relationships.rs # Import resolution + call graph + CTE depth traversal
-│   │   │   ├── context.rs      # Context assembly + token budgeting
-│   │   │   ├── daemon.rs       # Unix socket daemon + JSON protocol
-│   │   │   ├── watcher.rs      # notify file watcher + 200ms debounce
-│   │   │   ├── files.rs        # Language detection + file walking + hashing
-│   │   │   └── languages/
-│   │   │       ├── typescript.rs  # TS/TSX chunker + import extraction + JSX
-│   │   │       ├── rust.rs        # Rust chunker + use/impl extraction
-│   │   │       ├── python.rs      # Python chunker + import extraction
-│   │   │       ├── go.rs          # Go chunker + func/type/import extraction
-│   │   │       └── java.rs        # Java chunker + class/interface/enum + imports
-│   │   └── Cargo.toml
-│   └── sqmd-cli/           # binary (named `sqmd`)
-│       └── Cargo.toml
-├── docs/
-│   ├── ROADMAP.md
-│   ├── ARCHITECTURE.md
-│   └── schema.sql
-└── Cargo.toml
++-- crates/
+|   +-- sqmd-core/          # library
+|   |   +-- src/
+|   |   |   +-- schema.rs        # SQLite schema + migrations + chunks_vec
+|   |   |   +-- chunk.rs         # Chunk struct + ChunkType + render_md()
+|   |   |   +-- chunker.rs       # LanguageChunker trait + FileChunker fallback
+|   |   |   +-- index.rs         # Transactional indexer (chunks + contains + calls)
+|   |   |   +-- embed.rs         # ONNX embedding (ort) + BPE tokenizer + auto-download
+|   |   |   +-- search.rs        # FTS5 + vector hybrid search engine
+|   |   |   +-- relationships.rs  # Import resolution + call graph + CTE depth traversal
+|   |   |   +-- context.rs       # Context assembly + token budgeting
+|   |   |   +-- vfs.rs           # Virtual file system: list, get, diff, tree rendering
+|   |   |   +-- daemon.rs        # Unix socket daemon + JSON protocol
+|   |   |   +-- watcher.rs       # notify file watcher + 200ms debounce
+|   |   |   +-- files.rs         # Language detection + file walking + hashing
+|   |   |   +-- languages/
+|   |   |       +-- typescript.rs  # TS/TSX chunker + import extraction + JSX
+|   |   |       +-- rust.rs        # Rust chunker + use/impl extraction
+|   |   |       +-- python.rs      # Python chunker + import extraction
+|   |   |       +-- go.rs          # Go chunker + func/type/import extraction
+|   |   |       +-- java.rs        # Java chunker + class/interface/enum + imports
+|   |   +-- Cargo.toml
+|   +-- sqmd-cli/           # binary (named `sqmd`)
+|       +-- Cargo.toml
++-- docs/
+|   +-- ROADMAP.md
+|   +-- ARCHITECTURE.md
+|   +-- WHAT_IT_IS.md
+|   +-- schema.sql
++-- .github/workflows/rust.yml
++-- Cargo.toml
 ```
 
 ## Current Status
 
-| Phase | Status | What it adds |
-|-------|--------|-------------|
-| 0 — Spike | Done | Validated sqlite-vec + ort |
-| 1 — Foundations | Done | Schema, CLI, file ingestion, FTS5 search |
-| 2 — Tree-sitter | Done | TS/Rust/Python/Go/Java chunkers, relationships, importance |
-| 3 — Incremental | Done | Rayon pipeline, file watcher, hash-based change detection |
-| 4 — Embeddings | Done | Vector search, hybrid scoring, model auto-download |
-| 5 — Relationship Graph | Done | Cross-file call graph + recursive CTE depth traversal |
-| 6 — Agent API | Done | Daemon mode, context assembly, token budgets |
+All 6 phases complete. 60 tests (embed), 52 tests (default), 0 clippy warnings, CI passing.
 
-**48 tests (default), 56 tests (embed), 0 clippy warnings, CI passing.**
+| Phase | What it adds |
+|-------|-------------|
+| 0 -- Spike | Validated sqlite-vec + ort |
+| 1 -- Foundations | Schema, CLI, file ingestion, FTS5 search |
+| 2 -- Tree-sitter | TS/Rust/Python/Go/Java chunkers, relationships, importance |
+| 3 -- Incremental | Rayon pipeline, file watcher, hash-based change detection |
+| 4 -- Embeddings | Vector search, hybrid scoring, model auto-download |
+| 5 -- Relationship Graph | Cross-file call graph + recursive CTE depth traversal |
+| 6 -- Agent API | Daemon mode, context assembly, token budgets |
 
-## How It's Used
-
-sqmd is a standalone SQLite + Markdown file system for code. Plug it into any AI agent, editor, or tool that needs fast, structured access to code. It replaces ad-hoc file reads and grep with semantically chunked, queryable code intelligence.
-
-### Daemon protocol
+## Daemon Protocol
 
 `sqmd serve` listens on `~/.sqmd/daemon.sock` with a JSON request/response protocol:
 
@@ -200,13 +222,11 @@ sqmd is a standalone SQLite + Markdown file system for code. Plug it into any AI
 {"method": "stats", "params": {}}
 {"method": "index_file", "params": {"path": "src/main.rs"}}
 {"method": "embed", "params": {}}
+{"method": "ls", "params": {"file": "src/auth.ts", "depth": 1}}
+{"method": "cat", "params": {"id": 42}}
 ```
 
-> Note: `embed` method and hybrid search require `--features embed`. Without it, `search` uses FTS5 keyword matching.
-
-## What It Replaces
-
-sqmd replaces ad-hoc file reads, blind grep searches, and manual context stitching. Instead of burning tokens on entire files, agents query sqmd for the exact chunks they need — with dependencies, call graphs, and structure — assembled into token-budgeted Markdown.
+> `embed` method and hybrid search require `--features embed`. Without it, `search` uses FTS5 keyword matching.
 
 ## License
 
