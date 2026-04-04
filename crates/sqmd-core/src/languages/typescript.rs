@@ -68,6 +68,9 @@ impl LanguageChunker for TypeScriptChunker {
             "export_statement",
             "variable_declaration",
             "lexical_declaration",
+            "jsx_element",
+            "jsx_fragment",
+            "jsx_self_closing_element",
         ];
 
         for child in tree.root_node().children(&mut cursor) {

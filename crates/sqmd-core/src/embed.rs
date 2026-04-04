@@ -1,9 +1,12 @@
+use std::io::{Read, Write};
 use ort::session::Session;
 use ort::value::Value;
 use std::path::PathBuf;
 
 const DIMS: usize = 768;
 const MODEL_NAME: &str = "nomic-embed-text-v1.5";
+const MODEL_FILE: &str = "nomic-embed-text-v1.5-q8.onnx";
+const MODEL_URL: &str = "https://huggingface.co/nomic-ai/nomic-embed-text-v1.5/resolve/main/nomic-embed-text-v1.5-q8.onnx";
 const MAX_SEQ_LEN: usize = 512;
 
 pub struct Embedder {
@@ -19,23 +22,67 @@ impl Embedder {
         })
     }
 
+    pub fn model_dir() -> Result<PathBuf, Box<dyn std::error::Error>> {
+        let home = std::env::var("HOME").map_err(|_| "HOME env var not set")?;
+        let dir = PathBuf::from(home).join(".sqmd").join("models");
+        Ok(dir)
+    }
+
+    pub fn model_path() -> Result<PathBuf, Box<dyn std::error::Error>> {
+        Ok(Self::model_dir()?.join(MODEL_FILE))
+    }
+
+    pub fn ensure_model_exists() -> Result<(), Box<dyn std::error::Error>> {
+        let path = Self::model_path()?;
+        if path.exists() {
+            return Ok(());
+        }
+
+        let dir = Self::model_dir()?;
+        std::fs::create_dir_all(&dir)?;
+
+        eprintln!("Downloading embedding model ({MODEL_FILE})...");
+        eprintln!("  URL: {MODEL_URL}");
+        eprintln!("  Destination: {:?}", path);
+
+        let response = ureq::Agent::new_with_defaults().get(MODEL_URL).call()?;
+
+        let total_bytes: usize = response.headers().get("content-length")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(0);
+
+        let mut reader = response.into_body().into_reader();
+        let mut file = std::fs::File::create(&path)?;
+        let mut downloaded: usize = 0;
+
+        let mut buf = [0u8; 8192];
+        loop {
+            let n = reader.read(&mut buf)?;
+            if n == 0 {
+                break;
+            }
+            file.write_all(&buf[..n])?;
+            downloaded += n;
+            if total_bytes > 0 {
+                let pct = (downloaded as f64 / total_bytes as f64) * 100.0;
+                eprint!("\r  Downloading: {:.0}%", pct);
+            }
+        }
+
+        eprintln!("\n  Saved {} MB", downloaded / 1_048_576);
+        Ok(())
+    }
+
     pub fn ensure_loaded(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         if self.session.is_some() {
             return Ok(());
         }
 
-        let home = std::env::var("HOME").map_err(|_| "HOME env var not set")?;
-        let path = PathBuf::from(home)
-            .join(".sqmd")
-            .join("models")
-            .join("nomic-embed-text-v1.5-q8.onnx");
+        let path = Self::model_path()?;
 
         if !path.exists() {
-            return Err(format!(
-                "Model not found at {:?}. Download from https://huggingface.co/nomic-ai/nomic-embed-text-v1.5",
-                path
-            )
-            .into());
+            Self::ensure_model_exists()?;
         }
 
         let session = Session::builder()?.commit_from_file(&path)?;

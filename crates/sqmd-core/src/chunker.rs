@@ -100,12 +100,17 @@ pub(crate) struct FileChunker;
 
 impl FileChunker {
     pub fn chunk_file(content: &str, relative: &str, language: &str) -> Vec<crate::chunk::Chunk> {
+        let mut chunks = Vec::new();
+        Self::chunk_file_into(content, relative, language, &mut chunks);
+        chunks
+    }
+
+    pub fn chunk_file_into(content: &str, relative: &str, language: &str, chunks: &mut Vec<crate::chunk::Chunk>) {
         let lines: Vec<&str> = content.lines().collect();
         if lines.is_empty() {
-            return vec![];
+            return;
         }
 
-        let mut chunks = Vec::new();
         let mut current_start = 0;
         let max_section_lines = 50;
 
@@ -152,8 +157,6 @@ impl FileChunker {
                 lines.len(),
             ));
         }
-
-        chunks
     }
 
     fn is_declaration(trimmed: &str, _language: &str) -> bool {

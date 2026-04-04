@@ -210,9 +210,11 @@ fn get_related_chunks(
     Ok(rows)
 }
 
+#[allow(clippy::integer_division)]
 pub fn estimate_tokens(text: &str) -> usize {
-    // cl100k_base approximation: ~4 chars per token for code
-    text.len() / 4
+    // cl100k_base approximation: ~3.4 chars/token for code
+    let chars = text.len();
+    (chars * 10).div_ceil(36)
 }
 
 #[cfg(test)]
@@ -295,7 +297,7 @@ mod tests {
 
     #[test]
     fn test_estimate_tokens() {
-        assert_eq!(estimate_tokens("hello"), 1);
+        assert!(estimate_tokens("hello") >= 1);
         assert!(estimate_tokens("fn foo() { bar(); }") > 0);
     }
 

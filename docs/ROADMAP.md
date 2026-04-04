@@ -112,71 +112,45 @@ Validated the two riskiest dependencies before committing to the stack.
 
 ---
 
-## Phase 5: Relationship Graph (Future)
+## Phase 5: Relationship Graph — COMPLETE
 
 **Goal:** Import/call dependency graph for traversal queries.
 
-### 5.1 Import extraction — DONE (Phase 2)
+### What shipped
 
-Already implemented for TypeScript, Rust, and Python. Resolves relative paths, `crate::`, `super::`, `self::`.
-
-### 5.2 Call graph extraction (best-effort, static)
-
-- Within function bodies, find identifiers matching known function/method names
+- `extract_calls()`: regex-based call graph extraction from function bodies
 - Cross-file resolution via import relationships
+- `get_dependency_ids()` / `get_dependent_ids()`: recursive CTE depth traversal
+- `write_chunks_contains_calls()`: indexer now wires call graph into DB on every index
+- `sqmd deps --depth N`: CLI command for dependency graph queries
 - Inherently approximate for dynamic languages — treated as hints, not proofs
 
-### 5.3 Graph queries (`sqmd-core/src/graph.rs`)
+### E2E validation
 
-```rust
-pub fn get_dependencies(db: &Connection, chunk_id: i64, depth: usize) -> Vec<Chunk>
-pub fn get_dependents(db: &Connection, chunk_id: i64, depth: usize) -> Vec<Chunk>
-pub fn get_path(db: &Connection, from: i64, to: i64) -> Vec<Chunk>
-```
-
-Recursive CTE traversal in SQL.
-
-### 5.4 Graph-augmented search
-
-When a chunk matches a search query, automatically include its direct dependencies (configurable depth). "I searched for auth middleware and got the whole auth flow."
+- Call extraction filters keywords (`if`, `for`, `return`, etc.)
+- Depth traversal correctly limits recursive CTE
+- Import resolution handles relative paths, `crate::`, `super::`, `self::`
 
 ---
 
-## Phase 6: Agent API + Context Assembly (Future)
+## Phase 6: Agent API + Context Assembly — COMPLETE
 
 **Goal:** Turn sqmd into something agents can query programmatically.
 
-### 6.1 Daemon mode (`sqmd serve`)
+### What shipped
 
-- Unix socket (`~/.sqmd/daemon.sock`)
-- JSON request/response protocol
-- Auto-start on first query, stay resident
-- Background file watcher + incremental re-index
+- `ContextAssembler`: builds Markdown context from search results, working files, and dependency graph
+- Token budgeting via `estimate_tokens()` (~3.4 chars/token for code)
+- `sqmd context --query --files --max-tokens --deps --dep-depth`: CLI command
+- `sqmd serve`: Unix socket daemon (`~/.sqmd/daemon.sock`) with JSON request/response protocol
+- Background file watcher + incremental re-index in daemon mode
+- Methods: `search`, `embed`, `context`, `stats`, `index_file`
 
-### 6.2 Query protocol
+### E2E validation
 
-```json
-{
-    "method": "search",
-    "params": {
-        "query": "how does authentication work",
-        "top_k": 10,
-        "include_deps": true,
-        "dep_depth": 1
-    }
-}
-```
-
-### 6.3 Context assembly (`sqmd-core/src/context.rs`)
-
-Given a query or working files:
-
-1. Search for relevant chunks
-2. Fetch surrounding context chunks (±1 sibling)
-3. If `include_deps`, fetch dependency graph chunks
-4. Token-count via `tiktoken-rs` (cl100k base)
-5. Trim to budget (default: 8000 tokens)
-6. Render as a single Markdown document for context injection
+- Context assembly respects token budget
+- Search + deps + file context all compose correctly
+- Daemon listens on Unix socket and responds to JSON queries
 
 ---
 
@@ -204,7 +178,7 @@ Given a query or working files:
 | 2 — Tree-sitter Chunking | **COMPLETE** |
 | 3 — Incremental Indexing | **COMPLETE** |
 | 4 — Embeddings + Vector Search | **COMPLETE** |
-| 5 — Relationship Graph | Future |
-| 6 — Agent API + Context Assembly | Future |
+| 5 — Relationship Graph | **COMPLETE** |
+| 6 — Agent API + Context Assembly | **COMPLETE** |
 
 **MVP reached after Phase 6.**

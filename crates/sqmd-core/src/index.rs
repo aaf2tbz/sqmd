@@ -62,6 +62,14 @@ fn chunk_file_content(
             let c = crate::languages::python::PythonChunker::new();
             (c.chunk(content, relative), c.extract_imports(content))
         }
+        Language::Go => {
+            let c = crate::languages::go::GoChunker::new();
+            (c.chunk(content, relative), c.extract_imports(content))
+        }
+        Language::Java => {
+            let c = crate::languages::java::JavaChunker::new();
+            (c.chunk(content, relative), c.extract_imports(content))
+        }
         _ => (
             crate::chunker::FileChunker::chunk_file(content, relative, language.as_str()),
             Vec::new(),
@@ -209,7 +217,7 @@ impl<'a> Indexer<'a> {
             }
 
             let mut rel_count = 0;
-            rel_count += self.write_chunks_and_contains(chunks)?;
+            rel_count += self.write_chunks_contains_calls(&work.relative, chunks)?;
             rel_count += self.write_import_relationships(&work.relative, raw_imports)?;
 
             stats.files_indexed += 1;
@@ -304,7 +312,7 @@ impl<'a> Indexer<'a> {
 
         let (chunks, raw_imports) = chunk_file_content(&language, &content, &relative);
         let mut rel_count = 0;
-        rel_count += self.write_chunks_and_contains(&chunks)?;
+        rel_count += self.write_chunks_contains_calls(&relative, &chunks)?;
         rel_count += self.write_import_relationships(&relative, &raw_imports)?;
 
         self.db.execute_batch("COMMIT")?;
@@ -317,16 +325,21 @@ impl<'a> Indexer<'a> {
         }))
     }
 
-    fn write_chunks_and_contains(
+    fn write_chunks_contains_calls(
         &self,
+        _relative: &str,
         chunks: &[chunk::Chunk],
     ) -> Result<usize, Box<dyn std::error::Error>> {
-        // Track parent containers: (chunk_id, line_start, line_end)
         let mut parent_stack: Vec<(i64, usize, usize)> = Vec::new();
         let mut rel_count = 0;
+        let mut chunk_ids: Vec<(usize, i64)> = Vec::new();
 
-        for chunk in chunks {
+        for (chunk_idx, chunk) in chunks.iter().enumerate() {
             let chunk_id = self.insert_chunk(chunk)?;
+
+            if let Some(id) = chunk_id {
+                chunk_ids.push((chunk_idx, id));
+            }
 
             if matches!(
                 chunk.chunk_type,
@@ -364,6 +377,72 @@ impl<'a> Indexer<'a> {
                             )?;
                             rel_count += 1;
                         }
+                    }
+                }
+            }
+        }
+
+        // Call graph: build name→id map from same file + imported targets
+        let mut name_to_id: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
+        for (idx, id) in &chunk_ids {
+            if let Some(ref name) = chunks[*idx].name {
+                name_to_id.insert(name.clone(), *id);
+            }
+        }
+
+        let imported_names: Vec<String> = {
+            let chunk_id_list: Vec<i64> = chunk_ids.iter().map(|(_, id)| *id).collect();
+            if chunk_id_list.is_empty() {
+                Vec::new()
+            } else {
+                let placeholders: Vec<String> = (0..chunk_id_list.len()).map(|i| format!("?{}", i + 1)).collect();
+                let sql = format!(
+                    "SELECT DISTINCT c.name FROM relationships r
+                     JOIN chunks c ON r.target_id = c.id
+                     WHERE r.source_id IN ({}) AND r.rel_type = 'imports' AND c.name IS NOT NULL",
+                    placeholders.join(", ")
+                );
+                let mut stmt = self.db.prepare(&sql)?;
+                let params: Vec<&dyn rusqlite::ToSql> = chunk_id_list.iter().map(|id| id as &dyn rusqlite::ToSql).collect();
+                let rows = stmt.query_map(params.as_slice(), |r| r.get(0))?
+                    .collect::<Result<_, _>>()?;
+                drop(stmt);
+                rows
+            }
+        };
+
+        for name in &imported_names {
+            if !name_to_id.contains_key(name.as_str()) {
+                if let Ok(Some(id)) = self.db.query_row(
+                    "SELECT id FROM chunks WHERE name = ?1 AND chunk_type IN ('function', 'method', 'class', 'struct', 'enum', 'interface', 'trait', 'constant') LIMIT 1",
+                    params![name],
+                    |r| r.get(0),
+                ) {
+                    name_to_id.insert(name.clone(), id);
+                }
+            }
+        }
+
+        for (idx, caller_id) in &chunk_ids {
+            let caller_id = *caller_id;
+            let c = &chunks[*idx];
+            if !matches!(
+                c.chunk_type,
+                chunk::ChunkType::Function
+                    | chunk::ChunkType::Method
+                    | chunk::ChunkType::Constant
+            ) {
+                continue;
+            }
+
+            for call in crate::relationships::extract_calls(&c.content_raw) {
+                if let Some(&target_id) = name_to_id.get(&call) {
+                    if target_id != caller_id {
+                        self.db.execute(
+                            "INSERT OR IGNORE INTO relationships (source_id, target_id, rel_type) VALUES (?1, ?2, 'calls')",
+                            params![caller_id, target_id],
+                        )?;
+                        rel_count += 1;
                     }
                 }
             }
