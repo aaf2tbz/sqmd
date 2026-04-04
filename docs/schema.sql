@@ -1,4 +1,4 @@
-# sqmd SQLite Schema
+-- sqmd SQLite Schema
 
 -- sqmd SQLite Schema
 -- Version: 1.0.0 (schema v4)
