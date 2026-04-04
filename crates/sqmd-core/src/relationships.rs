@@ -329,6 +329,96 @@ pub fn get_dependents(db: &rusqlite::Connection, file_path: &str) -> Result<Vec<
     Ok(rows)
 }
 
+pub fn get_dependency_ids(db: &rusqlite::Connection, chunk_id: i64, depth: usize) -> Result<Vec<i64>, Box<dyn std::error::Error>> {
+    if depth == 0 {
+        return Ok(Vec::new());
+    }
+
+    let sql = format!(
+        "WITH RECURSIVE dep_graph(target_id, d) AS (
+            SELECT target_id, 1 FROM relationships WHERE source_id = ?1 AND rel_type IN ('imports', 'calls')
+            UNION
+            SELECT r.target_id, dg.d + 1 FROM relationships r
+            JOIN dep_graph dg ON r.source_id = dg.target_id
+            WHERE dg.d < {0} AND r.rel_type IN ('imports', 'calls')
+        )
+        SELECT DISTINCT target_id FROM dep_graph WHERE target_id != ?1",
+        depth,
+    );
+
+    let mut stmt = db.prepare(&sql)?;
+    let ids: Vec<i64> = stmt.query_map(params![chunk_id], |r| r.get(0))?
+        .collect::<Result<_, _>>()?;
+    Ok(ids)
+}
+
+pub fn get_dependent_ids(db: &rusqlite::Connection, chunk_id: i64, depth: usize) -> Result<Vec<i64>, Box<dyn std::error::Error>> {
+    if depth == 0 {
+        return Ok(Vec::new());
+    }
+
+    let sql = format!(
+        "WITH RECURSIVE dep_graph(source_id, d) AS (
+            SELECT source_id, 1 FROM relationships WHERE target_id = ?1 AND rel_type IN ('imports', 'calls')
+            UNION
+            SELECT r.source_id, dg.d + 1 FROM relationships r
+            JOIN dep_graph dg ON r.target_id = dg.source_id
+            WHERE dg.d < {0} AND r.rel_type IN ('imports', 'calls')
+        )
+        SELECT DISTINCT source_id FROM dep_graph WHERE source_id != ?1",
+        depth,
+    );
+
+    let mut stmt = db.prepare(&sql)?;
+    let ids: Vec<i64> = stmt.query_map(params![chunk_id], |r| r.get(0))?
+        .collect::<Result<_, _>>()?;
+    Ok(ids)
+}
+
+pub fn extract_calls(content: &str) -> Vec<String> {
+    let mut calls = Vec::new();
+
+    let patterns: &[&str] = &[
+        r"(\w+)\s*\(",
+    ];
+
+    let mut seen = std::collections::HashSet::new();
+    for pattern in patterns {
+        if let Ok(re) = regex::Regex::new(pattern) {
+            for cap in re.captures_iter(content) {
+                if let Some(name) = cap.get(1) {
+                    let s = name.as_str().to_string();
+                    // Filter out keywords and common builtins
+                    if seen.insert(s.clone()) && !is_keyword(&s) {
+                        calls.push(s);
+                    }
+                }
+            }
+        }
+    }
+
+    calls
+}
+
+fn is_keyword(s: &str) -> bool {
+    matches!(
+        s,
+        "if" | "else" | "for" | "while" | "match" | "return" | "await"
+            | "async" | "let" | "const" | "var" | "fn" | "function"
+            | "new" | "delete" | "throw" | "try" | "catch" | "finally"
+            | "import" | "export" | "from" | "class" | "extends" | "super"
+            | "this" | "self" | "Self" | "print" | "println"
+            | "assert" | "assert_eq" | "assert_ne" | "assert!"
+            | "vec" | "Vec" | "String" | "HashMap" | "Option" | "Result"
+            | "Some" | "None" | "Ok" | "Err" | "true" | "false"
+            | "mut" | "pub" | "use" | "mod" | "struct" | "enum"
+            | "impl" | "trait" | "type" | "where" | "in" | "as" | "ref"
+            | "static" | "dyn" | "box" | "move" | "loop" | "break"
+            | "continue" | "yield" | "def" | "pass" | "with"
+            | "isinstance"
+    )
+}
+
 #[derive(Debug, Clone)]
 pub struct DepInfo {
     pub source_chunk_id: i64,
@@ -395,5 +485,44 @@ mod tests {
 
         let results = resolve_module_path(&db, "src/auth/login.ts", "./nonexistent");
         assert!(results.is_empty());
+    }
+
+    #[test]
+    fn test_extract_calls() {
+        let code = "async function login(user) { const result = await db.find(user); return session.create(result); }";
+        let calls = extract_calls(code);
+        assert!(calls.contains(&"find".to_string()), "got: {:?}", calls);
+        assert!(calls.contains(&"create".to_string()), "got: {:?}", calls);
+    }
+
+    #[test]
+    fn test_extract_calls_filters_keywords() {
+        let code = "if (x) { return fn(); }";
+        let calls = extract_calls(code);
+        assert!(!calls.iter().any(|c| c == "if"));
+        assert!(!calls.iter().any(|c| c == "return"));
+    }
+
+    #[test]
+    fn test_get_dependency_ids_with_depth() {
+        let mut db = rusqlite::Connection::open_in_memory().unwrap();
+        crate::schema::init(&mut db).unwrap();
+        db.execute("INSERT INTO files (path, language, size, mtime, hash) VALUES ('a.ts', 'typescript', 10, 0.0, 'a')", []).unwrap();
+        db.execute("INSERT INTO files (path, language, size, mtime, hash) VALUES ('b.ts', 'typescript', 10, 0.0, 'b')", []).unwrap();
+        db.execute("INSERT INTO files (path, language, size, mtime, hash) VALUES ('c.ts', 'typescript', 10, 0.0, 'c')", []).unwrap();
+        db.execute("INSERT INTO chunks (id, file_path, language, chunk_type, name, line_start, line_end, content_raw, content_hash) VALUES (1, 'a.ts', 'typescript', 'function', 'fa', 0, 1, 'fn fa()', 'x')", []).unwrap();
+        db.execute("INSERT INTO chunks (id, file_path, language, chunk_type, name, line_start, line_end, content_raw, content_hash) VALUES (2, 'b.ts', 'typescript', 'function', 'fb', 0, 1, 'fn fb()', 'y')", []).unwrap();
+        db.execute("INSERT INTO chunks (id, file_path, language, chunk_type, name, line_start, line_end, content_raw, content_hash) VALUES (3, 'c.ts', 'typescript', 'function', 'fc', 0, 1, 'fn fc()', 'z')", []).unwrap();
+        db.execute("INSERT INTO relationships (source_id, target_id, rel_type) VALUES (1, 2, 'imports')", []).unwrap();
+        db.execute("INSERT INTO relationships (source_id, target_id, rel_type) VALUES (2, 3, 'imports')", []).unwrap();
+
+        // depth=1: only direct deps of chunk 1
+        let d1 = get_dependency_ids(&db, 1, 1).unwrap();
+        assert_eq!(d1, vec![2]);
+
+        // depth=2: includes transitive
+        let d2 = get_dependency_ids(&db, 1, 2).unwrap();
+        assert!(d2.contains(&2));
+        assert!(d2.contains(&3));
     }
 }

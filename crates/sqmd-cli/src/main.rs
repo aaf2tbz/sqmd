@@ -57,6 +57,33 @@ enum Commands {
     Deps {
         /// File path
         path: String,
+        /// Traversal depth (1 = direct only)
+        #[arg(short, long, default_value = "1")]
+        depth: usize,
+    },
+    /// Assemble context for an AI agent
+    Context {
+        /// Search query
+        #[arg(long)]
+        query: Option<String>,
+        /// Files to include
+        #[arg(long, num_args = 0..=100)]
+        files: Vec<String>,
+        /// Maximum tokens in output
+        #[arg(short = 't', long, default_value = "8000")]
+        max_tokens: usize,
+        /// Include dependency graph
+        #[arg(long, default_value = "true")]
+        deps: bool,
+        /// Dependency depth
+        #[arg(long, default_value = "1")]
+        dep_depth: usize,
+    },
+    /// Start the daemon server (Unix socket)
+    Serve {
+        /// Project root directory
+        #[arg(default_value = ".")]
+        path: PathBuf,
     },
     /// Watch for file changes and re-index incrementally
     Watch {
@@ -86,7 +113,11 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         Commands::Stats => cmd_stats(),
         Commands::Get { location } => cmd_get(&location),
         Commands::Reset => cmd_reset(),
-        Commands::Deps { path } => cmd_deps(&path),
+        Commands::Deps { path, depth } => cmd_deps(&path, depth),
+        Commands::Context { query, files, max_tokens, deps, dep_depth } => {
+            cmd_context(query, files, max_tokens, deps, dep_depth)
+        }
+        Commands::Serve { path } => cmd_serve(&path),
         Commands::Watch { path } => cmd_watch(&path),
     }
 }
@@ -351,7 +382,7 @@ fn cmd_get(location: &str) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn cmd_deps(file_path: &str) -> Result<(), Box<dyn std::error::Error>> {
+fn cmd_deps(file_path: &str, depth: usize) -> Result<(), Box<dyn std::error::Error>> {
     let db = ensure_db()?;
 
     let imports = sqmd_core::relationships::get_dependencies(&db, file_path)?;
@@ -363,7 +394,7 @@ fn cmd_deps(file_path: &str) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     if !imports.is_empty() {
-        println!("Dependencies of {} (imports):\n", file_path);
+        println!("Dependencies of {} (depth {}):\n", file_path, depth);
         let mut seen = std::collections::HashSet::new();
         for dep in &imports {
             let key = format!("{}:{}", dep.target_file, dep.target_line);
@@ -377,6 +408,34 @@ fn cmd_deps(file_path: &str) -> Result<(), Box<dyn std::error::Error>> {
                 dep.target_name.as_deref().unwrap_or("(unnamed)"),
                 dep.rel_type,
             );
+        }
+
+        if depth > 1 {
+            let chunk_ids: Vec<i64> = imports.iter().map(|d| d.source_chunk_id).collect();
+            let mut all_dep_ids = Vec::new();
+            for &cid in &chunk_ids {
+                if let Ok(ids) = sqmd_core::relationships::get_dependency_ids(&db, cid, depth) {
+                    all_dep_ids.extend(ids);
+                }
+            }
+            if !all_dep_ids.is_empty() {
+                let placeholders: Vec<String> = (0..all_dep_ids.len()).map(|i| format!("?{}", i + 1)).collect();
+                let sql = format!(
+                    "SELECT DISTINCT file_path, name, line_start FROM chunks WHERE id IN ({})",
+                    placeholders.join(", ")
+                );
+                let mut stmt = db.prepare(&sql)?;
+                let params: Vec<&dyn rusqlite::ToSql> = all_dep_ids.iter().map(|id| id as &dyn rusqlite::ToSql).collect();
+                let transitive: Vec<(String, Option<String>, i64)> = stmt
+                    .query_map(params.as_slice(), |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+                    .collect::<Result<_, _>>()?;
+                if !transitive.is_empty() {
+                    println!("\n  Transitive (depth {}):", depth);
+                    for (fp, name, line) in &transitive {
+                        println!("    -> {}:{} {}", fp, line + 1, name.as_deref().unwrap_or("(unnamed)"));
+                    }
+                }
+            }
         }
         println!();
     }
@@ -400,6 +459,37 @@ fn cmd_deps(file_path: &str) -> Result<(), Box<dyn std::error::Error>> {
 
     drop(db);
     Ok(())
+}
+
+fn cmd_context(
+    query: Option<String>,
+    files: Vec<String>,
+    max_tokens: usize,
+    include_deps: bool,
+    dep_depth: usize,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let db = ensure_db()?;
+
+    let request = sqmd_core::context::ContextRequest {
+        query: query.unwrap_or_default(),
+        files,
+        max_tokens,
+        include_deps,
+        dep_depth,
+        top_k: 10,
+    };
+
+    let resp = sqmd_core::context::ContextAssembler::build(&db, &request)?;
+    println!("{}", resp.markdown);
+    eprintln!("\n--- {} chunks, ~{} tokens ---", resp.chunk_count, resp.token_count);
+
+    drop(db);
+    Ok(())
+}
+
+fn cmd_serve(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    let root = root.canonicalize()?;
+    sqmd_core::daemon::serve(&root)
 }
 
 fn cmd_reset() -> Result<(), Box<dyn std::error::Error>> {

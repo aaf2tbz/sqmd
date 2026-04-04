@@ -1121,6 +1121,7 @@ dependencies = [
  "notify",
  "ort",
  "rayon",
+ "regex",
  "rusqlite",
  "serde",
  "serde_json",

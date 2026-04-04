@@ -24,7 +24,7 @@ impl Default for SearchQuery {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct SearchResult {
     pub chunk_id: i64,
     pub file_path: String,
