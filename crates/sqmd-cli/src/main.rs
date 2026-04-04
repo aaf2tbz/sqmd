@@ -18,15 +18,32 @@ enum Commands {
         /// Project root directory
         #[arg(default_value = ".")]
         path: PathBuf,
+        /// Also generate embeddings
+        #[arg(long)]
+        embed: bool,
     },
-    /// Search the index
+    /// Search the index (hybrid: FTS5 + vector by default)
     Search {
         /// Search query
         query: String,
         /// Maximum results
         #[arg(short, long, default_value = "10")]
         top_k: usize,
+        /// Vector search weight (0.0 = keyword only, 1.0 = vector only)
+        #[arg(long, default_value = "0.7")]
+        alpha: f64,
+        /// Filter by file path
+        #[arg(long)]
+        file: Option<String>,
+        /// Filter by chunk type (function, class, method, etc.)
+        #[arg(long)]
+        r#type: Option<String>,
+        /// Keyword-only search (skip vector)
+        #[arg(long)]
+        keyword: bool,
     },
+    /// Generate embeddings for unembedded chunks
+    Embed,
     /// Show index statistics
     Stats,
     /// Get chunk at file:line
@@ -61,8 +78,11 @@ fn main() {
 fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     match cli.command {
         Commands::Init => cmd_init(),
-        Commands::Index { path } => cmd_index(&path),
-        Commands::Search { query, top_k } => cmd_search(&query, top_k),
+        Commands::Index { path, embed } => cmd_index(&path, embed),
+        Commands::Search { query, top_k, alpha, file, r#type, keyword } => {
+            cmd_search(&query, top_k, alpha, file, r#type, keyword)
+        }
+        Commands::Embed => cmd_embed(),
         Commands::Stats => cmd_stats(),
         Commands::Get { location } => cmd_get(&location),
         Commands::Reset => cmd_reset(),
@@ -114,7 +134,7 @@ fn cmd_init() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn cmd_index(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
+fn cmd_index(root: &Path, do_embed: bool) -> Result<(), Box<dyn std::error::Error>> {
     let root = root.canonicalize()?;
     let path = db_path();
     let mut db = if path.exists() {
@@ -136,51 +156,117 @@ fn cmd_index(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
     );
     println!("  {} total chunks, {} relationships", stats.chunks_total, stats.relationships_total);
 
+    if do_embed {
+        println!();
+        cmd_embed_with_db(&mut db)?;
+    }
+
     Ok(())
 }
 
-fn cmd_search(query: &str, top_k: usize) -> Result<(), Box<dyn std::error::Error>> {
-    let db = ensure_db()?;
-    let mut stmt = db.prepare(
-        "SELECT c.file_path, c.name, c.line_start, c.line_end, c.chunk_type, snippet(chunks_fts, 2, '>>>', '<<<', '...', 32)
-         FROM chunks_fts f JOIN chunks c ON f.rowid = c.id
-         WHERE chunks_fts MATCH ?1
-         ORDER BY f.rank
-         LIMIT ?2",
+fn cmd_embed() -> Result<(), Box<dyn std::error::Error>> {
+    let mut db = ensure_db()?;
+    cmd_embed_with_db(&mut db)
+}
+
+fn cmd_embed_with_db(db: &mut rusqlite::Connection) -> Result<(), Box<dyn std::error::Error>> {
+    let mut embedder = sqmd_core::embed::Embedder::new()?;
+
+    let unembedded: i64 = db.query_row(
+        "SELECT COUNT(*) FROM chunks LEFT JOIN embeddings ON chunks.id = embeddings.chunk_id WHERE embeddings.chunk_id IS NULL",
+        [],
+        |r| r.get(0),
     )?;
 
-    let rows: Vec<(String, Option<String>, i64, i64, String, String)> = stmt
-        .query_map(rusqlite::params![query, top_k as i64], |r| {
-            Ok((
-                r.get(0)?,
-                r.get(1)?,
-                r.get(2)?,
-                r.get(3)?,
-                r.get(4)?,
-                r.get(5)?,
-            ))
-        })?
-        .collect::<Result<Vec<_>, _>>()?;
+    if unembedded == 0 {
+        println!("All chunks already embedded.");
+        return Ok(());
+    }
 
-    if rows.is_empty() {
+    println!("Embedding {} chunks...", unembedded);
+    let start = std::time::Instant::now();
+    let mut total = 0;
+
+    loop {
+        let count = sqmd_core::search::embed_unembedded(db, &mut embedder)?;
+        if count == 0 {
+            break;
+        }
+        total += count;
+        print!("\r  {} / {}", total, unembedded);
+        std::io::stderr().flush().ok();
+    }
+
+    let elapsed = start.elapsed();
+    println!();
+    println!("Embedded {} chunks in {:?}", total, elapsed);
+    if total > 0 {
+        println!("  {:.0} chunks/sec", total as f64 / elapsed.as_secs_f64());
+    }
+
+    Ok(())
+}
+
+fn cmd_search(
+    query: &str,
+    top_k: usize,
+    alpha: f64,
+    file_filter: Option<String>,
+    type_filter: Option<String>,
+    keyword_only: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let db = ensure_db()?;
+
+    let search_query = sqmd_core::search::SearchQuery {
+        text: query.to_string(),
+        top_k,
+        alpha,
+        file_filter,
+        type_filter,
+        ..Default::default()
+    };
+
+    let results = if keyword_only {
+        sqmd_core::search::fts_search(&db, &search_query)?
+    } else {
+        let mut embedder = sqmd_core::embed::Embedder::new()?;
+        sqmd_core::search::hybrid_search(&db, &search_query, &mut embedder)?
+    };
+
+    if results.is_empty() {
         println!("No results for: {}", query);
         return Ok(());
     }
 
-    println!("Found {} results for \"{}\":\n", rows.len(), query);
-    for (i, (path, name, start, end, chunk_type, snippet)) in rows.iter().enumerate() {
-        println!("{}. [{}] {}:{}-{} {}",
+    println!("Found {} results for \"{}\":\n", results.len(), query);
+    for (i, r) in results.iter().enumerate() {
+        let score_tag = if r.vec_distance.is_some() && r.fts_rank.is_some() {
+            "hybrid"
+        } else if r.vec_distance.is_some() {
+            "vector"
+        } else {
+            "keyword"
+        };
+
+        println!(
+            "{}. [{}] {}:{}-{} {}",
             i + 1,
-            chunk_type,
-            path,
-            start + 1,
-            end + 1,
-            name.as_deref().unwrap_or("")
+            r.chunk_type,
+            r.file_path,
+            r.line_start + 1,
+            r.line_end + 1,
+            r.name.as_deref().unwrap_or(""),
         );
-        println!("   {}\n", snippet);
+        println!(
+            "   score: {:.3} ({})",
+            r.score, score_tag
+        );
+        if let Some(snippet) = &r.snippet {
+            println!("   {}", snippet);
+        }
+        println!();
     }
 
-    drop(stmt);
     drop(db);
     Ok(())
 }
@@ -191,6 +277,11 @@ fn cmd_stats() -> Result<(), Box<dyn std::error::Error>> {
     let files: i64 = db.query_row("SELECT COUNT(*) FROM files", [], |r| r.get(0))?;
     let chunks: i64 = db.query_row("SELECT COUNT(*) FROM chunks", [], |r| r.get(0))?;
     let rels: i64 = db.query_row("SELECT COUNT(*) FROM relationships", [], |r| r.get(0))?;
+    let embedded: i64 = db.query_row(
+        "SELECT COUNT(*) FROM embeddings",
+        [],
+        |r| r.get(0),
+    )?;
     let langs: Vec<(String, i64)> = {
         let mut stmt = db.prepare(
             "SELECT language, COUNT(*) FROM chunks GROUP BY language ORDER BY COUNT(*) DESC LIMIT 10"
@@ -209,10 +300,11 @@ fn cmd_stats() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("sqmd index statistics");
     println!("=====================");
-    println!("Files indexed: {}", files);
-    println!("Total chunks:  {}", chunks);
+    println!("Files indexed:  {}", files);
+    println!("Total chunks:   {}", chunks);
+    println!("Embedded:       {} / {}", embedded, chunks);
     println!("Relationships:  {}", rels);
-    println!("DB size:       {} KB", db_size / 1024);
+    println!("DB size:        {} KB", db_size / 1024);
     println!();
     println!("By language:");
     for (lang, count) in &langs {
