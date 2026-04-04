@@ -41,6 +41,64 @@ pub struct SearchResult {
 }
 
 pub fn fts_search(db: &Connection, query: &SearchQuery) -> Result<Vec<SearchResult>, Box<dyn std::error::Error>> {
+    let mut results = fts_content_search(db, query)?;
+
+    if let Ok(hint_hits) = crate::entities::search_hints(db, &query.text, query.top_k * 2) {
+        let (hint_ids, hint_scores): (Vec<i64>, Vec<f64>) = hint_hits.into_iter().unzip();
+        let hint_score_map: std::collections::HashMap<i64, f64> = hint_ids.iter().zip(hint_scores.iter()).map(|(&id, &s)| (id, s)).collect();
+
+        for r in &mut results {
+            if let Some(&hs) = hint_score_map.get(&r.chunk_id) {
+                r.score = r.score.max(hs);
+                if r.snippet.is_none() {
+                    r.snippet = Some("[hint match]".to_string());
+                }
+            }
+        }
+
+        for (id, score) in hint_ids.iter().zip(hint_scores.iter()) {
+            if !results.iter().any(|r| r.chunk_id == *id) {
+                let row = db.query_row(
+                    "SELECT id, file_path, name, signature, line_start, line_end, chunk_type FROM chunks WHERE id = ?1 AND is_deleted = 0",
+                    params![id],
+                    |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, Option<String>>(2)?,
+                           r.get::<_, Option<String>>(3)?, r.get::<_, i64>(4)?, r.get::<_, i64>(5)?, r.get::<_, String>(6)?)),
+                ).ok();
+                if let Some((cid, file_path, name, sig, start, end, ct)) = row {
+                    results.push(SearchResult {
+                        chunk_id: cid,
+                        file_path,
+                        name,
+                        signature: sig,
+                        line_start: start,
+                        line_end: end,
+                        chunk_type: ct,
+                        score: *score,
+                        vec_distance: None,
+                        fts_rank: Some(*score),
+                        snippet: Some("[hint match]".to_string()),
+                    });
+                }
+            }
+        }
+    }
+
+    if let Ok(boost_ids) = crate::entities::graph_boost_ids(db, &query.text, 50) {
+        let boost_set: std::collections::HashSet<i64> = boost_ids.iter().copied().collect();
+        for r in &mut results {
+            if boost_set.contains(&r.chunk_id) {
+                r.score = (r.score + 0.15).min(1.0);
+            }
+        }
+    }
+
+    results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    results.truncate(query.top_k);
+
+    Ok(results)
+}
+
+fn fts_content_search(db: &Connection, query: &SearchQuery) -> Result<Vec<SearchResult>, Box<dyn std::error::Error>> {
     let filter_clause = build_filter_clause(&query.file_filter, &query.type_filter);
 
     let sql = format!(

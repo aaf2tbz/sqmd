@@ -120,6 +120,29 @@ enum Commands {
         /// ISO timestamp (e.g., "2025-01-01T00:00:00")
         since: String,
     },
+    /// List entities in the knowledge graph
+    Entities {
+        /// Filter by entity type (file, struct, function, etc.)
+        #[arg(long)]
+        r#type: Option<String>,
+        /// Max results
+        #[arg(short = 'n', long, default_value = "50")]
+        limit: usize,
+    },
+    /// Show entity dependencies
+    EntityDeps {
+        /// Entity name or file path
+        name: String,
+        /// Traversal depth
+        #[arg(short = 'd', long, default_value = "1")]
+        depth: usize,
+    },
+    /// Purge soft-deleted chunks older than N days
+    Prune {
+        /// Max age in days
+        #[arg(default_value = "30")]
+        days: i64,
+    },
 }
 
 fn main() {
@@ -171,6 +194,9 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         Commands::Ls { file, r#type, depth } => cmd_ls(file.as_deref(), r#type.as_deref(), depth, cli.json),
         Commands::Cat { id } => cmd_cat(id, cli.json),
         Commands::Diff { since } => cmd_diff(&since, cli.json),
+        Commands::Entities { r#type, limit } => cmd_entities(r#type.as_deref(), limit, cli.json),
+        Commands::EntityDeps { name, depth } => cmd_entity_deps(&name, depth),
+        Commands::Prune { days } => cmd_prune(days),
     }
 }
 
@@ -252,6 +278,9 @@ fn cmd_index(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
         stats.files_scanned, stats.files_indexed, stats.files_skipped, stats.files_deleted
     );
     println!("  {} total chunks, {} relationships", stats.chunks_total, stats.relationships_total);
+    let d = &stats.decisions;
+    println!("  decisions: {} added, {} updated, {} skipped, {} tombstoned",
+        d.added, d.updated, d.skipped, d.tombstoned);
 
     Ok(())
 }
@@ -695,6 +724,75 @@ fn cmd_cat(id: i64, json: bool) -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    drop(db);
+    Ok(())
+}
+
+fn cmd_entities(entity_type: Option<&str>, limit: usize, json: bool) -> Result<(), Box<dyn std::error::Error>> {
+    let db = ensure_db()?;
+    let ents = sqmd_core::entities::list_entities(&db, entity_type, limit)?;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&ents)?);
+    } else {
+        if ents.is_empty() {
+            println!("No entities found.");
+            return Ok(());
+        }
+        println!("Entities ({}):\n", ents.len());
+        for e in &ents {
+            println!("  {} [{}] mentions: {}", e.name, e.entity_type, e.mentions);
+        }
+    }
+
+    drop(db);
+    Ok(())
+}
+
+fn cmd_entity_deps(name: &str, depth: usize) -> Result<(), Box<dyn std::error::Error>> {
+    let db = ensure_db()?;
+
+    let entity = sqmd_core::entities::get_entity(&db, name)?;
+    match entity {
+        Some(e) => {
+            println!("Entity: {} [{}] (mentions: {})\n", e.name, e.entity_type, e.mentions);
+
+            let aspects = sqmd_core::entities::get_aspects(&db, e.id)?;
+            if !aspects.is_empty() {
+                println!("Aspects:");
+                for a in &aspects {
+                    println!("  {} (weight: {:.2})", a.name, a.weight);
+                }
+                println!();
+            }
+
+            if depth > 0 {
+                let dep_ids = sqmd_core::entities::get_dependency_ids(&db, e.id, depth)?;
+                if !dep_ids.is_empty() {
+                    println!("Dependencies (depth {}):", depth);
+                    let placeholders: Vec<String> = dep_ids.iter().enumerate().map(|(i, _)| format!("?{}", i + 1)).collect();
+                    let sql = format!("SELECT id, name, entity_type FROM entities WHERE id IN ({})", placeholders.join(", "));
+                    let mut stmt = db.prepare(&sql)?;
+                    let params: Vec<&dyn rusqlite::ToSql> = dep_ids.iter().map(|id| id as &dyn rusqlite::ToSql).collect();
+                    let deps: Vec<(i64, String, String)> = stmt.query_map(params.as_slice(), |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+                        .collect::<Result<_, _>>()?;
+                    for (_id, dep_name, dep_type) in &deps {
+                        println!("  -> {} [{}]", dep_name, dep_type);
+                    }
+                }
+            }
+        }
+        None => println!("Entity '{}' not found.", name),
+    }
+
+    drop(db);
+    Ok(())
+}
+
+fn cmd_prune(days: i64) -> Result<(), Box<dyn std::error::Error>> {
+    let db = ensure_db()?;
+    let purged = sqmd_core::entities::purge_tombstones(&db, days)?;
+    println!("Purged {} tombstoned chunks older than {} days.", purged, days);
     drop(db);
     Ok(())
 }

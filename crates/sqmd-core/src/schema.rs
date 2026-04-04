@@ -2,7 +2,7 @@ use rusqlite::{Connection, Result as SqlResult};
 use sqlite_vec::sqlite3_vec_init;
 use std::path::Path;
 
-const CURRENT_VERSION: i64 = 2;
+const CURRENT_VERSION: i64 = 3;
 
 pub fn init(db: &mut Connection) -> SqlResult<()> {
     #[allow(clippy::missing_transmute_annotations)]
@@ -14,6 +14,7 @@ pub fn init(db: &mut Connection) -> SqlResult<()> {
     db.execute_batch("PRAGMA journal_mode = WAL;")?;
     db.execute_batch("PRAGMA foreign_keys = ON;")?;
     db.execute_batch("PRAGMA busy_timeout = 5000;")?;
+    db.execute_batch("PRAGMA defer_foreign_keys = ON;")?;
 
     let version: i64 = db
         .query_row(
@@ -29,6 +30,10 @@ pub fn init(db: &mut Connection) -> SqlResult<()> {
 
     if version < 2 {
         migrate_v2(db)?;
+    }
+
+    if version < 3 {
+        migrate_v3(db)?;
     }
 
     Ok(())
@@ -88,9 +93,135 @@ fn migrate_v2(db: &mut Connection) -> SqlResult<()> {
     db.execute_batch("CREATE VIRTUAL TABLE IF NOT EXISTS chunks_vec USING vec0(embedding float[768]);").ok();
 
     db.execute_batch(&format!(
-        "INSERT INTO schema_version (version) VALUES ({})",
+        "INSERT OR IGNORE INTO schema_version (version) VALUES ({})",
         CURRENT_VERSION
     ))?;
+
+    Ok(())
+}
+
+fn migrate_v3(db: &mut Connection) -> SqlResult<()> {
+    db.execute_batch("ALTER TABLE chunks ADD COLUMN is_deleted INTEGER NOT NULL DEFAULT 0;")?;
+    db.execute_batch("ALTER TABLE chunks ADD COLUMN deleted_at TEXT;")?;
+    db.execute_batch("CREATE INDEX IF NOT EXISTS idx_chunks_deleted ON chunks(is_deleted);")?;
+
+    db.execute_batch(
+        "CREATE TABLE IF NOT EXISTS entities (
+            id           INTEGER PRIMARY KEY,
+            name         TEXT NOT NULL,
+            canonical_name TEXT NOT NULL,
+            entity_type  TEXT NOT NULL DEFAULT 'file',
+            mentions     INTEGER NOT NULL DEFAULT 1,
+            created_at   TEXT NOT NULL DEFAULT '',
+            updated_at   TEXT NOT NULL DEFAULT '',
+            UNIQUE(canonical_name)
+        );",
+    )?;
+    db.execute_batch("CREATE INDEX IF NOT EXISTS idx_entities_type ON entities(entity_type);")?;
+    db.execute_batch("UPDATE entities SET created_at = datetime('now'), updated_at = datetime('now') WHERE created_at = '';")?;
+
+    db.execute_batch(
+        "CREATE TABLE IF NOT EXISTS entity_aspects (
+            id           INTEGER PRIMARY KEY,
+            entity_id    INTEGER NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
+            name         TEXT NOT NULL,
+            canonical_name TEXT NOT NULL,
+            weight       REAL NOT NULL DEFAULT 1.0,
+            created_at   TEXT NOT NULL DEFAULT ''
+        );",
+    )?;
+
+    db.execute_batch(
+        "CREATE TABLE IF NOT EXISTS entity_attributes (
+            id           INTEGER PRIMARY KEY,
+            entity_id    INTEGER NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
+            aspect_id    INTEGER REFERENCES entity_aspects(id),
+            chunk_id     INTEGER REFERENCES chunks(id),
+            kind         TEXT NOT NULL DEFAULT 'attribute' CHECK(kind IN ('attribute', 'constraint')),
+            content      TEXT NOT NULL,
+            created_at   TEXT NOT NULL DEFAULT ''
+        );",
+    )?;
+    db.execute_batch("CREATE INDEX IF NOT EXISTS idx_ea_entity ON entity_attributes(entity_id);")?;
+    db.execute_batch("CREATE INDEX IF NOT EXISTS idx_ea_chunk ON entity_attributes(chunk_id);")?;
+
+    db.execute_batch(
+        "CREATE TABLE IF NOT EXISTS entity_dependencies (
+            id             INTEGER PRIMARY KEY,
+            source_entity  INTEGER NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
+            target_entity  INTEGER NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
+            dep_type       TEXT NOT NULL DEFAULT 'imports' CHECK(dep_type IN ('imports', 'calls', 'contains', 'extends', 'implements')),
+            strength       REAL NOT NULL DEFAULT 1.0,
+            mentions       INTEGER NOT NULL DEFAULT 1,
+            created_at     TEXT NOT NULL DEFAULT '',
+            UNIQUE(source_entity, target_entity, dep_type)
+        );",
+    )?;
+    db.execute_batch("CREATE INDEX IF NOT EXISTS idx_ed_source ON entity_dependencies(source_entity, dep_type);")?;
+    db.execute_batch("CREATE INDEX IF NOT EXISTS idx_ed_target ON entity_dependencies(target_entity);")?;
+
+    db.execute_batch(
+        "CREATE VIRTUAL TABLE IF NOT EXISTS hints_fts USING fts5(
+            hint_text,
+            content='hints',
+            content_rowid='id',
+            tokenize='unicode61'
+        );",
+    )?;
+
+    db.execute_batch(
+        "CREATE TABLE IF NOT EXISTS hints (
+            id         INTEGER PRIMARY KEY,
+            chunk_id   INTEGER NOT NULL REFERENCES chunks(id) ON DELETE CASCADE,
+            hint_text  TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT ''
+        );",
+    )?;
+    db.execute_batch("CREATE INDEX IF NOT EXISTS idx_entities_type ON entities(entity_type);")?;
+
+    db.execute_batch(
+        "CREATE TABLE IF NOT EXISTS entity_aspects (
+            id           INTEGER PRIMARY KEY,
+            entity_id    INTEGER NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
+            name         TEXT NOT NULL,
+            canonical_name TEXT NOT NULL,
+            weight       REAL NOT NULL DEFAULT 1.0,
+            created_at   TEXT NOT NULL DEFAULT (datetime('now')),
+            UNIQUE(entity_id, canonical_name)
+        );",
+    )?;
+
+    db.execute_batch(
+        "CREATE TABLE IF NOT EXISTS entity_attributes (
+            id           INTEGER PRIMARY KEY,
+            entity_id    INTEGER NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
+            aspect_id    INTEGER REFERENCES entity_aspects(id),
+            chunk_id     INTEGER REFERENCES chunks(id),
+            kind         TEXT NOT NULL DEFAULT 'attribute' CHECK(kind IN ('attribute', 'constraint')),
+            content      TEXT NOT NULL,
+            created_at   TEXT NOT NULL DEFAULT (datetime('now'))
+        );",
+    )?;
+    db.execute_batch("CREATE INDEX IF NOT EXISTS idx_ea_entity ON entity_attributes(entity_id);")?;
+    db.execute_batch("CREATE INDEX IF NOT EXISTS idx_ea_chunk ON entity_attributes(chunk_id);")?;
+    db.execute_batch("CREATE INDEX IF NOT EXISTS idx_ed_source ON entity_dependencies(source_entity, dep_type);")?;
+    db.execute_batch("CREATE INDEX IF NOT EXISTS idx_ed_target ON entity_dependencies(target_entity);")?;
+    db.execute_batch("CREATE INDEX IF NOT EXISTS idx_hints_chunk ON hints(chunk_id);")?;
+
+    db.execute_batch(
+        "CREATE TRIGGER IF NOT EXISTS hints_fts_insert AFTER INSERT ON hints BEGIN
+            INSERT INTO hints_fts(rowid, hint_text) VALUES (new.id, new.hint_text);
+        END;",
+    )?;
+    db.execute_batch(
+        "CREATE TRIGGER IF NOT EXISTS hints_fts_delete AFTER DELETE ON hints BEGIN
+            INSERT INTO hints_fts(hints_fts, rowid, hint_text) VALUES ('delete', old.id, old.hint_text);
+        END;",
+    )?;
+
+    db.execute_batch(
+        "INSERT OR IGNORE INTO schema_version (version) VALUES (3)",
+    )?;
 
     Ok(())
 }

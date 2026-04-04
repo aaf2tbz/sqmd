@@ -1,5 +1,6 @@
 use crate::chunk;
 use crate::chunker::LanguageChunker;
+use crate::entities;
 use crate::files::{content_hash, detect_language, walk_project, Language};
 use crate::relationships::ImportInfo;
 use crate::schema;
@@ -20,6 +21,15 @@ pub struct IndexStats {
     pub files_deleted: usize,
     pub chunks_total: usize,
     pub relationships_total: usize,
+    pub decisions: IndexDecisions,
+}
+
+#[derive(Debug, Default)]
+pub struct IndexDecisions {
+    pub added: usize,
+    pub updated: usize,
+    pub skipped: usize,
+    pub tombstoned: usize,
 }
 
 #[derive(Debug)]
@@ -28,6 +38,7 @@ pub struct FileIndexResult {
     pub chunks: usize,
     pub relationships: usize,
     pub was_deleted: bool,
+    pub decisions: IndexDecisions,
 }
 
 #[derive(Debug, Clone)]
@@ -107,6 +118,7 @@ impl<'a> Indexer<'a> {
             files_deleted: 0,
             chunks_total: 0,
             relationships_total: 0,
+            decisions: IndexDecisions::default(),
         };
 
         let db_paths: Vec<String> = {
@@ -202,7 +214,7 @@ impl<'a> Indexer<'a> {
             }
 
             if existing_hash.is_some() {
-                self.delete_file_chunks(&work.relative)?;
+                self.tombstone_file_chunks(&work.relative)?;
             }
 
             self.db.execute(
@@ -216,18 +228,24 @@ impl<'a> Indexer<'a> {
                 continue;
             }
 
+            let mut file_decisions = IndexDecisions::default();
             let mut rel_count = 0;
-            rel_count += self.write_chunks_contains_calls(&work.relative, chunks)?;
+            rel_count += self.decision_write_chunks(&work.relative, chunks, &mut file_decisions)?;
             rel_count += self.write_import_relationships(&work.relative, raw_imports)?;
+            self.build_entity_graph(&work.relative, chunks)?;
 
             stats.files_indexed += 1;
             stats.relationships_total += rel_count;
+            stats.decisions.added += file_decisions.added;
+            stats.decisions.updated += file_decisions.updated;
+            stats.decisions.skipped += file_decisions.skipped;
         }
 
         // Handle deletions
         for db_path in &db_paths {
             if !seen_paths.contains(db_path) {
-                self.delete_file_chunks(db_path)?;
+                let tombstoned = entities::tombstone_chunks(self.db, db_path)?;
+                stats.decisions.tombstoned += tombstoned;
                 self.db
                     .execute("DELETE FROM files WHERE path = ?1", params![db_path])?;
                 stats.files_deleted += 1;
@@ -270,6 +288,7 @@ impl<'a> Indexer<'a> {
                     chunks: 0,
                     relationships: 0,
                     was_deleted: true,
+                    decisions: IndexDecisions::default(),
                 }));
             }
         };
@@ -295,7 +314,7 @@ impl<'a> Indexer<'a> {
         self.db.execute_batch("BEGIN")?;
 
         if existing_hash.is_some() {
-            self.delete_file_chunks(&relative)?;
+            self.tombstone_file_chunks(&relative)?;
         }
 
         self.db.execute(
@@ -311,9 +330,11 @@ impl<'a> Indexer<'a> {
         )?;
 
         let (chunks, raw_imports) = chunk_file_content(&language, &content, &relative);
+        let mut file_decisions = IndexDecisions::default();
         let mut rel_count = 0;
-        rel_count += self.write_chunks_contains_calls(&relative, &chunks)?;
+        rel_count += self.decision_write_chunks(&relative, &chunks, &mut file_decisions)?;
         rel_count += self.write_import_relationships(&relative, &raw_imports)?;
+        self.build_entity_graph(&relative, &chunks)?;
 
         self.db.execute_batch("COMMIT")?;
 
@@ -322,9 +343,294 @@ impl<'a> Indexer<'a> {
             chunks: chunks.len(),
             relationships: rel_count,
             was_deleted: false,
+            decisions: file_decisions,
         }))
     }
 
+    fn decision_write_chunks(
+        &self,
+        relative: &str,
+        chunks: &[chunk::Chunk],
+        decisions: &mut IndexDecisions,
+    ) -> Result<usize, Box<dyn std::error::Error>> {
+        let old_hashes: std::collections::HashMap<String, (i64, Option<String>)> = {
+            let mut stmt = self.db.prepare(
+                "SELECT id, content_hash, name FROM chunks WHERE file_path = ?1 AND is_deleted = 0"
+            )?;
+            let rows: Vec<(i64, String, Option<String>)> = stmt.query_map(params![relative], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+            })?.collect::<Result<_, _>>()?;
+            rows.into_iter().map(|(id, hash, name)| (hash, (id, name))).collect()
+        };
+
+        let new_hashes: std::collections::HashMap<String, usize> = chunks
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| !c.content_hash.is_empty())
+            .map(|(i, c)| (c.content_hash.clone(), i))
+            .collect();
+
+        let mut used_old_ids: std::collections::HashSet<i64> = std::collections::HashSet::new();
+        let mut chunk_id_map: std::collections::HashMap<usize, i64> = std::collections::HashMap::new();
+
+        for (chunk_idx, chunk) in chunks.iter().enumerate() {
+            let chunk_hash = &chunk.content_hash;
+
+            if let Some((old_id, old_name)) = old_hashes.get(chunk_hash) {
+                let same_name = old_name.as_deref() == chunk.name.as_deref();
+                if same_name && new_hashes.get(chunk_hash) == Some(&chunk_idx) {
+                    let importance = entities::compute_structural_importance(self.db, *old_id, chunk.importance)?;
+                    if importance != chunk.importance {
+                        self.db.execute(
+                            "UPDATE chunks SET line_start = ?1, line_end = ?2, importance = ?3, updated_at = datetime('now') WHERE id = ?4",
+                            params![chunk.line_start as i64, chunk.line_end as i64, importance, old_id],
+                        )?;
+                        decisions.updated += 1;
+                    } else {
+                        decisions.skipped += 1;
+                    }
+                    chunk_id_map.insert(chunk_idx, *old_id);
+                    used_old_ids.insert(*old_id);
+                    continue;
+                }
+            }
+
+            if let Some((old_id, _)) = old_hashes.get(chunk_hash) {
+                chunk_id_map.insert(chunk_idx, *old_id);
+                used_old_ids.insert(*old_id);
+                decisions.skipped += 1;
+                continue;
+            }
+
+            let new_id = self.insert_chunk(chunk)?;
+            if let Some(id) = new_id {
+                chunk_id_map.insert(chunk_idx, id);
+            }
+            decisions.added += 1;
+        }
+
+        for (_, (old_id, _)) in old_hashes.iter() {
+            if !used_old_ids.contains(old_id) {
+                self.db.execute(
+                    "UPDATE chunks SET is_deleted = 1, deleted_at = datetime('now') WHERE id = ?1",
+                    params![old_id],
+                )?;
+                decisions.tombstoned += 1;
+            }
+        }
+
+        let rel_count = self.build_relationships(relative, chunks, &chunk_id_map)?;
+
+        for (chunk_idx, chunk) in chunks.iter().enumerate() {
+            if let Some(&chunk_id) = chunk_id_map.get(&chunk_idx) {
+                let hints = entities::generate_hints(
+                    chunk.name.as_deref(),
+                    chunk.chunk_type.as_str(),
+                    &chunk.content_raw,
+                    &chunk.file_path,
+                );
+                if !hints.is_empty() {
+                    self.db.execute(
+                        "DELETE FROM hints WHERE chunk_id = ?1",
+                        params![chunk_id],
+                    )?;
+                    entities::insert_hints(self.db, chunk_id, &hints)?;
+                }
+
+                let importance = entities::compute_structural_importance(self.db, chunk_id, chunk.importance)?;
+                if importance != chunk.importance {
+                    self.db.execute(
+                        "UPDATE chunks SET importance = ?1 WHERE id = ?2",
+                        params![importance, chunk_id],
+                    )?;
+                }
+            }
+        }
+
+        Ok(rel_count)
+    }
+
+    fn build_relationships(
+        &self,
+        _relative: &str,
+        chunks: &[chunk::Chunk],
+        chunk_id_map: &std::collections::HashMap<usize, i64>,
+    ) -> Result<usize, Box<dyn std::error::Error>> {
+        let mut rel_count = 0;
+        let mut parent_stack: Vec<(i64, usize, usize)> = Vec::new();
+
+        for (chunk_idx, chunk) in chunks.iter().enumerate() {
+            let chunk_id = chunk_id_map.get(&chunk_idx).copied();
+
+            if matches!(
+                chunk.chunk_type,
+                chunk::ChunkType::Class
+                    | chunk::ChunkType::Impl
+                    | chunk::ChunkType::Trait
+                    | chunk::ChunkType::Module
+                    | chunk::ChunkType::Enum
+                    | chunk::ChunkType::Struct
+            ) {
+                if let Some(id) = chunk_id {
+                    parent_stack.truncate(
+                        parent_stack
+                            .iter()
+                            .rposition(|(_, _, end)| chunk.line_start >= *end)
+                            .map(|p| p + 1)
+                            .unwrap_or(0),
+                    );
+                    parent_stack.push((id, chunk.line_start, chunk.line_end));
+                }
+            }
+
+            if matches!(
+                chunk.chunk_type,
+                chunk::ChunkType::Method
+                    | chunk::ChunkType::Constant
+                    | chunk::ChunkType::Type
+            ) {
+                if let Some(&(pid, p_start, p_end)) = parent_stack.last() {
+                    if chunk.line_start > p_start && chunk.line_end <= p_end {
+                        if let Some(cid) = chunk_id {
+                            self.db.execute(
+                                "INSERT OR IGNORE INTO relationships (source_id, target_id, rel_type) VALUES (?1, ?2, 'contains')",
+                                params![pid, cid],
+                            )?;
+                            rel_count += 1;
+                        }
+                    }
+                }
+            }
+        }
+
+        let mut name_to_id: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
+        for (idx, id) in chunk_id_map {
+            if let Some(ref name) = chunks[*idx].name {
+                name_to_id.insert(name.clone(), *id);
+            }
+        }
+
+        let all_ids: Vec<i64> = chunk_id_map.values().copied().collect();
+        let imported_names: Vec<String> = if all_ids.is_empty() {
+            Vec::new()
+        } else {
+            let placeholders: Vec<String> = (0..all_ids.len()).map(|i| format!("?{}", i + 1)).collect();
+            let sql = format!(
+                "SELECT DISTINCT c.name FROM relationships r
+                 JOIN chunks c ON r.target_id = c.id
+                 WHERE r.source_id IN ({}) AND r.rel_type = 'imports' AND c.name IS NOT NULL",
+                placeholders.join(", ")
+            );
+            let mut stmt = self.db.prepare(&sql)?;
+            let params: Vec<&dyn rusqlite::ToSql> = all_ids.iter().map(|id| id as &dyn rusqlite::ToSql).collect();
+            let rows = stmt.query_map(params.as_slice(), |r| r.get(0))?
+                .collect::<Result<_, _>>()?;
+            drop(stmt);
+            rows
+        };
+
+        for name in &imported_names {
+            if !name_to_id.contains_key(name.as_str()) {
+                if let Ok(Some(id)) = self.db.query_row(
+                    "SELECT id FROM chunks WHERE name = ?1 AND chunk_type IN ('function', 'method', 'class', 'struct', 'enum', 'interface', 'trait', 'constant') LIMIT 1",
+                    params![name],
+                    |r| r.get(0),
+                ) {
+                    name_to_id.insert(name.clone(), id);
+                }
+            }
+        }
+
+        for (idx, caller_id) in chunk_id_map {
+            let caller_id = *caller_id;
+            let c = &chunks[*idx];
+            if !matches!(
+                c.chunk_type,
+                chunk::ChunkType::Function
+                    | chunk::ChunkType::Method
+                    | chunk::ChunkType::Constant
+            ) {
+                continue;
+            }
+
+            for call in crate::relationships::extract_calls(&c.content_raw) {
+                if let Some(&target_id) = name_to_id.get(&call) {
+                    if target_id != caller_id {
+                        self.db.execute(
+                            "INSERT OR IGNORE INTO relationships (source_id, target_id, rel_type) VALUES (?1, ?2, 'calls')",
+                            params![caller_id, target_id],
+                        )?;
+                        rel_count += 1;
+                    }
+                }
+            }
+        }
+
+        Ok(rel_count)
+    }
+
+    fn build_entity_graph(
+        &self,
+        relative: &str,
+        chunks: &[chunk::Chunk],
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let file_entity_id = entities::ensure_entity(self.db, relative, "file")?;
+
+        let export_aspect_id = entities::ensure_aspect(self.db, file_entity_id, "exports")?;
+
+        for chunk in chunks {
+            if matches!(
+                chunk.chunk_type,
+                chunk::ChunkType::Function | chunk::ChunkType::Method
+                    | chunk::ChunkType::Class | chunk::ChunkType::Struct
+                    | chunk::ChunkType::Interface | chunk::ChunkType::Trait
+                    | chunk::ChunkType::Enum | chunk::ChunkType::Impl
+                    | chunk::ChunkType::Constant
+            ) {
+                let name = chunk.name.as_deref().unwrap_or("");
+                if !name.is_empty() {
+                    let chunk_id: Option<i64> = self.db.query_row(
+                        "SELECT id FROM chunks WHERE file_path = ?1 AND content_hash = ?2 AND is_deleted = 0 LIMIT 1",
+                        params![relative, chunk.content_hash],
+                        |r| r.get(0),
+                    ).ok();
+
+                    if let Some(cid) = chunk_id {
+                        entities::add_attribute(
+                            self.db,
+                            file_entity_id,
+                            Some(export_aspect_id),
+                            cid,
+                            "attribute",
+                            &format!("{}: {}", chunk.chunk_type.as_str(), name),
+                        )?;
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn tombstone_file_chunks(&self, relative: &str) -> Result<(), Box<dyn std::error::Error>> {
+        let chunk_ids: Vec<i64> = {
+            let mut stmt = self.db.prepare("SELECT id FROM chunks WHERE file_path = ?1 AND is_deleted = 0")?;
+            let ids: Vec<i64> = stmt.query_map(params![relative], |r| r.get(0))?.collect::<Result<_, _>>()?;
+            drop(stmt);
+            ids
+        };
+
+        for &cid in &chunk_ids {
+            self.db.execute("DELETE FROM hints WHERE chunk_id = ?1", params![cid])?;
+            self.db.execute("DELETE FROM entity_attributes WHERE chunk_id = ?1", params![cid])?;
+            self.db.execute("DELETE FROM relationships WHERE source_id = ?1 OR target_id = ?2", params![cid, cid])?;
+        }
+
+        entities::tombstone_chunks(self.db, relative)?;
+        Ok(())
+    }
+
+    #[allow(dead_code)]
     fn write_chunks_contains_calls(
         &self,
         _relative: &str,
@@ -496,6 +802,16 @@ impl<'a> Indexer<'a> {
     }
 
     fn delete_file_chunks(&self, relative: &str) -> Result<(), Box<dyn std::error::Error>> {
+        let chunk_ids: Vec<i64> = {
+            let mut stmt = self.db.prepare("SELECT id FROM chunks WHERE file_path = ?1")?;
+            let ids: Vec<i64> = stmt.query_map(params![relative], |r| r.get(0))?.collect::<Result<_, _>>()?;
+            drop(stmt);
+            ids
+        };
+        for &cid in &chunk_ids {
+            self.db.execute("DELETE FROM hints WHERE chunk_id = ?1", params![cid])?;
+            self.db.execute("DELETE FROM entity_attributes WHERE chunk_id = ?1", params![cid])?;
+        }
         self.db.execute(
             "DELETE FROM relationships WHERE source_id IN (SELECT id FROM chunks WHERE file_path = ?1) OR target_id IN (SELECT id FROM chunks WHERE file_path = ?1)",
             params![relative],
@@ -516,7 +832,7 @@ mod tests {
         let db_path = dir.join(".sqmd/index.db");
         std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
 
-        let conn = Connection::open(&db_path).unwrap();
+        let mut conn = Connection::open(&db_path).unwrap();
         conn.execute_batch("PRAGMA journal_mode=WAL").ok();
 
         let db: &'static mut Connection = Box::leak(Box::new(conn));
