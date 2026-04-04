@@ -90,64 +90,25 @@ Validated the two riskiest dependencies before committing to the stack.
 
 ---
 
-## Phase 4: Embeddings + Vector Search (MVP milestone)
+## Phase 4: Embeddings + Vector Search — COMPLETE
 
 **Goal:** Semantic search on top of keyword search.
 
-### 4.1 Embedding pipeline (`sqmd-core/src/embed.rs`)
+### What shipped
 
-- `ort` crate for ONNX Runtime (v2 RC — already validated in spike)
-- Model: `nomic-embed-text-v1.5` (768-dim, q8 quantized, 522MB)
-- First-run download from HuggingFace, cached in `~/.sqmd/models/`
-- Batch embedding for throughput (process N chunks per ONNX session)
+- `Embedder` struct: lazy-loads nomic-embed-text-v1.5 ONNX model (768 dims, unit-normalized), batch embed
+- Hybrid search engine (`search.rs`):
+  - `fts_search()`: FTS5 with file/type filters, rank normalization to 0..1
+  - `vec_search()`: KNN via `chunks_vec` (sqlite-vec), cosine distance
+  - `hybrid_search()`: alpha-blended merge (`alpha*vec + (1-alpha)*fts`), single-source penalty (0.8)
+  - `embed_unembedded()`: batch embeds unindexed chunks (64/batch, prioritized by importance)
+  - `store_embedding()`: writes to both `embeddings` table and `chunks_vec`
+- CLI: `sqmd search` (hybrid by default), `sqmd embed`, `sqmd index --embed`, `sqmd stats` (embedding count)
 
-### 4.2 Vector storage
+### E2E validation
 
-`sqlite-vec` compiled statically (validated in spike):
-```sql
-CREATE VIRTUAL TABLE chunks_vec USING vec0(embedding float[768]);
-```
-
-### 4.3 Hybrid search engine (`sqmd-core/src/search.rs`)
-
-```rust
-pub struct SearchQuery {
-    pub text: String,
-    pub top_k: usize,           // default 20
-    pub alpha: f64,             // 0.7 = 70% vector, 30% keyword
-    pub file_filter: Option<String>,
-    pub type_filter: Option<ChunkType>,
-    pub min_score: f64,         // default 0.3
-}
-
-pub struct SearchResult {
-    pub chunk: Chunk,
-    pub score: f64,
-    pub vec_distance: Option<f64>,
-    pub fts_rank: Option<f64>,
-    pub context_chunks: Vec<Chunk>,
-}
-```
-
-### 4.4 Hybrid scoring algorithm
-
-1. Embed query text → query vector
-2. FTS5 MATCH query → normalized scores
-3. vec0 KNN search → normalized distances
-4. Merge: `hybrid_score = alpha * vec_score + (1 - alpha) * fts_score`
-5. Single-source penalty: if a result only appears in one index, multiply by 0.8
-6. Fetch 1-2 adjacent chunks (line proximity) as context
-7. Return top-K
-
-### 4.5 Performance targets
-
-| Metric | Target |
-|--------|--------|
-| Single chunk embed | <10ms |
-| Batch embed (64 chunks) | <200ms |
-| Vector search (100k chunks) | <5ms |
-| FTS5 search | <3ms |
-| Full hybrid query | <20ms |
+- 43 tests pass (10 new), 0 clippy warnings
+- CI-safe: all embedding tests skip gracefully without model
 
 ---
 
@@ -272,7 +233,7 @@ Given a query or working files:
 | 1 — Foundations | **COMPLETE** |
 | 2 — Tree-sitter Chunking | **COMPLETE** |
 | 3 — Incremental Indexing | **COMPLETE** |
-| 4 — Embeddings + Vector Search | MVP milestone |
+| 4 — Embeddings + Vector Search | **COMPLETE** |
 | 5 — Relationship Graph | Future |
 | 6 — Agent API + Context Assembly | Future |
 | 7 — Signet Integration | Future |
