@@ -2,6 +2,7 @@ pub mod chunk;
 pub mod chunker;
 pub mod context;
 pub mod daemon;
+#[cfg(feature = "embed")]
 pub mod embed;
 pub mod files;
 pub mod index;

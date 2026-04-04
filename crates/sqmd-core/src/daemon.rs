@@ -78,12 +78,16 @@ fn handle_connection(stream: UnixStream, root: &Path) -> Result<(), Box<dyn std:
         return Ok(());
     }
 
+    #[cfg(feature = "embed")]
     let mut db = schema::open(&db_path)?;
+    #[cfg(not(feature = "embed"))]
+    let db = schema::open(&db_path)?;
     let response = match request.method.as_str() {
         "search" => handle_search(&db, &request.params),
         "context" => handle_context(&db, &request.params),
         "get" => handle_get(&db, &request.params),
         "stats" => handle_stats(&db),
+        #[cfg(feature = "embed")]
         "embed" => handle_embed(&mut db),
         _ => Response {
             ok: false,
@@ -130,32 +134,54 @@ fn handle_search(db: &Connection, params: &serde_json::Value) -> Response {
         ..Default::default()
     };
 
-    let mut embedder = match crate::embed::Embedder::new() {
-        Ok(e) => e,
-        Err(e) => {
-            return Response {
+    #[cfg(feature = "embed")]
+    let result = {
+        let mut embedder = match crate::embed::Embedder::new() {
+            Ok(e) => e,
+            Err(e) => {
+                return Response {
+                    ok: false,
+                    result: None,
+                    error: Some(format!("{e}")),
+                }
+            }
+        };
+        match crate::search::hybrid_search(db, &search_query, &mut embedder) {
+            Ok(results) => {
+                let serialized = serde_json::to_string(&results).unwrap_or_default();
+                Response {
+                    ok: true,
+                    result: Some(serde_json::from_str(&serialized).unwrap_or(serde_json::Value::Array(vec![]))),
+                    error: None,
+                }
+            }
+            Err(e) => Response {
                 ok: false,
                 result: None,
-                error: Some(format!("{e}")),
+                error: Some(e.to_string()),
+            },
+        }
+    };
+    #[cfg(not(feature = "embed"))]
+    let result = {
+        match crate::search::fts_search(db, &search_query) {
+            Ok(results) => {
+                let serialized = serde_json::to_string(&results).unwrap_or_default();
+                Response {
+                    ok: true,
+                    result: Some(serde_json::from_str(&serialized).unwrap_or(serde_json::Value::Array(vec![]))),
+                    error: None,
+                }
             }
+            Err(e) => Response {
+                ok: false,
+                result: None,
+                error: Some(e.to_string()),
+            },
         }
     };
 
-    match crate::search::hybrid_search(db, &search_query, &mut embedder) {
-        Ok(results) => {
-            let serialized = serde_json::to_string(&results).unwrap_or_default();
-            Response {
-                ok: true,
-                result: Some(serde_json::from_str(&serialized).unwrap_or(serde_json::Value::Array(vec![]))),
-                error: None,
-            }
-        }
-        Err(e) => Response {
-            ok: false,
-            result: None,
-            error: Some(e.to_string()),
-        },
-    }
+    result
 }
 
 fn handle_context(db: &Connection, params: &serde_json::Value) -> Response {
@@ -276,6 +302,7 @@ fn handle_stats(db: &Connection) -> Response {
     }
 }
 
+#[cfg(feature = "embed")]
 fn handle_embed(db: &mut Connection) -> Response {
     let mut embedder = match crate::embed::Embedder::new() {
         Ok(e) => e,

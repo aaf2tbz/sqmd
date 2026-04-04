@@ -7,6 +7,10 @@ edition = "2024"
 name = "sqmd"
 path = "src/main.rs"
 
+[features]
+default = []
+embed = ["sqmd-core/embed"]
+
 [dependencies]
 sqmd-core = { path = "../sqmd-core" }
 clap = { version = "4", features = ["derive"] }

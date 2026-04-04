@@ -1,3 +1,4 @@
+#[cfg(feature = "embed")]
 use crate::embed::{self, Embedder};
 use rusqlite::{params, Connection};
 
@@ -166,6 +167,7 @@ pub fn vec_search(
     Ok(results)
 }
 
+#[cfg(feature = "embed")]
 pub fn hybrid_search(
     db: &Connection,
     query: &SearchQuery,
@@ -196,6 +198,7 @@ pub fn hybrid_search(
     Ok(filtered)
 }
 
+#[cfg(feature = "embed")]
 fn merge_results(
     mut fts: Vec<SearchResult>,
     mut vec: Vec<SearchResult>,
@@ -253,6 +256,7 @@ fn format_vector(vec: &[f32]) -> String {
     format!("[{}]", items.join(", "))
 }
 
+#[cfg(feature = "embed")]
 pub fn store_embedding(
     db: &Connection,
     chunk_id: i64,
@@ -282,6 +286,7 @@ pub fn get_unembedded_chunk_ids(db: &Connection, limit: usize) -> Result<Vec<i64
     Ok(ids)
 }
 
+#[cfg(feature = "embed")]
 pub fn embed_unembedded(
     db: &mut Connection,
     embedder: &mut Embedder,
@@ -390,6 +395,7 @@ mod tests {
         assert!(results.is_empty());
     }
 
+    #[cfg(feature = "embed")]
     #[test]
     fn test_hybrid_search_fts_only() {
         let db = make_test_db();
@@ -406,6 +412,7 @@ mod tests {
         assert!(!results.is_empty());
     }
 
+    #[cfg(feature = "embed")]
     #[test]
     fn test_get_unembedded_chunk_ids() {
         let db = make_test_db();
@@ -421,6 +428,7 @@ mod tests {
         assert!(!ids.contains(&1));
     }
 
+    #[cfg(feature = "embed")]
     #[test]
     fn test_store_and_search_vector() {
         let db = make_test_db();

@@ -48,8 +48,13 @@ impl ContextAssembler {
                 top_k: request.top_k,
                 ..Default::default()
             };
-            let mut embedder = crate::embed::Embedder::new()?;
-            let results = crate::search::hybrid_search(db, &search_query, &mut embedder)?;
+            #[cfg(feature = "embed")]
+            let results = {
+                let mut embedder = crate::embed::Embedder::new()?;
+                crate::search::hybrid_search(db, &search_query, &mut embedder)?
+            };
+            #[cfg(not(feature = "embed"))]
+            let results = crate::search::fts_search(db, &search_query)?;
             for r in &results {
                 if seen_ids.insert(r.chunk_id) {
                     let content = get_chunk_content(db, r.chunk_id)?;

@@ -18,6 +18,7 @@ enum Commands {
         /// Project root directory
         #[arg(default_value = ".")]
         path: PathBuf,
+        #[cfg(feature = "embed")]
         /// Also generate embeddings
         #[arg(long)]
         embed: bool,
@@ -29,6 +30,7 @@ enum Commands {
         /// Maximum results
         #[arg(short, long, default_value = "10")]
         top_k: usize,
+        #[cfg(feature = "embed")]
         /// Vector search weight (0.0 = keyword only, 1.0 = vector only)
         #[arg(long, default_value = "0.7")]
         alpha: f64,
@@ -39,9 +41,11 @@ enum Commands {
         #[arg(long)]
         r#type: Option<String>,
         /// Keyword-only search (skip vector)
+        #[cfg(feature = "embed")]
         #[arg(long)]
         keyword: bool,
     },
+    #[cfg(feature = "embed")]
     /// Generate embeddings for unembedded chunks
     Embed,
     /// Show index statistics
@@ -105,10 +109,25 @@ fn main() {
 fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     match cli.command {
         Commands::Init => cmd_init(),
-        Commands::Index { path, embed } => cmd_index(&path, embed),
-        Commands::Search { query, top_k, alpha, file, r#type, keyword } => {
-            cmd_search(&query, top_k, alpha, file, r#type, keyword)
+        #[cfg(feature = "embed")]
+        Commands::Index { path, embed } => {
+            if embed {
+                cmd_index_embed(&path)
+            } else {
+                cmd_index(&path)
+            }
         }
+        #[cfg(not(feature = "embed"))]
+        Commands::Index { path } => cmd_index(&path),
+        #[cfg(feature = "embed")]
+        Commands::Search { query, top_k, alpha, file, r#type, keyword } => {
+            cmd_search(&query, top_k, Some(alpha), file, r#type, Some(keyword))
+        }
+        #[cfg(not(feature = "embed"))]
+        Commands::Search { query, top_k, file, r#type } => {
+            cmd_search(&query, top_k, None, file, r#type, None)
+        }
+        #[cfg(feature = "embed")]
         Commands::Embed => cmd_embed(),
         Commands::Stats => cmd_stats(),
         Commands::Get { location } => cmd_get(&location),
@@ -165,7 +184,7 @@ fn cmd_init() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn cmd_index(root: &Path, do_embed: bool) -> Result<(), Box<dyn std::error::Error>> {
+fn cmd_index(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let root = root.canonicalize()?;
     let path = db_path();
     let mut db = if path.exists() {
@@ -187,19 +206,23 @@ fn cmd_index(root: &Path, do_embed: bool) -> Result<(), Box<dyn std::error::Erro
     );
     println!("  {} total chunks, {} relationships", stats.chunks_total, stats.relationships_total);
 
-    if do_embed {
-        println!();
-        cmd_embed_with_db(&mut db)?;
-    }
-
     Ok(())
 }
 
+#[cfg(feature = "embed")]
+fn cmd_index_embed(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    cmd_index(root)?;
+    let mut db = ensure_db()?;
+    cmd_embed_with_db(&mut db)
+}
+
+#[cfg(feature = "embed")]
 fn cmd_embed() -> Result<(), Box<dyn std::error::Error>> {
     let mut db = ensure_db()?;
     cmd_embed_with_db(&mut db)
 }
 
+#[cfg(feature = "embed")]
 fn cmd_embed_with_db(db: &mut rusqlite::Connection) -> Result<(), Box<dyn std::error::Error>> {
     let mut embedder = sqmd_core::embed::Embedder::new()?;
 
@@ -241,28 +264,33 @@ fn cmd_embed_with_db(db: &mut rusqlite::Connection) -> Result<(), Box<dyn std::e
 fn cmd_search(
     query: &str,
     top_k: usize,
-    alpha: f64,
+    alpha: Option<f64>,
     file_filter: Option<String>,
     type_filter: Option<String>,
-    keyword_only: bool,
+    #[cfg_attr(not(feature = "embed"), allow(unused_variables))]
+    keyword_only: Option<bool>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let db = ensure_db()?;
 
     let search_query = sqmd_core::search::SearchQuery {
         text: query.to_string(),
         top_k,
-        alpha,
+        alpha: alpha.unwrap_or(0.7),
         file_filter,
         type_filter,
         ..Default::default()
     };
 
-    let results = if keyword_only {
+    #[cfg(feature = "embed")]
+    let results = if keyword_only.unwrap_or(false) {
         sqmd_core::search::fts_search(&db, &search_query)?
     } else {
         let mut embedder = sqmd_core::embed::Embedder::new()?;
         sqmd_core::search::hybrid_search(&db, &search_query, &mut embedder)?
     };
+
+    #[cfg(not(feature = "embed"))]
+    let results = sqmd_core::search::fts_search(&db, &search_query)?;
 
     if results.is_empty() {
         println!("No results for: {}", query);
