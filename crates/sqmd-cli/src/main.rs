@@ -41,6 +41,12 @@ enum Commands {
         /// File path
         path: String,
     },
+    /// Watch for file changes and re-index incrementally
+    Watch {
+        /// Project root directory
+        #[arg(default_value = ".")]
+        path: PathBuf,
+    },
 }
 
 fn main() {
@@ -61,6 +67,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         Commands::Get { location } => cmd_get(&location),
         Commands::Reset => cmd_reset(),
         Commands::Deps { path } => cmd_deps(&path),
+        Commands::Watch { path } => cmd_watch(&path),
     }
 }
 
@@ -315,4 +322,9 @@ fn cmd_reset() -> Result<(), Box<dyn std::error::Error>> {
     let _ = std::fs::remove_file(&shm);
     println!("Index reset. Run `sqmd index` to rebuild.");
     Ok(())
+}
+
+fn cmd_watch(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    let root = root.canonicalize()?;
+    sqmd_core::watcher::watch(&root)
 }
