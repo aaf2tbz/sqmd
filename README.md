@@ -131,6 +131,16 @@ sqmd get src/auth.ts:42              # get chunk at file:line
 sqmd diff "2025-01-01T00:00:00"      # chunks modified since timestamp
 ```
 
+### Maintenance
+
+```bash
+sqmd entities                         # list all entities (files, structs, functions)
+sqmd entities --type struct            # filter by entity type
+sqmd entity-deps "AuthModule"          # entity dependency graph
+sqmd entity-deps "AuthModule" --depth 2
+sqmd prune --days 30                   # purge soft-deleted chunks older than 30 days
+```
+
 ### Dependencies & Context
 
 ```bash
@@ -216,6 +226,7 @@ sqmd/
 |   |   |   +-- embed.rs         # ONNX embedding (ort) + BPE tokenizer + auto-download
 |   |   |   +-- search.rs        # FTS5 + vector hybrid search engine
 |   |   |   +-- relationships.rs  # Import resolution + call graph + CTE depth traversal
+|   |   |   +-- entities.rs     # Entity/aspect/attribute model + hints + graph boost
 |   |   |   +-- context.rs       # Context assembly + token budgeting
 |   |   |   +-- vfs.rs           # Virtual file system: list, get, diff, tree rendering
 |   |   |   +-- daemon.rs        # Unix socket daemon + JSON protocol
@@ -241,7 +252,7 @@ sqmd/
 
 ## Current Status
 
-All 6 phases complete. 60 tests (embed), 52 tests (default), 0 clippy warnings, CI passing.
+All 6 phases complete. Pipeline intelligence features added. 61 tests (default), 69 tests (embed), 0 clippy warnings, CI passing.
 
 | Phase | What it adds |
 |-------|-------------|

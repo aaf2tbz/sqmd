@@ -630,133 +630,6 @@ impl<'a> Indexer<'a> {
         Ok(())
     }
 
-    #[allow(dead_code)]
-    fn write_chunks_contains_calls(
-        &self,
-        _relative: &str,
-        chunks: &[chunk::Chunk],
-    ) -> Result<usize, Box<dyn std::error::Error>> {
-        let mut parent_stack: Vec<(i64, usize, usize)> = Vec::new();
-        let mut rel_count = 0;
-        let mut chunk_ids: Vec<(usize, i64)> = Vec::new();
-
-        for (chunk_idx, chunk) in chunks.iter().enumerate() {
-            let chunk_id = self.insert_chunk(chunk)?;
-
-            if let Some(id) = chunk_id {
-                chunk_ids.push((chunk_idx, id));
-            }
-
-            if matches!(
-                chunk.chunk_type,
-                chunk::ChunkType::Class
-                    | chunk::ChunkType::Impl
-                    | chunk::ChunkType::Trait
-                    | chunk::ChunkType::Module
-                    | chunk::ChunkType::Enum
-                    | chunk::ChunkType::Struct
-            ) {
-                if let Some(id) = chunk_id {
-                    parent_stack.truncate(
-                        parent_stack
-                            .iter()
-                            .rposition(|(_, _, end)| chunk.line_start >= *end)
-                            .map(|p| p + 1)
-                            .unwrap_or(0),
-                    );
-                    parent_stack.push((id, chunk.line_start, chunk.line_end));
-                }
-            }
-
-            if matches!(
-                chunk.chunk_type,
-                chunk::ChunkType::Method
-                    | chunk::ChunkType::Constant
-                    | chunk::ChunkType::Type
-            ) {
-                if let Some(&(pid, p_start, p_end)) = parent_stack.last() {
-                    if chunk.line_start > p_start && chunk.line_end <= p_end {
-                        if let Some(cid) = chunk_id {
-                            self.db.execute(
-                                "INSERT OR IGNORE INTO relationships (source_id, target_id, rel_type) VALUES (?1, ?2, 'contains')",
-                                params![pid, cid],
-                            )?;
-                            rel_count += 1;
-                        }
-                    }
-                }
-            }
-        }
-
-        // Call graph: build name→id map from same file + imported targets
-        let mut name_to_id: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
-        for (idx, id) in &chunk_ids {
-            if let Some(ref name) = chunks[*idx].name {
-                name_to_id.insert(name.clone(), *id);
-            }
-        }
-
-        let imported_names: Vec<String> = {
-            let chunk_id_list: Vec<i64> = chunk_ids.iter().map(|(_, id)| *id).collect();
-            if chunk_id_list.is_empty() {
-                Vec::new()
-            } else {
-                let placeholders: Vec<String> = (0..chunk_id_list.len()).map(|i| format!("?{}", i + 1)).collect();
-                let sql = format!(
-                    "SELECT DISTINCT c.name FROM relationships r
-                     JOIN chunks c ON r.target_id = c.id
-                     WHERE r.source_id IN ({}) AND r.rel_type = 'imports' AND c.name IS NOT NULL",
-                    placeholders.join(", ")
-                );
-                let mut stmt = self.db.prepare(&sql)?;
-                let params: Vec<&dyn rusqlite::ToSql> = chunk_id_list.iter().map(|id| id as &dyn rusqlite::ToSql).collect();
-                let rows = stmt.query_map(params.as_slice(), |r| r.get(0))?
-                    .collect::<Result<_, _>>()?;
-                drop(stmt);
-                rows
-            }
-        };
-
-        for name in &imported_names {
-            if !name_to_id.contains_key(name.as_str()) {
-                if let Ok(Some(id)) = self.db.query_row(
-                    "SELECT id FROM chunks WHERE name = ?1 AND chunk_type IN ('function', 'method', 'class', 'struct', 'enum', 'interface', 'trait', 'constant') LIMIT 1",
-                    params![name],
-                    |r| r.get(0),
-                ) {
-                    name_to_id.insert(name.clone(), id);
-                }
-            }
-        }
-
-        for (idx, caller_id) in &chunk_ids {
-            let caller_id = *caller_id;
-            let c = &chunks[*idx];
-            if !matches!(
-                c.chunk_type,
-                chunk::ChunkType::Function
-                    | chunk::ChunkType::Method
-                    | chunk::ChunkType::Constant
-            ) {
-                continue;
-            }
-
-            for call in crate::relationships::extract_calls(&c.content_raw) {
-                if let Some(&target_id) = name_to_id.get(&call) {
-                    if target_id != caller_id {
-                        self.db.execute(
-                            "INSERT OR IGNORE INTO relationships (source_id, target_id, rel_type) VALUES (?1, ?2, 'calls')",
-                            params![caller_id, target_id],
-                        )?;
-                        rel_count += 1;
-                    }
-                }
-            }
-        }
-
-        Ok(rel_count)
-    }
-
     fn write_import_relationships(
         &self,
         relative: &str,
@@ -832,7 +705,7 @@ mod tests {
         let db_path = dir.join(".sqmd/index.db");
         std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
 
-        let mut conn = Connection::open(&db_path).unwrap();
+        let conn = Connection::open(&db_path).unwrap();
         conn.execute_batch("PRAGMA journal_mode=WAL").ok();
 
         let db: &'static mut Connection = Box::leak(Box::new(conn));

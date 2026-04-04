@@ -457,7 +457,7 @@ mod tests {
 
     #[test]
     fn test_compute_structural_importance() {
-        let mut db = make_db();
+        let db = make_db();
         db.execute("INSERT INTO files (path, language, size, mtime, hash) VALUES ('a.ts', 'ts', 10, 0, 'a')", []).unwrap();
         db.execute("INSERT INTO chunks (id, file_path, language, chunk_type, name, line_start, line_end, content_raw, content_hash) VALUES (1, 'a.ts', 'ts', 'function', 'helper', 0, 1, 'fn helper()', 'x')", []).unwrap();
         db.execute("INSERT INTO chunks (id, file_path, language, chunk_type, name, line_start, line_end, content_raw, content_hash) VALUES (2, 'a.ts', 'ts', 'function', 'caller', 2, 3, 'fn caller() { helper(); }', 'y')", []).unwrap();
@@ -472,7 +472,7 @@ mod tests {
 
     #[test]
     fn test_tombstone_and_purge() {
-        let mut db = make_db();
+        let db = make_db();
         db.execute("INSERT INTO files (path, language, size, mtime, hash) VALUES ('old.rs', 'rust', 10, 0, 'a')", []).unwrap();
         db.execute("INSERT INTO chunks (id, file_path, language, chunk_type, name, line_start, line_end, content_raw, content_hash) VALUES (1, 'old.rs', 'rust', 'function', 'dead', 0, 1, 'fn dead()', 'x')", []).unwrap();
 
@@ -497,7 +497,7 @@ mod tests {
 
     #[test]
     fn test_insert_and_search_hints() {
-        let mut db = make_db();
+        let db = make_db();
         db.execute("INSERT INTO files (path, language, size, mtime, hash) VALUES ('auth.ts', 'ts', 10, 0, 'a')", []).unwrap();
         db.execute("INSERT INTO chunks (id, file_path, language, chunk_type, name, line_start, line_end, content_raw, content_hash) VALUES (1, 'auth.ts', 'ts', 'function', 'authenticate', 0, 5, 'fn auth()', 'x')", []).unwrap();
 
@@ -511,7 +511,7 @@ mod tests {
 
     #[test]
     fn test_graph_boost_ids() {
-        let mut db = make_db();
+        let db = make_db();
         let eid = ensure_entity(&db, "AuthModule", "file").unwrap();
         let target_eid = ensure_entity(&db, "DatabasePool", "file").unwrap();
         ensure_dependency(&db, eid, target_eid, "imports").unwrap();

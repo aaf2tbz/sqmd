@@ -105,38 +105,6 @@ impl ContextAssembler {
             }
         }
 
-        for file_path in &request.files {
-            let mut stmt = db.prepare(
-                "SELECT id, file_path, name, chunk_type, line_start, line_end, importance, content_raw, language
-                 FROM chunks WHERE file_path = ?1 AND importance >= 0.5
-                 ORDER BY importance DESC",
-            )?;
-            #[allow(clippy::type_complexity)]
-            let rows: Vec<(i64, String, Option<String>, String, i64, i64, f64, String, String)> = stmt
-                .query_map(rusqlite::params![file_path], |r| {
-                    Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?, r.get(8)?))
-                })?
-                .collect::<Result<Vec<_>, _>>()?;
-
-            for (id, fp, name, ct, ls, le, imp, content, lang) in rows {
-                if seen_ids.insert(id) {
-                    selected.push((id, fp, name, ct, ls, le, format!("{:.2}", imp), content, imp, lang));
-                }
-            }
-        }
-
-        if request.include_deps {
-            let chunk_ids: Vec<i64> = selected.iter().map(|(id, ..)| *id).collect();
-            if !chunk_ids.is_empty() {
-                let deps = get_related_chunks(db, &chunk_ids, request.dep_depth)?;
-                for (id, fp, name, ct, ls, le, content, lang) in &deps {
-                    if seen_ids.insert(*id) {
-                        selected.push((*id, fp.clone(), name.clone(), ct.clone(), *ls, *le, "0.5".to_string(), content.clone(), 0.5, lang.clone()));
-                    }
-                }
-            }
-        }
-
         // 4. Sort by score descending, then render with token budget
         selected.sort_by(|a, b| b.8.partial_cmp(&a.8).unwrap_or(std::cmp::Ordering::Equal));
 
