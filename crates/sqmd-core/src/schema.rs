@@ -16,6 +16,11 @@ pub fn init(db: &mut Connection) -> SqlResult<()> {
     db.execute_batch("PRAGMA busy_timeout = 5000;")?;
     db.execute_batch("PRAGMA defer_foreign_keys = ON;")?;
 
+    // Always ensure chunks_vec exists — handles dbs created before embed feature
+    if let Err(e) = db.execute_batch("CREATE VIRTUAL TABLE IF NOT EXISTS chunks_vec USING vec0(embedding float[768]);") {
+        eprintln!("[schema] chunks_vec creation failed: {e}");
+    }
+
     let version: i64 = db
         .query_row(
             "SELECT COALESCE(MAX(version), 0) FROM schema_version",
@@ -437,6 +442,13 @@ fn migrate_v4(db: &mut Connection) -> SqlResult<()> {
 }
 
 pub fn open(path: &Path) -> SqlResult<Connection> {
+    // Register sqlite-vec BEFORE opening so the connection has it available
+    #[allow(clippy::missing_transmute_annotations)]
+    unsafe {
+        rusqlite::ffi::sqlite3_auto_extension(Some(std::mem::transmute(
+            sqlite3_vec_init as *const (),
+        )));
+    }
     let mut db = Connection::open(path)?;
     init(&mut db)?;
     Ok(db)

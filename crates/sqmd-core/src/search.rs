@@ -309,16 +309,13 @@ pub fn vec_search(
         param_values.push(Box::new(agent.to_string()));
     }
 
-    extra_clauses.push(format!("ORDER BY v.distance LIMIT ?{}", next_param));
-    param_values.push(Box::new(top_k as i64));
-
     let filter_clause = extra_clauses.join(" ");
 
     let sql = format!(
         "SELECT v.rowid, v.distance, c.file_path, c.name, c.signature, c.line_start, c.line_end, c.chunk_type, c.source_type, c.decay_rate, c.last_accessed \
          FROM chunks_vec v JOIN chunks c ON v.rowid = c.id \
-         WHERE v.embedding MATCH ?1 AND c.is_deleted = 0 {}",
-        filter_clause
+         WHERE v.embedding MATCH ?1 AND k = {} AND c.is_deleted = 0 {}",
+        top_k, filter_clause
     );
 
     let mut stmt = db.prepare(&sql)?;
