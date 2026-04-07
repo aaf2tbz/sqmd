@@ -8,11 +8,11 @@ fn test_knowledge_ingest_and_unified_search() {
     let mut db = rusqlite::Connection::open_in_memory().unwrap();
     schema::init(&mut db).unwrap();
 
-    // Verify schema v4
+    // Verify schema v6
     let version: i64 = db
         .query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(version, 5);
+    assert_eq!(version, 6);
 
     // Insert a code chunk
     db.execute("INSERT INTO files (path, language, size, mtime, hash) VALUES ('src/auth.ts', 'typescript', 100, 0.0, 'abc')", []).unwrap();

@@ -144,6 +144,9 @@ fn handle_connection(
         "embed_text" => handle_embed_text(&request.params),
         #[cfg(feature = "embed")]
         "embed_batch" => handle_embed_batch(&request.params),
+        "communities" => handle_communities(&db, &request.params),
+        "community_summary" => handle_community_summary(&db, &request.params),
+        "project_summary" => handle_project_summary(&db),
         _ => Response {
             ok: false,
             result: None,
@@ -826,6 +829,117 @@ fn handle_modify(db: &Connection, params: &serde_json::Value) -> Response {
         Ok(_) => Response {
             ok: true,
             result: Some(serde_json::json!({"modified": true})),
+            error: None,
+        },
+        Err(e) => Response {
+            ok: false,
+            result: None,
+            error: Some(e.to_string()),
+        },
+    }
+}
+
+fn handle_communities(db: &Connection, params: &serde_json::Value) -> Response {
+    let query = params["query"].as_str().unwrap_or("");
+    let top_k = params["top_k"].as_u64().unwrap_or(20) as usize;
+
+    if query.is_empty() {
+        match crate::communities::ensure_communities(db) {
+            Ok(count) => match crate::communities::regenerate_summaries(db) {
+                Ok(updated) => Response {
+                    ok: true,
+                    result: Some(serde_json::json!({
+                        "communities_count": count,
+                        "summaries_generated": updated,
+                    })),
+                    error: None,
+                },
+                Err(e) => Response {
+                    ok: false,
+                    result: None,
+                    error: Some(e.to_string()),
+                },
+            },
+            Err(e) => Response {
+                ok: false,
+                result: None,
+                error: Some(e.to_string()),
+            },
+        }
+    } else {
+        match crate::communities::search_communities(db, query, top_k) {
+            Ok(communities) => {
+                let json =
+                    serde_json::to_value(&communities).unwrap_or(serde_json::Value::Array(vec![]));
+                Response {
+                    ok: true,
+                    result: Some(json),
+                    error: None,
+                }
+            }
+            Err(e) => Response {
+                ok: false,
+                result: None,
+                error: Some(e.to_string()),
+            },
+        }
+    }
+}
+
+fn handle_community_summary(db: &Connection, params: &serde_json::Value) -> Response {
+    let community_id = params["id"].as_i64().unwrap_or(0);
+
+    if community_id == 0 {
+        return Response {
+            ok: false,
+            result: None,
+            error: Some("Missing 'id' parameter".to_string()),
+        };
+    }
+
+    let chunks = crate::communities::get_community_chunks(db, community_id);
+    let community_path: Option<String> = db
+        .query_row(
+            "SELECT path FROM communities WHERE id = ?1",
+            rusqlite::params![community_id],
+            |r| r.get::<_, String>(0),
+        )
+        .ok();
+
+    match (community_path, chunks) {
+        (_, Ok(chunks)) => {
+            let chunk_list: Vec<serde_json::Value> = chunks
+                .iter()
+                .map(|(id, fp, name, ct, ls, le)| {
+                    serde_json::json!({
+                        "chunk_id": id,
+                        "file_path": fp,
+                        "name": name,
+                        "chunk_type": ct,
+                        "line_start": ls + 1,
+                        "line_end": le + 1,
+                    })
+                })
+                .collect();
+            Response {
+                ok: true,
+                result: Some(serde_json::json!({ "chunks": chunk_list })),
+                error: None,
+            }
+        }
+        _ => Response {
+            ok: false,
+            result: None,
+            error: Some(format!("No community found with id {}", community_id)),
+        },
+    }
+}
+
+fn handle_project_summary(db: &Connection) -> Response {
+    match crate::communities::get_project_summary(db) {
+        Ok(summary) => Response {
+            ok: true,
+            result: Some(serde_json::json!({ "markdown": summary })),
             error: None,
         },
         Err(e) => Response {

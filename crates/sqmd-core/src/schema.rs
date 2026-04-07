@@ -2,7 +2,7 @@ use rusqlite::{Connection, Result as SqlResult};
 use sqlite_vec::sqlite3_vec_init;
 use std::path::Path;
 
-const CURRENT_VERSION: i64 = 5;
+const CURRENT_VERSION: i64 = 6;
 
 pub fn init(db: &mut Connection) -> SqlResult<()> {
     #[allow(clippy::missing_transmute_annotations)]
@@ -40,10 +40,22 @@ pub fn init(db: &mut Connection) -> SqlResult<()> {
             "CREATE VIRTUAL TABLE IF NOT EXISTS chunks_vec USING vec0(embedding float[768]);",
         )
         .ok();
-        db.execute_batch(&format!(
-            "INSERT OR IGNORE INTO schema_version (version) VALUES ({})",
-            CURRENT_VERSION
-        ))?;
+        // schema.sql covers through v5 — only run migrations beyond that
+        if CURRENT_VERSION > 5 {
+            // Read actual version from schema.sql insert
+            let sql_version: i64 = db
+                .query_row(
+                    "SELECT COALESCE(MAX(version), 0) FROM schema_version",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap_or(5);
+            // Only run migrations newer than what schema.sql provides
+            // We only have v6 so far; general pattern: iterate as needed
+            if sql_version < 6 {
+                migrate_v6(db)?;
+            }
+        }
         return Ok(());
     }
 
@@ -61,6 +73,10 @@ pub fn init(db: &mut Connection) -> SqlResult<()> {
 
     if version < 5 {
         migrate_v5(db)?;
+    }
+
+    if version < 6 {
+        migrate_v6(db)?;
     }
 
     Ok(())
@@ -571,6 +587,26 @@ fn migrate_v5(db: &mut Connection) -> SqlResult<()> {
     }
 
     db.execute_batch("INSERT OR IGNORE INTO schema_version (version) VALUES (5);")?;
+    Ok(())
+}
+
+fn migrate_v6(db: &mut Connection) -> SqlResult<()> {
+    db.execute_batch(
+        "CREATE TABLE IF NOT EXISTS communities (
+            id INTEGER PRIMARY KEY,
+            path TEXT NOT NULL UNIQUE,
+            depth INTEGER NOT NULL DEFAULT 1,
+            name TEXT NOT NULL,
+            chunk_count INTEGER NOT NULL DEFAULT 0,
+            entity_count INTEGER NOT NULL DEFAULT 0,
+            summary TEXT,
+            generated_at TEXT,
+            created_at TEXT NOT NULL DEFAULT ''
+        );",
+    )?;
+    db.execute_batch("CREATE INDEX IF NOT EXISTS idx_communities_path ON communities(path);")?;
+    db.execute_batch("CREATE INDEX IF NOT EXISTS idx_communities_depth ON communities(depth);")?;
+    db.execute_batch("INSERT OR IGNORE INTO schema_version (version) VALUES (6);")?;
     Ok(())
 }
 
