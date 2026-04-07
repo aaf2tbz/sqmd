@@ -12,7 +12,7 @@ fn test_knowledge_ingest_and_unified_search() {
     let version: i64 = db
         .query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(version, 6);
+    assert_eq!(version, 7);
 
     // Insert a code chunk
     db.execute("INSERT INTO files (path, language, size, mtime, hash) VALUES ('src/auth.ts', 'typescript', 100, 0.0, 'abc')", []).unwrap();

@@ -147,6 +147,9 @@ fn handle_connection(
         "communities" => handle_communities(&db, &request.params),
         "community_summary" => handle_community_summary(&db, &request.params),
         "project_summary" => handle_project_summary(&db),
+        "supersede_fact" => handle_supersede_fact(&db, &request.params),
+        "facts_at" => handle_facts_at(&db, &request.params),
+        "fact_history" => handle_fact_history(&db, &request.params),
         _ => Response {
             ok: false,
             result: None,
@@ -946,6 +949,114 @@ fn handle_project_summary(db: &Connection) -> Response {
             ok: false,
             result: None,
             error: Some(e.to_string()),
+        },
+    }
+}
+
+fn handle_supersede_fact(db: &Connection, params: &serde_json::Value) -> Response {
+    let source = params.get("source_entity").and_then(|v| v.as_i64());
+    let target = params.get("target_entity").and_then(|v| v.as_i64());
+    let dep_type = params.get("dep_type").and_then(|v| v.as_str());
+
+    match (source, target, dep_type) {
+        (Some(s), Some(t), Some(dt)) => match crate::entities::supersede_dependency(db, s, t, dt) {
+            Ok(count) => Response {
+                ok: true,
+                result: Some(serde_json::json!({ "superseded": count })),
+                error: None,
+            },
+            Err(e) => Response {
+                ok: false,
+                result: None,
+                error: Some(e.to_string()),
+            },
+        },
+        _ => Response {
+            ok: false,
+            result: None,
+            error: Some("source_entity, target_entity, and dep_type required".into()),
+        },
+    }
+}
+
+fn handle_facts_at(db: &Connection, params: &serde_json::Value) -> Response {
+    let entity_id = params.get("entity_id").and_then(|v| v.as_i64());
+    let as_of = params
+        .get("as_of")
+        .and_then(|v| v.as_str())
+        .unwrap_or("now");
+
+    match entity_id {
+        Some(eid) => match crate::entities::query_dependencies_at(db, eid, as_of) {
+            Ok(facts) => {
+                let items: Vec<serde_json::Value> = facts
+                    .into_iter()
+                    .map(|(src, dt, strength, mentions, vf, vt)| {
+                        serde_json::json!({
+                            "source_entity": src,
+                            "dep_type": dt,
+                            "strength": strength,
+                            "mentions": mentions,
+                            "valid_from": vf,
+                            "valid_to": vt,
+                        })
+                    })
+                    .collect();
+                Response {
+                    ok: true,
+                    result: Some(serde_json::json!({ "facts": items })),
+                    error: None,
+                }
+            }
+            Err(e) => Response {
+                ok: false,
+                result: None,
+                error: Some(e.to_string()),
+            },
+        },
+        None => Response {
+            ok: false,
+            result: None,
+            error: Some("entity_id required".into()),
+        },
+    }
+}
+
+fn handle_fact_history(db: &Connection, params: &serde_json::Value) -> Response {
+    let source = params.get("source_entity").and_then(|v| v.as_i64());
+    let target = params.get("target_entity").and_then(|v| v.as_i64());
+    let dep_type = params.get("dep_type").and_then(|v| v.as_str());
+
+    match (source, target, dep_type) {
+        (Some(s), Some(t), Some(dt)) => match crate::entities::get_fact_history(db, s, t, dt) {
+            Ok(history) => {
+                let items: Vec<serde_json::Value> = history
+                    .into_iter()
+                    .map(|(id, vf, vt, mentions)| {
+                        serde_json::json!({
+                            "id": id,
+                            "valid_from": vf,
+                            "valid_to": vt,
+                            "mentions": mentions,
+                        })
+                    })
+                    .collect();
+                Response {
+                    ok: true,
+                    result: Some(serde_json::json!({ "history": items })),
+                    error: None,
+                }
+            }
+            Err(e) => Response {
+                ok: false,
+                result: None,
+                error: Some(e.to_string()),
+            },
+        },
+        _ => Response {
+            ok: false,
+            result: None,
+            error: Some("source_entity, target_entity, and dep_type required".into()),
         },
     }
 }

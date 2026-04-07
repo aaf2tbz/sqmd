@@ -2,7 +2,7 @@ use rusqlite::{Connection, Result as SqlResult};
 use sqlite_vec::sqlite3_vec_init;
 use std::path::Path;
 
-const CURRENT_VERSION: i64 = 6;
+const CURRENT_VERSION: i64 = 7;
 
 pub fn init(db: &mut Connection) -> SqlResult<()> {
     #[allow(clippy::missing_transmute_annotations)]
@@ -51,9 +51,11 @@ pub fn init(db: &mut Connection) -> SqlResult<()> {
                 )
                 .unwrap_or(5);
             // Only run migrations newer than what schema.sql provides
-            // We only have v6 so far; general pattern: iterate as needed
             if sql_version < 6 {
                 migrate_v6(db)?;
+            }
+            if sql_version < 7 {
+                migrate_v7(db)?;
             }
         }
         return Ok(());
@@ -77,6 +79,10 @@ pub fn init(db: &mut Connection) -> SqlResult<()> {
 
     if version < 6 {
         migrate_v6(db)?;
+    }
+
+    if version < 7 {
+        migrate_v7(db)?;
     }
 
     Ok(())
@@ -607,6 +613,30 @@ fn migrate_v6(db: &mut Connection) -> SqlResult<()> {
     db.execute_batch("CREATE INDEX IF NOT EXISTS idx_communities_path ON communities(path);")?;
     db.execute_batch("CREATE INDEX IF NOT EXISTS idx_communities_depth ON communities(depth);")?;
     db.execute_batch("INSERT OR IGNORE INTO schema_version (version) VALUES (6);")?;
+    Ok(())
+}
+
+fn migrate_v7(db: &mut Connection) -> SqlResult<()> {
+    let has_valid_from: bool = db
+        .prepare(
+            "SELECT COUNT(*) FROM pragma_table_info('entity_dependencies') WHERE name='valid_from'",
+        )?
+        .query_row([], |r| r.get::<_, i64>(0))
+        .map(|c| c > 0)
+        .unwrap_or(false);
+
+    if !has_valid_from {
+        db.execute_batch(
+            "ALTER TABLE entity_dependencies ADD COLUMN valid_from TEXT NOT NULL DEFAULT '';",
+        )?;
+        db.execute_batch("ALTER TABLE entity_dependencies ADD COLUMN valid_to TEXT;")?;
+        db.execute_batch(
+            "UPDATE entity_dependencies SET valid_from = datetime('now') WHERE valid_from = '';",
+        )?;
+        db.execute_batch("CREATE INDEX IF NOT EXISTS idx_ed_temporal ON entity_dependencies(valid_from, valid_to);")?;
+    }
+
+    db.execute_batch("INSERT OR IGNORE INTO schema_version (version) VALUES (7);")?;
     Ok(())
 }
 

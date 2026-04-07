@@ -1,5 +1,9 @@
 use rusqlite::params;
 
+type DepFactAt = (i64, String, f64, i64, String, Option<String>);
+type CurrentDep = (i64, String, f64, i64);
+type FactHistoryEntry = (i64, String, Option<String>, i64);
+
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct Entity {
     pub id: i64,
@@ -99,11 +103,87 @@ pub fn ensure_dependency(
     dep_type: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     db.execute(
-        "INSERT INTO entity_dependencies (source_entity, target_entity, dep_type) VALUES (?1, ?2, ?3)
+        "INSERT INTO entity_dependencies (source_entity, target_entity, dep_type, valid_from) VALUES (?1, ?2, ?3, datetime('now'))
          ON CONFLICT(source_entity, target_entity, dep_type) DO UPDATE SET mentions = mentions + 1",
         params![source_entity, target_entity, dep_type],
     )?;
     Ok(())
+}
+
+pub fn supersede_dependency(
+    db: &rusqlite::Connection,
+    source_entity: i64,
+    target_entity: i64,
+    dep_type: &str,
+) -> Result<usize, Box<dyn std::error::Error>> {
+    let count = db.execute(
+        "UPDATE entity_dependencies SET valid_to = datetime('now') WHERE source_entity = ?1 AND target_entity = ?2 AND dep_type = ?3 AND valid_to IS NULL",
+        params![source_entity, target_entity, dep_type],
+    )?;
+    Ok(count)
+}
+
+pub fn query_dependencies_at(
+    db: &rusqlite::Connection,
+    entity_id: i64,
+    as_of: &str,
+) -> Result<Vec<DepFactAt>, Box<dyn std::error::Error>> {
+    let mut stmt = db.prepare(
+        "SELECT source_entity, dep_type, strength, mentions, valid_from, valid_to
+         FROM entity_dependencies
+         WHERE (source_entity = ?1 OR target_entity = ?1)
+           AND datetime(?2) >= valid_from
+           AND (valid_to IS NULL OR datetime(?2) < valid_to)",
+    )?;
+    let rows = stmt
+        .query_map(params![entity_id, as_of], |r| {
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                r.get(2)?,
+                r.get(3)?,
+                r.get(4)?,
+                r.get(5)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+pub fn get_current_dependencies(
+    db: &rusqlite::Connection,
+    entity_id: i64,
+) -> Result<Vec<CurrentDep>, Box<dyn std::error::Error>> {
+    let mut stmt = db.prepare(
+        "SELECT target_entity, dep_type, strength, mentions
+         FROM entity_dependencies
+         WHERE source_entity = ?1 AND valid_to IS NULL",
+    )?;
+    let rows = stmt
+        .query_map(params![entity_id], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+pub fn get_fact_history(
+    db: &rusqlite::Connection,
+    source_entity: i64,
+    target_entity: i64,
+    dep_type: &str,
+) -> Result<Vec<FactHistoryEntry>, Box<dyn std::error::Error>> {
+    let mut stmt = db.prepare(
+        "SELECT id, valid_from, valid_to, mentions FROM entity_dependencies
+         WHERE source_entity = ?1 AND target_entity = ?2 AND dep_type = ?3
+         ORDER BY valid_from DESC",
+    )?;
+    let rows = stmt
+        .query_map(params![source_entity, target_entity, dep_type], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
 }
 
 pub fn get_entity(
@@ -155,11 +235,11 @@ pub fn get_dependency_ids(
     }
     let sql = format!(
         "WITH RECURSIVE ent_deps(target_entity, d) AS (
-            SELECT target_entity, 1 FROM entity_dependencies WHERE source_entity = ?1
+            SELECT target_entity, 1 FROM entity_dependencies WHERE source_entity = ?1 AND valid_to IS NULL
             UNION
             SELECT ed.target_entity, ed2.d + 1 FROM entity_dependencies ed
             JOIN ent_deps ed2 ON ed.source_entity = ed2.target_entity
-            WHERE ed2.d < {0}
+            WHERE ed2.d < {0} AND ed.valid_to IS NULL
         )
         SELECT DISTINCT target_entity FROM ent_deps WHERE target_entity != ?1",
         depth,
@@ -221,15 +301,15 @@ pub fn graph_boost_scored(
     // 3-hop expansion via recursive CTE with depth
     for &seed in &entity_ids {
         let sql = "WITH RECURSIVE deps(eid, depth) AS (
-            SELECT target_entity, 1 FROM entity_dependencies WHERE source_entity = ?1
+            SELECT target_entity, 1 FROM entity_dependencies WHERE source_entity = ?1 AND valid_to IS NULL
             UNION
-            SELECT source_entity, 1 FROM entity_dependencies WHERE target_entity = ?1
+            SELECT source_entity, 1 FROM entity_dependencies WHERE target_entity = ?1 AND valid_to IS NULL
             UNION ALL
             SELECT ed.target_entity, d.depth + 1 FROM entity_dependencies ed
-            JOIN deps d ON ed.source_entity = d.eid WHERE d.depth < 3
+            JOIN deps d ON ed.source_entity = d.eid WHERE d.depth < 3 AND ed.valid_to IS NULL
             UNION ALL
             SELECT ed.source_entity, d.depth + 1 FROM entity_dependencies ed
-            JOIN deps d ON ed.target_entity = d.eid WHERE d.depth < 3
+            JOIN deps d ON ed.target_entity = d.eid WHERE d.depth < 3 AND ed.valid_to IS NULL
         ) SELECT DISTINCT eid, MIN(depth) FROM deps GROUP BY eid";
 
         let mut stmt = db.prepare(sql)?;
@@ -908,5 +988,66 @@ mod tests {
         let ids = graph_boost_ids(&db, "auth", 10).unwrap();
         assert_eq!(ids.len(), 1);
         assert_eq!(ids[0], 1);
+    }
+
+    #[test]
+    fn test_supersede_dependency() {
+        let db = make_db();
+        let eid = ensure_entity(&db, "AuthService", "file").unwrap();
+        let target = ensure_entity(&db, "OldDatabase", "file").unwrap();
+
+        ensure_dependency(&db, eid, target, "imports").unwrap();
+
+        let current = get_current_dependencies(&db, eid).unwrap();
+        assert_eq!(current.len(), 1);
+
+        let count = supersede_dependency(&db, eid, target, "imports").unwrap();
+        assert_eq!(count, 1);
+
+        let current = get_current_dependencies(&db, eid).unwrap();
+        assert!(
+            current.is_empty(),
+            "superseded dep should not appear in current"
+        );
+
+        let history = get_fact_history(&db, eid, target, "imports").unwrap();
+        assert_eq!(history.len(), 1);
+        assert!(
+            history[0].2.is_some(),
+            "valid_to should be set after supersede"
+        );
+    }
+
+    #[test]
+    fn test_query_dependencies_at() {
+        let db = make_db();
+        let eid = ensure_entity(&db, "AuthService", "file").unwrap();
+        let target = ensure_entity(&db, "OldDB", "file").unwrap();
+
+        ensure_dependency(&db, eid, target, "imports").unwrap();
+
+        let supersede_count = supersede_dependency(&db, eid, target, "imports").unwrap();
+        assert_eq!(supersede_count, 1);
+
+        let current = get_current_dependencies(&db, eid).unwrap();
+        assert!(
+            current.is_empty(),
+            "superseded dep should not appear in current"
+        );
+
+        let future_facts = query_dependencies_at(&db, eid, "2100-01-01").unwrap();
+        assert!(
+            future_facts.is_empty(),
+            "future point should see superseded fact as inactive"
+        );
+
+        let recent_facts = query_dependencies_at(&db, eid, "2020-01-01").unwrap();
+        assert!(recent_facts.is_empty(), "before creation should be empty");
+
+        let now_facts = query_dependencies_at(&db, eid, "now").unwrap();
+        assert!(
+            now_facts.is_empty(),
+            "now should see superseded fact as inactive"
+        );
     }
 }
