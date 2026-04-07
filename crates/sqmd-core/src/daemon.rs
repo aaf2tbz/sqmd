@@ -413,7 +413,7 @@ fn handle_get(db: &Connection, params: &serde_json::Value) -> Response {
     };
 
     match db.query_row(
-        "SELECT line_start, line_end, name, language, content_raw FROM chunks
+        "SELECT line_start, line_end, name, language, content_raw, source_type, importance, chunk_type FROM chunks
          WHERE file_path = ?1 AND line_start <= ?2 AND line_end >= ?2 LIMIT 1",
         rusqlite::params![file, line_num],
         |r| {
@@ -423,20 +423,34 @@ fn handle_get(db: &Connection, params: &serde_json::Value) -> Response {
                 r.get::<_, Option<String>>(2)?,
                 r.get::<_, String>(3)?,
                 r.get::<_, String>(4)?,
+                r.get::<_, String>(5)?,
+                r.get::<_, f64>(6)?,
+                r.get::<_, String>(7)?,
             ))
         },
     ) {
-        Ok((start, end, name, language, content)) => {
-            let mut md = String::new();
-            md.push_str(&format!(
-                "### `{}`\n\n**File:** `{}` | **Lines:** {}-{} | **Type:** chunk\n\n```{}\n{}\n```\n",
-                name.as_deref().unwrap_or("(unnamed)"),
-                file,
-                start + 1,
-                end + 1,
-                language,
-                content,
-            ));
+        Ok((start, end, name, language, content, source_type, importance, chunk_type)) => {
+            let chunk = crate::chunk::Chunk {
+                file_path: file.to_string(),
+                language: language.clone(),
+                chunk_type: crate::chunk::ChunkType::from_str_name(&chunk_type)
+                    .unwrap_or(crate::chunk::ChunkType::Fact),
+                name: name.clone(),
+                signature: None,
+                line_start: start as usize,
+                line_end: end as usize,
+                content_raw: content,
+                content_hash: String::new(),
+                importance,
+                source_type: crate::chunk::SourceType::from_str_name(&source_type)
+                    .unwrap_or(crate::chunk::SourceType::Code),
+                metadata: serde_json::Map::new(),
+                agent_id: None,
+                tags: None,
+                decay_rate: 0.0,
+                created_by: None,
+            };
+            let md = chunk.render_md();
             Response {
                 ok: true,
                 result: Some(serde_json::json!({
@@ -637,13 +651,43 @@ fn handle_cat(db: &Connection, params: &serde_json::Value) -> Response {
 
     match crate::vfs::get_chunk_by_id(db, id) {
         Ok(Some(entry)) => {
-            let content: String = db
+            let row: Option<(String, String, f64, Option<String>)> = db
                 .query_row(
-                    "SELECT content_raw FROM chunks WHERE id = ?1",
+                    "SELECT content_raw, source_type, importance, tags FROM chunks WHERE id = ?1",
                     rusqlite::params![id],
-                    |r| r.get(0),
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
                 )
-                .unwrap_or_default();
+                .ok();
+
+            let markdown = row
+                .as_ref()
+                .map(|(content_raw, source_type, importance, tags_json)| {
+                    let tags: Option<Vec<String>> = tags_json
+                        .as_ref()
+                        .and_then(|t| serde_json::from_str(t).ok());
+                    let chunk = crate::chunk::Chunk {
+                        file_path: entry.file_path.clone(),
+                        language: entry.language.clone(),
+                        chunk_type: crate::chunk::ChunkType::from_str_name(&entry.chunk_type)
+                            .unwrap_or(crate::chunk::ChunkType::Fact),
+                        name: entry.name.clone(),
+                        signature: entry.signature.clone(),
+                        line_start: (entry.line_start - 1) as usize,
+                        line_end: (entry.line_end - 1) as usize,
+                        content_raw: content_raw.clone(),
+                        content_hash: String::new(),
+                        importance: *importance,
+                        source_type: crate::chunk::SourceType::from_str_name(source_type)
+                            .unwrap_or(crate::chunk::SourceType::Code),
+                        metadata: serde_json::Map::new(),
+                        agent_id: None,
+                        tags,
+                        decay_rate: 0.0,
+                        created_by: None,
+                    };
+                    chunk.render_md()
+                });
+
             Response {
                 ok: true,
                 result: Some(serde_json::json!({
@@ -655,7 +699,8 @@ fn handle_cat(db: &Connection, params: &serde_json::Value) -> Response {
                     "signature": entry.signature,
                     "line_start": entry.line_start + 1,
                     "line_end": entry.line_end + 1,
-                    "content": content,
+                    "content": row.as_ref().map(|r| r.0.clone()).unwrap_or_default(),
+                    "markdown": markdown.unwrap_or_default(),
                 })),
                 error: None,
             }

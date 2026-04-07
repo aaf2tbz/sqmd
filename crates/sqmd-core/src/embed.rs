@@ -372,7 +372,7 @@ pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
 }
 
 fn ceil_to_multiple(val: usize, multiple: usize) -> usize {
-    ((val + multiple - 1) / multiple) * multiple
+    val.div_ceil(multiple) * multiple
 }
 
 #[cfg(test)]
