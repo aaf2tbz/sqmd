@@ -2,7 +2,7 @@ use rusqlite::{Connection, Result as SqlResult};
 use sqlite_vec::sqlite3_vec_init;
 use std::path::Path;
 
-const CURRENT_VERSION: i64 = 4;
+const CURRENT_VERSION: i64 = 5;
 
 pub fn init(db: &mut Connection) -> SqlResult<()> {
     #[allow(clippy::missing_transmute_annotations)]
@@ -15,9 +15,14 @@ pub fn init(db: &mut Connection) -> SqlResult<()> {
     db.execute_batch("PRAGMA foreign_keys = ON;")?;
     db.execute_batch("PRAGMA busy_timeout = 5000;")?;
     db.execute_batch("PRAGMA defer_foreign_keys = ON;")?;
+    db.execute_batch("PRAGMA mmap_size = 268435456;")?;
+    db.execute_batch("PRAGMA wal_autocheckpoint = 1000;")?;
+    db.execute_batch("PRAGMA cache_size = -8000;")?;
 
     // Always ensure chunks_vec exists — handles dbs created before embed feature
-    if let Err(e) = db.execute_batch("CREATE VIRTUAL TABLE IF NOT EXISTS chunks_vec USING vec0(embedding float[768]);") {
+    if let Err(e) = db.execute_batch(
+        "CREATE VIRTUAL TABLE IF NOT EXISTS chunks_vec USING vec0(embedding float[768]);",
+    ) {
         eprintln!("[schema] chunks_vec creation failed: {e}");
     }
 
@@ -31,7 +36,10 @@ pub fn init(db: &mut Connection) -> SqlResult<()> {
 
     if version == 0 {
         db.execute_batch(include_str!("../../../docs/schema.sql"))?;
-        db.execute_batch("CREATE VIRTUAL TABLE IF NOT EXISTS chunks_vec USING vec0(embedding float[768]);").ok();
+        db.execute_batch(
+            "CREATE VIRTUAL TABLE IF NOT EXISTS chunks_vec USING vec0(embedding float[768]);",
+        )
+        .ok();
         db.execute_batch(&format!(
             "INSERT OR IGNORE INTO schema_version (version) VALUES ({})",
             CURRENT_VERSION
@@ -49,6 +57,10 @@ pub fn init(db: &mut Connection) -> SqlResult<()> {
 
     if version < 4 {
         migrate_v4(db)?;
+    }
+
+    if version < 5 {
+        migrate_v5(db)?;
     }
 
     Ok(())
@@ -105,7 +117,10 @@ fn migrate_v2(db: &mut Connection) -> SqlResult<()> {
         END;",
     )?;
 
-    db.execute_batch("CREATE VIRTUAL TABLE IF NOT EXISTS chunks_vec USING vec0(embedding float[768]);").ok();
+    db.execute_batch(
+        "CREATE VIRTUAL TABLE IF NOT EXISTS chunks_vec USING vec0(embedding float[768]);",
+    )
+    .ok();
 
     db.execute_batch(&format!(
         "INSERT OR IGNORE INTO schema_version (version) VALUES ({})",
@@ -172,8 +187,12 @@ fn migrate_v3(db: &mut Connection) -> SqlResult<()> {
             UNIQUE(source_entity, target_entity, dep_type)
         );",
     )?;
-    db.execute_batch("CREATE INDEX IF NOT EXISTS idx_ed_source ON entity_dependencies(source_entity, dep_type);")?;
-    db.execute_batch("CREATE INDEX IF NOT EXISTS idx_ed_target ON entity_dependencies(target_entity);")?;
+    db.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_ed_source ON entity_dependencies(source_entity, dep_type);",
+    )?;
+    db.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_ed_target ON entity_dependencies(target_entity);",
+    )?;
 
     db.execute_batch(
         "CREATE VIRTUAL TABLE IF NOT EXISTS hints_fts USING fts5(
@@ -219,8 +238,12 @@ fn migrate_v3(db: &mut Connection) -> SqlResult<()> {
     )?;
     db.execute_batch("CREATE INDEX IF NOT EXISTS idx_ea_entity ON entity_attributes(entity_id);")?;
     db.execute_batch("CREATE INDEX IF NOT EXISTS idx_ea_chunk ON entity_attributes(chunk_id);")?;
-    db.execute_batch("CREATE INDEX IF NOT EXISTS idx_ed_source ON entity_dependencies(source_entity, dep_type);")?;
-    db.execute_batch("CREATE INDEX IF NOT EXISTS idx_ed_target ON entity_dependencies(target_entity);")?;
+    db.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_ed_source ON entity_dependencies(source_entity, dep_type);",
+    )?;
+    db.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_ed_target ON entity_dependencies(target_entity);",
+    )?;
     db.execute_batch("CREATE INDEX IF NOT EXISTS idx_hints_chunk ON hints(chunk_id);")?;
 
     db.execute_batch(
@@ -234,9 +257,7 @@ fn migrate_v3(db: &mut Connection) -> SqlResult<()> {
         END;",
     )?;
 
-    db.execute_batch(
-        "INSERT OR IGNORE INTO schema_version (version) VALUES (3)",
-    )?;
+    db.execute_batch("INSERT OR IGNORE INTO schema_version (version) VALUES (3)")?;
 
     Ok(())
 }
@@ -251,7 +272,9 @@ fn migrate_v4(db: &mut Connection) -> SqlResult<()> {
         .unwrap_or(false);
 
     if !has_source_type {
-        db.execute_batch("ALTER TABLE chunks ADD COLUMN source_type TEXT NOT NULL DEFAULT 'code';")?;
+        db.execute_batch(
+            "ALTER TABLE chunks ADD COLUMN source_type TEXT NOT NULL DEFAULT 'code';",
+        )?;
         db.execute_batch("ALTER TABLE chunks ADD COLUMN agent_id TEXT;")?;
         db.execute_batch("ALTER TABLE chunks ADD COLUMN tags TEXT;")?;
         db.execute_batch("ALTER TABLE chunks ADD COLUMN decay_rate REAL NOT NULL DEFAULT 0.0;")?;
@@ -330,7 +353,9 @@ fn migrate_v4(db: &mut Connection) -> SqlResult<()> {
     db.execute_batch("CREATE INDEX IF NOT EXISTS idx_chunks_name ON chunks(name);")?;
     db.execute_batch("CREATE INDEX IF NOT EXISTS idx_chunks_hash ON chunks(content_hash);")?;
     db.execute_batch("CREATE INDEX IF NOT EXISTS idx_chunks_importance ON chunks(importance);")?;
-    db.execute_batch("CREATE INDEX IF NOT EXISTS idx_chunks_lines ON chunks(file_path, line_start, line_end);")?;
+    db.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_chunks_lines ON chunks(file_path, line_start, line_end);",
+    )?;
     db.execute_batch("CREATE INDEX IF NOT EXISTS idx_chunks_deleted ON chunks(is_deleted);")?;
     db.execute_batch("CREATE INDEX IF NOT EXISTS idx_chunks_source_type ON chunks(source_type);")?;
     db.execute_batch("CREATE INDEX IF NOT EXISTS idx_chunks_agent_id ON chunks(agent_id);")?;
@@ -362,8 +387,12 @@ fn migrate_v4(db: &mut Connection) -> SqlResult<()> {
     db.execute_batch("DROP TABLE relationships;")?;
     db.execute_batch("ALTER TABLE relationships_v4 RENAME TO relationships;")?;
 
-    db.execute_batch("CREATE INDEX IF NOT EXISTS idx_rels_source ON relationships(source_id, rel_type);")?;
-    db.execute_batch("CREATE INDEX IF NOT EXISTS idx_rels_target ON relationships(target_id, rel_type);")?;
+    db.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_rels_source ON relationships(source_id, rel_type);",
+    )?;
+    db.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_rels_target ON relationships(target_id, rel_type);",
+    )?;
 
     // ── Rebuild entity_dependencies to extend dep_type CHECK ────────
     db.execute_batch(
@@ -392,8 +421,12 @@ fn migrate_v4(db: &mut Connection) -> SqlResult<()> {
     db.execute_batch("DROP TABLE entity_dependencies;")?;
     db.execute_batch("ALTER TABLE entity_dependencies_v4 RENAME TO entity_dependencies;")?;
 
-    db.execute_batch("CREATE INDEX IF NOT EXISTS idx_ed_source ON entity_dependencies(source_entity, dep_type);")?;
-    db.execute_batch("CREATE INDEX IF NOT EXISTS idx_ed_target ON entity_dependencies(target_entity);")?;
+    db.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_ed_source ON entity_dependencies(source_entity, dep_type);",
+    )?;
+    db.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_ed_target ON entity_dependencies(target_entity);",
+    )?;
 
     // ── Recreate FTS triggers ───────────────────────────────────────
     db.execute_batch("DROP TABLE IF EXISTS chunks_fts;")?;
@@ -433,7 +466,10 @@ fn migrate_v4(db: &mut Connection) -> SqlResult<()> {
     )?;
 
     // Recreate vec table
-    db.execute_batch("CREATE VIRTUAL TABLE IF NOT EXISTS chunks_vec USING vec0(embedding float[768]);").ok();
+    db.execute_batch(
+        "CREATE VIRTUAL TABLE IF NOT EXISTS chunks_vec USING vec0(embedding float[768]);",
+    )
+    .ok();
 
     db.execute_batch("PRAGMA foreign_keys = ON;")?;
     db.execute_batch("INSERT OR IGNORE INTO schema_version (version) VALUES (4);")?;
@@ -454,6 +490,82 @@ pub fn open(path: &Path) -> SqlResult<Connection> {
     Ok(db)
 }
 
+fn migrate_v5(db: &mut Connection) -> SqlResult<()> {
+    let has_stemmer: bool = db
+        .prepare(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='chunks_fts' AND sql LIKE '%porter%'",
+        )?
+        .query_row([], |r| r.get::<_, String>(0))
+        .ok()
+        .is_some_and(|s| !s.is_empty());
+
+    if !has_stemmer {
+        db.execute_batch("DROP TRIGGER IF EXISTS chunks_fts_insert;")?;
+        db.execute_batch("DROP TRIGGER IF EXISTS chunks_fts_delete;")?;
+        db.execute_batch("DROP TRIGGER IF EXISTS chunks_fts_update;")?;
+        db.execute_batch("DROP TABLE IF EXISTS chunks_fts;")?;
+        db.execute_batch(
+            "CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
+                name, signature, content_raw, file_path,
+                content='chunks', content_rowid='id',
+                tokenize='porter unicode61'
+            );",
+        )?;
+        db.execute_batch(
+            "INSERT INTO chunks_fts(rowid, name, signature, content_raw, file_path)
+             SELECT id, name, signature, content_raw, file_path FROM chunks WHERE is_deleted = 0;",
+        )?;
+        db.execute_batch(
+            "CREATE TRIGGER IF NOT EXISTS chunks_fts_insert AFTER INSERT ON chunks BEGIN
+                INSERT INTO chunks_fts(rowid, name, signature, content_raw, file_path)
+                VALUES (new.id, new.name, new.signature, new.content_raw, new.file_path);
+            END;",
+        )?;
+        db.execute_batch(
+            "CREATE TRIGGER IF NOT EXISTS chunks_fts_delete AFTER DELETE ON chunks BEGIN
+                INSERT INTO chunks_fts(chunks_fts, rowid, name, signature, content_raw, file_path)
+                VALUES ('delete', old.id, old.name, old.signature, old.content_raw, old.file_path);
+            END;",
+        )?;
+        db.execute_batch(
+            "CREATE TRIGGER IF NOT EXISTS chunks_fts_update AFTER UPDATE ON chunks BEGIN
+                INSERT INTO chunks_fts(chunks_fts, rowid, name, signature, content_raw, file_path)
+                VALUES ('delete', old.id, old.name, old.signature, old.content_raw, old.file_path);
+                INSERT INTO chunks_fts(rowid, name, signature, content_raw, file_path)
+                VALUES (new.id, new.name, new.signature, new.content_raw, new.file_path);
+            END;",
+        )?;
+
+        db.execute_batch("DROP TRIGGER IF EXISTS hints_fts_insert;")?;
+        db.execute_batch("DROP TRIGGER IF EXISTS hints_fts_delete;")?;
+        db.execute_batch("DROP TABLE IF EXISTS hints_fts;")?;
+        db.execute_batch(
+            "CREATE VIRTUAL TABLE IF NOT EXISTS hints_fts USING fts5(
+                hint_text,
+                content='hints',
+                content_rowid='id',
+                tokenize='porter unicode61'
+            );",
+        )?;
+        db.execute_batch(
+            "INSERT INTO hints_fts(rowid, hint_text) SELECT id, hint_text FROM hints;",
+        )?;
+        db.execute_batch(
+            "CREATE TRIGGER IF NOT EXISTS hints_fts_insert AFTER INSERT ON hints BEGIN
+                INSERT INTO hints_fts(rowid, hint_text) VALUES (new.id, new.hint_text);
+            END;",
+        )?;
+        db.execute_batch(
+            "CREATE TRIGGER IF NOT EXISTS hints_fts_delete AFTER DELETE ON hints BEGIN
+                INSERT INTO hints_fts(hints_fts, rowid, hint_text) VALUES ('delete', old.id, old.hint_text);
+            END;",
+        )?;
+    }
+
+    db.execute_batch("INSERT OR IGNORE INTO schema_version (version) VALUES (5);")?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -469,22 +581,38 @@ mod tests {
         let mut db = Connection::open_in_memory().unwrap();
         init(&mut db).unwrap();
         let files: i64 = db
-            .query_row("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='files'", [], |r| r.get(0))
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='files'",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
         assert!(files > 0);
 
         let chunks: i64 = db
-            .query_row("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='chunks'", [], |r| r.get(0))
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='chunks'",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
         assert!(chunks > 0);
 
         let fts: i64 = db
-            .query_row("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='chunks_fts'", [], |r| r.get(0))
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='chunks_fts'",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
         assert!(fts > 0);
 
         let vec_table: i64 = db
-            .query_row("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='chunks_vec'", [], |r| r.get(0))
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='chunks_vec'",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
         assert!(vec_table > 0);
     }

@@ -1,10 +1,18 @@
 use crate::context::{ContextAssembler, ContextRequest};
+use crate::query_cache::QueryCache;
 use crate::schema;
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+
+pub struct DaemonState {
+    pub cache: Mutex<QueryCache>,
+    #[cfg(feature = "embed")]
+    pub embedder: Mutex<Option<crate::embed::Embedder>>,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Request {
@@ -31,13 +39,19 @@ pub fn serve(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("sqmd daemon listening on {}", sock_path.display());
 
     let root_owned = root.to_path_buf();
+    let state = Arc::new(DaemonState {
+        cache: Mutex::new(QueryCache::new()),
+        #[cfg(feature = "embed")]
+        embedder: Mutex::new(None),
+    });
 
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {
                 let r = root_owned.clone();
+                let s = state.clone();
                 std::thread::spawn(move || {
-                    if let Err(e) = handle_connection(stream, &r) {
+                    if let Err(e) = handle_connection(stream, &r, &s) {
                         eprintln!("Connection error: {e}");
                     }
                 });
@@ -49,7 +63,11 @@ pub fn serve(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn handle_connection(stream: UnixStream, root: &Path) -> Result<(), Box<dyn std::error::Error>> {
+fn handle_connection(
+    stream: UnixStream,
+    root: &Path,
+    state: &Arc<DaemonState>,
+) -> Result<(), Box<dyn std::error::Error>> {
     let mut reader = BufReader::new(&stream);
     let mut writer = &stream;
 
@@ -94,7 +112,7 @@ fn handle_connection(stream: UnixStream, root: &Path) -> Result<(), Box<dyn std:
     #[cfg(not(feature = "embed"))]
     let db = schema::open(&db_path)?;
     let response = match request.method.as_str() {
-        "search" => handle_search(&db, &request.params),
+        "search" => handle_search(&db, &request.params, state),
         "context" => handle_context(&db, &request.params),
         "get" => handle_get(&db, &request.params),
         "stats" => handle_stats(&db),
@@ -131,7 +149,11 @@ fn write_response(
     Ok(())
 }
 
-fn handle_search(db: &Connection, params: &serde_json::Value) -> Response {
+fn handle_search(
+    db: &Connection,
+    params: &serde_json::Value,
+    state: &Arc<DaemonState>,
+) -> Response {
     let query = params["query"].as_str().unwrap_or("");
     let top_k = params["top_k"].as_u64().unwrap_or(10) as usize;
     let alpha = params["alpha"].as_f64().unwrap_or(0.7);
@@ -155,31 +177,66 @@ fn handle_search(db: &Connection, params: &serde_json::Value) -> Response {
         };
     }
 
+    if let Some(cached) = {
+        let c = state.cache.lock().unwrap_or_else(|e| e.into_inner());
+        c.lookup(
+            query,
+            top_k,
+            file.as_deref(),
+            type_filter.as_deref(),
+            source_types.as_deref(),
+            agent_id.as_deref(),
+        )
+    } {
+        return Response {
+            ok: true,
+            result: Some(
+                serde_json::from_str(&serde_json::to_string(&cached).unwrap_or_default())
+                    .unwrap_or(serde_json::Value::Array(vec![])),
+            ),
+            error: None,
+        };
+    }
+
     let search_query = crate::search::SearchQuery {
         text: query.to_string(),
         top_k,
         alpha,
-        file_filter: file,
-        type_filter,
-        source_type_filter: source_types,
-        agent_id_filter: agent_id,
+        file_filter: file.clone(),
+        type_filter: type_filter.clone(),
+        source_type_filter: source_types.clone(),
+        agent_id_filter: agent_id.clone(),
         ..Default::default()
     };
 
     #[cfg(feature = "embed")]
     let result = {
-        let mut embedder = match crate::embed::Embedder::new() {
-            Ok(e) => e,
-            Err(e) => {
-                return Response {
-                    ok: false,
-                    result: None,
-                    error: Some(format!("{e}")),
-                }
+        let mut embedder = {
+            let mut e = state.embedder.lock().unwrap_or_else(|e| e.into_inner());
+            if e.is_none() {
+                *e = Some(crate::embed::Embedder::new()?);
             }
+            e.take().unwrap()
         };
         match crate::search::hybrid_search(db, &search_query, &mut embedder) {
             Ok(results) => {
+                let results_clone = results.clone();
+                {
+                    let mut c = state.cache.lock().unwrap_or_else(|e| e.into_inner());
+                    c.store(
+                        query,
+                        top_k,
+                        file.as_deref(),
+                        type_filter.as_deref(),
+                        source_types.as_deref(),
+                        agent_id.as_deref(),
+                        results_clone,
+                    );
+                }
+                {
+                    let mut e = state.embedder.lock().unwrap_or_else(|e| e.into_inner());
+                    *e = Some(embedder);
+                }
                 let serialized = serde_json::to_string(&results).unwrap_or_default();
                 Response {
                     ok: true,
@@ -201,6 +258,19 @@ fn handle_search(db: &Connection, params: &serde_json::Value) -> Response {
     let result = {
         match crate::search::fts_search(db, &search_query) {
             Ok(results) => {
+                let results_clone = results.clone();
+                {
+                    let mut c = state.cache.lock().unwrap_or_else(|e| e.into_inner());
+                    c.store(
+                        query,
+                        top_k,
+                        file.as_deref(),
+                        type_filter.as_deref(),
+                        source_types.as_deref(),
+                        agent_id.as_deref(),
+                        results_clone,
+                    );
+                }
                 let serialized = serde_json::to_string(&results).unwrap_or_default();
                 Response {
                     ok: true,

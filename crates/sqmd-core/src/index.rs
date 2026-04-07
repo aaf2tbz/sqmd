@@ -59,27 +59,51 @@ fn chunk_file_content(
     match language {
         Language::TypeScript | Language::JavaScript | Language::JSX => {
             let c = crate::languages::typescript::TypeScriptChunker::new();
-            (c.chunk(content, relative), c.extract_imports(content))
+            let (chunks, tree) = c.chunk(content, relative);
+            let imports = tree
+                .map(|t| c.extract_imports(&t, content))
+                .unwrap_or_default();
+            (chunks, imports)
         }
         Language::TSX => {
             let c = crate::languages::typescript::TypeScriptChunker::tsx();
-            (c.chunk(content, relative), c.extract_imports(content))
+            let (chunks, tree) = c.chunk(content, relative);
+            let imports = tree
+                .map(|t| c.extract_imports(&t, content))
+                .unwrap_or_default();
+            (chunks, imports)
         }
         Language::Rust => {
             let c = crate::languages::rust::RustChunker::new();
-            (c.chunk(content, relative), c.extract_imports(content))
+            let (chunks, tree) = c.chunk(content, relative);
+            let imports = tree
+                .map(|t| c.extract_imports(&t, content))
+                .unwrap_or_default();
+            (chunks, imports)
         }
         Language::Python => {
             let c = crate::languages::python::PythonChunker::new();
-            (c.chunk(content, relative), c.extract_imports(content))
+            let (chunks, tree) = c.chunk(content, relative);
+            let imports = tree
+                .map(|t| c.extract_imports(&t, content))
+                .unwrap_or_default();
+            (chunks, imports)
         }
         Language::Go => {
             let c = crate::languages::go::GoChunker::new();
-            (c.chunk(content, relative), c.extract_imports(content))
+            let (chunks, tree) = c.chunk(content, relative);
+            let imports = tree
+                .map(|t| c.extract_imports(&t, content))
+                .unwrap_or_default();
+            (chunks, imports)
         }
         Language::Java => {
             let c = crate::languages::java::JavaChunker::new();
-            (c.chunk(content, relative), c.extract_imports(content))
+            let (chunks, tree) = c.chunk(content, relative);
+            let imports = tree
+                .map(|t| c.extract_imports(&t, content))
+                .unwrap_or_default();
+            (chunks, imports)
         }
         _ => (
             crate::chunker::FileChunker::chunk_file(content, relative, language.as_str()),
@@ -220,7 +244,13 @@ impl<'a> Indexer<'a> {
             self.db.execute(
                 "INSERT OR REPLACE INTO files (path, language, size, mtime, hash, indexed_at)
                  VALUES (?1, ?2, ?3, ?4, ?5, datetime('now'))",
-                params![work.relative, work.language.as_str(), work.size as i64, work.mtime, work.hash],
+                params![
+                    work.relative,
+                    work.language.as_str(),
+                    work.size as i64,
+                    work.mtime,
+                    work.hash
+                ],
             )?;
 
             if work.content.trim().is_empty() {
@@ -355,12 +385,14 @@ impl<'a> Indexer<'a> {
     ) -> Result<usize, Box<dyn std::error::Error>> {
         let old_hashes: std::collections::HashMap<String, (i64, Option<String>)> = {
             let mut stmt = self.db.prepare(
-                "SELECT id, content_hash, name FROM chunks WHERE file_path = ?1 AND is_deleted = 0"
+                "SELECT id, content_hash, name FROM chunks WHERE file_path = ?1 AND is_deleted = 0",
             )?;
-            let rows: Vec<(i64, String, Option<String>)> = stmt.query_map(params![relative], |r| {
-                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
-            })?.collect::<Result<_, _>>()?;
-            rows.into_iter().map(|(id, hash, name)| (hash, (id, name))).collect()
+            let rows: Vec<(i64, String, Option<String>)> = stmt
+                .query_map(params![relative], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+                .collect::<Result<_, _>>()?;
+            rows.into_iter()
+                .map(|(id, hash, name)| (hash, (id, name)))
+                .collect()
         };
 
         let new_hashes: std::collections::HashMap<String, usize> = chunks
@@ -371,7 +403,8 @@ impl<'a> Indexer<'a> {
             .collect();
 
         let mut used_old_ids: std::collections::HashSet<i64> = std::collections::HashSet::new();
-        let mut chunk_id_map: std::collections::HashMap<usize, i64> = std::collections::HashMap::new();
+        let mut chunk_id_map: std::collections::HashMap<usize, i64> =
+            std::collections::HashMap::new();
 
         for (chunk_idx, chunk) in chunks.iter().enumerate() {
             let chunk_hash = &chunk.content_hash;
@@ -379,7 +412,11 @@ impl<'a> Indexer<'a> {
             if let Some((old_id, old_name)) = old_hashes.get(chunk_hash) {
                 let same_name = old_name.as_deref() == chunk.name.as_deref();
                 if same_name && new_hashes.get(chunk_hash) == Some(&chunk_idx) {
-                    let importance = entities::compute_structural_importance(self.db, *old_id, chunk.importance)?;
+                    let importance = entities::compute_structural_importance(
+                        self.db,
+                        *old_id,
+                        chunk.importance,
+                    )?;
                     if importance != chunk.importance {
                         self.db.execute(
                             "UPDATE chunks SET line_start = ?1, line_end = ?2, importance = ?3, updated_at = datetime('now') WHERE id = ?4",
@@ -428,16 +465,16 @@ impl<'a> Indexer<'a> {
                     chunk.chunk_type.as_str(),
                     &chunk.content_raw,
                     &chunk.file_path,
+                    "code",
                 );
                 if !hints.is_empty() {
-                    self.db.execute(
-                        "DELETE FROM hints WHERE chunk_id = ?1",
-                        params![chunk_id],
-                    )?;
+                    self.db
+                        .execute("DELETE FROM hints WHERE chunk_id = ?1", params![chunk_id])?;
                     entities::insert_hints(self.db, chunk_id, &hints)?;
                 }
 
-                let importance = entities::compute_structural_importance(self.db, chunk_id, chunk.importance)?;
+                let importance =
+                    entities::compute_structural_importance(self.db, chunk_id, chunk.importance)?;
                 if importance != chunk.importance {
                     self.db.execute(
                         "UPDATE chunks SET importance = ?1 WHERE id = ?2",
@@ -485,9 +522,7 @@ impl<'a> Indexer<'a> {
 
             if matches!(
                 chunk.chunk_type,
-                chunk::ChunkType::Method
-                    | chunk::ChunkType::Constant
-                    | chunk::ChunkType::Type
+                chunk::ChunkType::Method | chunk::ChunkType::Constant | chunk::ChunkType::Type
             ) {
                 if let Some(&(pid, p_start, p_end)) = parent_stack.last() {
                     if chunk.line_start > p_start && chunk.line_end <= p_end {
@@ -503,7 +538,8 @@ impl<'a> Indexer<'a> {
             }
         }
 
-        let mut name_to_id: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
+        let mut name_to_id: std::collections::HashMap<String, i64> =
+            std::collections::HashMap::new();
         for (idx, id) in chunk_id_map {
             if let Some(ref name) = chunks[*idx].name {
                 name_to_id.insert(name.clone(), *id);
@@ -514,7 +550,8 @@ impl<'a> Indexer<'a> {
         let imported_names: Vec<String> = if all_ids.is_empty() {
             Vec::new()
         } else {
-            let placeholders: Vec<String> = (0..all_ids.len()).map(|i| format!("?{}", i + 1)).collect();
+            let placeholders: Vec<String> =
+                (0..all_ids.len()).map(|i| format!("?{}", i + 1)).collect();
             let sql = format!(
                 "SELECT DISTINCT c.name FROM relationships r
                  JOIN chunks c ON r.target_id = c.id
@@ -522,8 +559,12 @@ impl<'a> Indexer<'a> {
                 placeholders.join(", ")
             );
             let mut stmt = self.db.prepare(&sql)?;
-            let params: Vec<&dyn rusqlite::ToSql> = all_ids.iter().map(|id| id as &dyn rusqlite::ToSql).collect();
-            let rows = stmt.query_map(params.as_slice(), |r| r.get(0))?
+            let params: Vec<&dyn rusqlite::ToSql> = all_ids
+                .iter()
+                .map(|id| id as &dyn rusqlite::ToSql)
+                .collect();
+            let rows = stmt
+                .query_map(params.as_slice(), |r| r.get(0))?
                 .collect::<Result<_, _>>()?;
             drop(stmt);
             rows
@@ -546,9 +587,7 @@ impl<'a> Indexer<'a> {
             let c = &chunks[*idx];
             if !matches!(
                 c.chunk_type,
-                chunk::ChunkType::Function
-                    | chunk::ChunkType::Method
-                    | chunk::ChunkType::Constant
+                chunk::ChunkType::Function | chunk::ChunkType::Method | chunk::ChunkType::Constant
             ) {
                 continue;
             }
@@ -581,10 +620,14 @@ impl<'a> Indexer<'a> {
         for chunk in chunks {
             if matches!(
                 chunk.chunk_type,
-                chunk::ChunkType::Function | chunk::ChunkType::Method
-                    | chunk::ChunkType::Class | chunk::ChunkType::Struct
-                    | chunk::ChunkType::Interface | chunk::ChunkType::Trait
-                    | chunk::ChunkType::Enum | chunk::ChunkType::Impl
+                chunk::ChunkType::Function
+                    | chunk::ChunkType::Method
+                    | chunk::ChunkType::Class
+                    | chunk::ChunkType::Struct
+                    | chunk::ChunkType::Interface
+                    | chunk::ChunkType::Trait
+                    | chunk::ChunkType::Enum
+                    | chunk::ChunkType::Impl
                     | chunk::ChunkType::Constant
             ) {
                 let name = chunk.name.as_deref().unwrap_or("");
@@ -614,16 +657,27 @@ impl<'a> Indexer<'a> {
 
     fn tombstone_file_chunks(&self, relative: &str) -> Result<(), Box<dyn std::error::Error>> {
         let chunk_ids: Vec<i64> = {
-            let mut stmt = self.db.prepare("SELECT id FROM chunks WHERE file_path = ?1 AND is_deleted = 0")?;
-            let ids: Vec<i64> = stmt.query_map(params![relative], |r| r.get(0))?.collect::<Result<_, _>>()?;
+            let mut stmt = self
+                .db
+                .prepare("SELECT id FROM chunks WHERE file_path = ?1 AND is_deleted = 0")?;
+            let ids: Vec<i64> = stmt
+                .query_map(params![relative], |r| r.get(0))?
+                .collect::<Result<_, _>>()?;
             drop(stmt);
             ids
         };
 
         for &cid in &chunk_ids {
-            self.db.execute("DELETE FROM hints WHERE chunk_id = ?1", params![cid])?;
-            self.db.execute("DELETE FROM entity_attributes WHERE chunk_id = ?1", params![cid])?;
-            self.db.execute("DELETE FROM relationships WHERE source_id = ?1 OR target_id = ?2", params![cid, cid])?;
+            self.db
+                .execute("DELETE FROM hints WHERE chunk_id = ?1", params![cid])?;
+            self.db.execute(
+                "DELETE FROM entity_attributes WHERE chunk_id = ?1",
+                params![cid],
+            )?;
+            self.db.execute(
+                "DELETE FROM relationships WHERE source_id = ?1 OR target_id = ?2",
+                params![cid, cid],
+            )?;
         }
 
         entities::tombstone_chunks(self.db, relative)?;
@@ -654,7 +708,10 @@ impl<'a> Indexer<'a> {
             Some(serde_json::to_string(&chunk.metadata)?)
         };
 
-        let tags_json = chunk.tags.as_ref().map(|t| serde_json::to_string(t).unwrap_or_default());
+        let tags_json = chunk
+            .tags
+            .as_ref()
+            .map(|t| serde_json::to_string(t).unwrap_or_default());
 
         self.db.execute(
             "INSERT INTO chunks (file_path, language, chunk_type, name, signature, line_start, line_end, content_raw, content_hash, importance, metadata, source_type, agent_id, tags, decay_rate, created_by)
@@ -683,23 +740,29 @@ impl<'a> Indexer<'a> {
 
     fn delete_file_chunks(&self, relative: &str) -> Result<(), Box<dyn std::error::Error>> {
         let chunk_ids: Vec<i64> = {
-            let mut stmt = self.db.prepare("SELECT id FROM chunks WHERE file_path = ?1")?;
-            let ids: Vec<i64> = stmt.query_map(params![relative], |r| r.get(0))?.collect::<Result<_, _>>()?;
+            let mut stmt = self
+                .db
+                .prepare("SELECT id FROM chunks WHERE file_path = ?1")?;
+            let ids: Vec<i64> = stmt
+                .query_map(params![relative], |r| r.get(0))?
+                .collect::<Result<_, _>>()?;
             drop(stmt);
             ids
         };
         for &cid in &chunk_ids {
-            self.db.execute("DELETE FROM hints WHERE chunk_id = ?1", params![cid])?;
-            self.db.execute("DELETE FROM entity_attributes WHERE chunk_id = ?1", params![cid])?;
+            self.db
+                .execute("DELETE FROM hints WHERE chunk_id = ?1", params![cid])?;
+            self.db.execute(
+                "DELETE FROM entity_attributes WHERE chunk_id = ?1",
+                params![cid],
+            )?;
         }
         self.db.execute(
             "DELETE FROM relationships WHERE source_id IN (SELECT id FROM chunks WHERE file_path = ?1) OR target_id IN (SELECT id FROM chunks WHERE file_path = ?1)",
             params![relative],
         )?;
-        self.db.execute(
-            "DELETE FROM chunks WHERE file_path = ?1",
-            params![relative],
-        )?;
+        self.db
+            .execute("DELETE FROM chunks WHERE file_path = ?1", params![relative])?;
         Ok(())
     }
 }
@@ -747,9 +810,12 @@ impl<'a> KnowledgeIngestor<'a> {
         Self { db }
     }
 
-    pub fn ingest(&self, input: &KnowledgeChunk) -> Result<IngestResult, Box<dyn std::error::Error>> {
-        let chunk_type = chunk::ChunkType::from_str_name(&input.chunk_type)
-            .unwrap_or(chunk::ChunkType::Fact);
+    pub fn ingest(
+        &self,
+        input: &KnowledgeChunk,
+    ) -> Result<IngestResult, Box<dyn std::error::Error>> {
+        let chunk_type =
+            chunk::ChunkType::from_str_name(&input.chunk_type).unwrap_or(chunk::ChunkType::Fact);
         let source_type = chunk::SourceType::from_str_name(&input.source_type)
             .unwrap_or(chunk::SourceType::Memory);
         let importance = input.importance.unwrap_or_else(|| chunk_type.importance());
@@ -797,7 +863,10 @@ impl<'a> KnowledgeIngestor<'a> {
         )?;
 
         // Insert the chunk
-        let tags_json = c.tags.as_ref().map(|t| serde_json::to_string(t).unwrap_or_default());
+        let tags_json = c
+            .tags
+            .as_ref()
+            .map(|t| serde_json::to_string(t).unwrap_or_default());
         let metadata_json = if c.metadata.is_empty() {
             None
         } else {
@@ -823,6 +892,7 @@ impl<'a> KnowledgeIngestor<'a> {
             c.chunk_type.as_str(),
             &c.content_raw,
             &c.file_path,
+            c.source_type.as_str(),
         );
         if !hints.is_empty() {
             crate::entities::insert_hints(self.db, chunk_id, &hints)?;
@@ -845,7 +915,10 @@ impl<'a> KnowledgeIngestor<'a> {
         })
     }
 
-    pub fn ingest_batch(&self, inputs: &[KnowledgeChunk]) -> Result<IngestBatchResult, Box<dyn std::error::Error>> {
+    pub fn ingest_batch(
+        &self,
+        inputs: &[KnowledgeChunk],
+    ) -> Result<IngestBatchResult, Box<dyn std::error::Error>> {
         self.db.execute_batch("BEGIN")?;
         let mut results = Vec::with_capacity(inputs.len());
         let mut ingested = 0;
@@ -886,7 +959,12 @@ impl<'a> KnowledgeIngestor<'a> {
     }
 
     /// Update importance/tags on a knowledge chunk
-    pub fn modify(&self, chunk_id: i64, importance: Option<f64>, tags: Option<Vec<String>>) -> Result<bool, Box<dyn std::error::Error>> {
+    pub fn modify(
+        &self,
+        chunk_id: i64,
+        importance: Option<f64>,
+        tags: Option<Vec<String>>,
+    ) -> Result<bool, Box<dyn std::error::Error>> {
         if let Some(imp) = importance {
             self.db.execute(
                 "UPDATE chunks SET importance = ?1, updated_at = datetime('now') WHERE id = ?2",
@@ -970,8 +1048,11 @@ mod tests {
         let result = indexer.index_file(&file_path).unwrap();
         assert!(result.is_none());
 
-        std::fs::write(&file_path, "fn hello() { println!(); }\nfn world() {}\nfn new() {}\n")
-            .unwrap();
+        std::fs::write(
+            &file_path,
+            "fn hello() { println!(); }\nfn world() {}\nfn new() {}\n",
+        )
+        .unwrap();
         let result = indexer.index_file(&file_path).unwrap();
         assert!(result.is_some());
         assert_eq!(result.unwrap().chunks, 3);

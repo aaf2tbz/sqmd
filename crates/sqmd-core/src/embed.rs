@@ -160,7 +160,7 @@ impl Embedder {
         let ids = encodings.get_ids();
 
         let seq_len = ids.len().min(MAX_SEQ_LEN);
-        let padded_len = seq_len.next_power_of_two().max(8);
+        let padded_len = ceil_to_multiple(seq_len, 64).max(8);
 
         let mut input_ids = vec![0i64; padded_len];
         let mut attention_mask = vec![0i64; padded_len];
@@ -235,28 +235,9 @@ impl Embedder {
         let tokenizer = self.tokenizer.as_ref().unwrap();
 
         let batch_size = texts.len();
-        let padded_len = texts
-            .iter()
-            .map(|t| {
-                let full = if prefix.is_empty() {
-                    t.to_string()
-                } else {
-                    format!("{}{}", prefix, t)
-                };
-                let enc = tokenizer
-                    .encode(full.as_str(), true)
-                    .map(|e| e.get_ids().len().min(MAX_SEQ_LEN))
-                    .unwrap_or(0);
-                enc.next_power_of_two().max(8)
-            })
-            .max()
-            .unwrap_or(8);
 
-        let mut all_input_ids = vec![0i64; batch_size * padded_len];
-        let mut all_attention = vec![0i64; batch_size * padded_len];
-        let all_token_types = vec![0i64; batch_size * padded_len];
-
-        for (i, text) in texts.iter().enumerate() {
+        let mut encoded: Vec<(Vec<i64>, usize)> = Vec::with_capacity(batch_size);
+        for text in texts.iter() {
             let full_text = if prefix.is_empty() {
                 text.to_string()
             } else {
@@ -265,11 +246,30 @@ impl Embedder {
             let encodings = tokenizer
                 .encode(full_text.as_str(), true)
                 .map_err(|e| format!("Tokenization failed: {e}"))?;
-            let ids = encodings.get_ids();
-            let seq_len = ids.len().min(MAX_SEQ_LEN);
+            let seq_len = encodings.get_ids().len().min(MAX_SEQ_LEN);
+            let ids: Vec<i64> = encodings
+                .get_ids()
+                .iter()
+                .take(seq_len)
+                .map(|&t| t as i64)
+                .collect();
+            encoded.push((ids, seq_len));
+        }
+
+        let padded_len = encoded
+            .iter()
+            .map(|(_, len)| ceil_to_multiple(*len, 64).max(8))
+            .max()
+            .unwrap_or(8);
+
+        let mut all_input_ids = vec![0i64; batch_size * padded_len];
+        let mut all_attention = vec![0i64; batch_size * padded_len];
+        let all_token_types = vec![0i64; batch_size * padded_len];
+
+        for (i, (ids, _seq_len)) in encoded.iter().enumerate() {
             let offset = i * padded_len;
-            for (j, &t) in ids.iter().take(seq_len).enumerate() {
-                all_input_ids[offset + j] = t as i64;
+            for (j, &t) in ids.iter().enumerate() {
+                all_input_ids[offset + j] = t;
                 all_attention[offset + j] = 1;
             }
         }
@@ -369,6 +369,10 @@ pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
         return 0.0;
     }
     dot / (norm_a * norm_b)
+}
+
+fn ceil_to_multiple(val: usize, multiple: usize) -> usize {
+    ((val + multiple - 1) / multiple) * multiple
 }
 
 #[cfg(test)]

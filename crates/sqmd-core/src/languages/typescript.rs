@@ -1,6 +1,6 @@
-use tree_sitter::{Node, Tree};
 use crate::chunk::{Chunk, ChunkType, SourceType};
-use crate::chunker::{LanguageChunker, make_chunk};
+use crate::chunker::{make_chunk, LanguageChunker};
+use tree_sitter::{Node, Tree};
 
 pub struct TypeScriptChunker {
     language: tree_sitter::Language,
@@ -54,7 +54,13 @@ impl LanguageChunker for TypeScriptChunker {
         "typescript"
     }
 
-    fn walk_declarations(&self, tree: &Tree, source: &str, file_path: &str, chunks: &mut Vec<Chunk>) {
+    fn walk_declarations(
+        &self,
+        tree: &Tree,
+        source: &str,
+        file_path: &str,
+        chunks: &mut Vec<Chunk>,
+    ) {
         let mut cursor = tree.root_node().walk();
 
         let declaration_kinds = [
@@ -104,7 +110,9 @@ impl LanguageChunker for TypeScriptChunker {
                         let name = self.extract_name(named_child, source);
                         let sig = self.extract_signature(named_child, source);
                         let ct = match inner_kind {
-                            "function_declaration" | "generator_function_declaration" => ChunkType::Function,
+                            "function_declaration" | "generator_function_declaration" => {
+                                ChunkType::Function
+                            }
                             "class_declaration" => ChunkType::Class,
                             "interface_declaration" => ChunkType::Interface,
                             "arrow_function" => ChunkType::Function,
@@ -116,10 +124,24 @@ impl LanguageChunker for TypeScriptChunker {
                         metadata.insert("exported".to_string(), serde_json::Value::Bool(true));
 
                         let mut all_chunks: Vec<Option<Chunk>> = Vec::new();
-                        all_chunks.push(make_chunk(source, named_child, file_path, "typescript", ct, name.as_deref(), sig.as_deref(), metadata));
+                        all_chunks.push(make_chunk(
+                            source,
+                            named_child,
+                            file_path,
+                            "typescript",
+                            ct,
+                            name.as_deref(),
+                            sig.as_deref(),
+                            metadata,
+                        ));
 
                         if inner_kind == "class_declaration" {
-                            Self::extract_class_members(named_child, source, file_path, &mut all_chunks);
+                            Self::extract_class_members(
+                                named_child,
+                                source,
+                                file_path,
+                                &mut all_chunks,
+                            );
                         }
 
                         chunks.extend(all_chunks.into_iter().flatten());
@@ -127,7 +149,16 @@ impl LanguageChunker for TypeScriptChunker {
                     }
                 }
                 let name = self.extract_name(child, source);
-                if let Some(chunk) = make_chunk(source, child, file_path, "typescript", ChunkType::Export, name.as_deref(), None, serde_json::Map::new()) {
+                if let Some(chunk) = make_chunk(
+                    source,
+                    child,
+                    file_path,
+                    "typescript",
+                    ChunkType::Export,
+                    name.as_deref(),
+                    None,
+                    serde_json::Map::new(),
+                ) {
                     chunks.push(chunk);
                 }
                 continue;
@@ -137,7 +168,9 @@ impl LanguageChunker for TypeScriptChunker {
                 let name = self.extract_name(child, source);
                 let sig = self.extract_signature(child, source);
                 let ct = match kind {
-                    "function_declaration" | "generator_function_declaration" => ChunkType::Function,
+                    "function_declaration" | "generator_function_declaration" => {
+                        ChunkType::Function
+                    }
                     "class_declaration" => ChunkType::Class,
                     "interface_declaration" => ChunkType::Interface,
                     "type_alias_declaration" => ChunkType::Type,
@@ -152,8 +185,16 @@ impl LanguageChunker for TypeScriptChunker {
                 }
 
                 let mut all_chunks: Vec<Option<Chunk>> = Vec::new();
-                all_chunks.push(make_chunk(source, child, file_path, "typescript", ct, name.as_deref(), sig.as_deref(), metadata));
-
+                all_chunks.push(make_chunk(
+                    source,
+                    child,
+                    file_path,
+                    "typescript",
+                    ct,
+                    name.as_deref(),
+                    sig.as_deref(),
+                    metadata,
+                ));
 
                 if kind == "class_declaration" {
                     Self::extract_class_members(child, source, file_path, &mut all_chunks);
@@ -165,10 +206,7 @@ impl LanguageChunker for TypeScriptChunker {
         }
     }
 
-    fn extract_imports(&self, source: &str) -> Vec<crate::relationships::ImportInfo> {
-        let mut parser = tree_sitter::Parser::new();
-        parser.set_language(&self.language).unwrap();
-        let tree = parser.parse(source, None).unwrap();
+    fn extract_imports(&self, tree: &Tree, source: &str) -> Vec<crate::relationships::ImportInfo> {
         let mut imports = Vec::new();
         let mut cursor = tree.root_node().walk();
 
@@ -177,11 +215,17 @@ impl LanguageChunker for TypeScriptChunker {
                 let mut module_path = String::new();
                 let mut names = Vec::new();
 
-                fn walk_import_nodes(node: tree_sitter::Node, source: &str, module_path: &mut String, names: &mut Vec<String>) {
+                fn walk_import_nodes(
+                    node: tree_sitter::Node,
+                    source: &str,
+                    module_path: &mut String,
+                    names: &mut Vec<String>,
+                ) {
                     for gc in node.children(&mut node.walk()) {
                         match gc.kind() {
                             "string" => {
-                                *module_path = gc.utf8_text(source.as_bytes())
+                                *module_path = gc
+                                    .utf8_text(source.as_bytes())
                                     .unwrap_or("")
                                     .trim_matches('"')
                                     .trim_matches('\'')
@@ -196,7 +240,8 @@ impl LanguageChunker for TypeScriptChunker {
                                     }
                                 }
                             }
-                            "import_clause" | "named_imports" | "import_specifiers" | "es_import_clause" => {
+                            "import_clause" | "named_imports" | "import_specifiers"
+                            | "es_import_clause" => {
                                 walk_import_nodes(gc, source, module_path, names);
                             }
                             _ => {}
@@ -219,8 +264,15 @@ impl LanguageChunker for TypeScriptChunker {
         imports
     }
 
-    fn chunk_unclaimed(&self, _tree: &Tree, source: &str, file_path: &str, chunks: &mut Vec<Chunk>) {
-        let mut claimed_ranges: Vec<(usize, usize)> = chunks.iter().map(|c| (c.line_start, c.line_end)).collect();
+    fn chunk_unclaimed(
+        &self,
+        _tree: &Tree,
+        source: &str,
+        file_path: &str,
+        chunks: &mut Vec<Chunk>,
+    ) {
+        let mut claimed_ranges: Vec<(usize, usize)> =
+            chunks.iter().map(|c| (c.line_start, c.line_end)).collect();
         claimed_ranges.sort();
 
         let source_lines: Vec<&str> = source.lines().collect();
@@ -293,7 +345,12 @@ impl LanguageChunker for TypeScriptChunker {
 }
 
 impl TypeScriptChunker {
-    fn extract_class_members(class_node: Node, source: &str, file_path: &str, chunks: &mut Vec<Option<Chunk>>) {
+    fn extract_class_members(
+        class_node: Node,
+        source: &str,
+        file_path: &str,
+        chunks: &mut Vec<Option<Chunk>>,
+    ) {
         let body = match class_node.child_by_field_name("body") {
             Some(b) => b,
             None => return,
@@ -309,16 +366,24 @@ impl TypeScriptChunker {
                 || kind == "abstract_method_declaration"
                 || kind == "constructor_definition"
             {
-                let name = child.child_by_field_name("name")
+                let name = child
+                    .child_by_field_name("name")
                     .or_else(|| child.children(&mut child.walk()).find(|c| c.is_named()))
                     .and_then(|n| n.utf8_text(source.as_bytes()).ok())
                     .map(|s| s.to_string());
 
                 let text = child.utf8_text(source.as_bytes()).unwrap_or("");
-                let sig = text.lines().next().map(|l| l.trim().to_string()).filter(|l| l.len() <= 120);
+                let sig = text
+                    .lines()
+                    .next()
+                    .map(|l| l.trim().to_string())
+                    .filter(|l| l.len() <= 120);
 
                 let ct = match kind {
-                    "method_definition" | "method_signature" | "abstract_method_declaration" | "constructor_definition" => ChunkType::Method,
+                    "method_definition"
+                    | "method_signature"
+                    | "abstract_method_declaration"
+                    | "constructor_definition" => ChunkType::Method,
                     "public_field_definition" | "property_definition" => ChunkType::Constant,
                     _ => ChunkType::Section,
                 };
@@ -326,7 +391,16 @@ impl TypeScriptChunker {
                 let mut metadata = serde_json::Map::new();
                 metadata.insert("class_member".to_string(), serde_json::Value::Bool(true));
 
-                chunks.push(make_chunk(source, child, file_path, "typescript", ct, name.as_deref(), sig.as_deref(), metadata));
+                chunks.push(make_chunk(
+                    source,
+                    child,
+                    file_path,
+                    "typescript",
+                    ct,
+                    name.as_deref(),
+                    sig.as_deref(),
+                    metadata,
+                ));
             }
         }
     }
@@ -351,7 +425,7 @@ export async function authenticateUser(
 const MAX_RETRIES = 3;
 "#;
         let chunker = TypeScriptChunker::new();
-        let chunks = chunker.chunk(source, "src/auth.ts");
+        let (chunks, _tree) = chunker.chunk(source, "src/auth.ts");
 
         assert!(!chunks.is_empty());
 
@@ -386,13 +460,16 @@ class AuthService {
 }
 "#;
         let chunker = TypeScriptChunker::new();
-        let chunks = chunker.chunk(source, "src/auth/service.ts");
+        let (chunks, _tree) = chunker.chunk(source, "src/auth/service.ts");
 
         let class = chunks.iter().find(|c| c.chunk_type == ChunkType::Class);
         assert!(class.is_some(), "Should find class");
         assert_eq!(class.unwrap().name.as_deref(), Some("AuthService"));
 
-        let methods: Vec<_> = chunks.iter().filter(|c| c.chunk_type == ChunkType::Method).collect();
+        let methods: Vec<_> = chunks
+            .iter()
+            .filter(|c| c.chunk_type == ChunkType::Method)
+            .collect();
         assert_eq!(methods.len(), 2, "Should find 2 methods");
         assert_eq!(methods[0].name.as_deref(), Some("login"));
         assert_eq!(methods[1].name.as_deref(), Some("logout"));
@@ -408,7 +485,7 @@ interface UserRepository {
 }
 "#;
         let chunker = TypeScriptChunker::new();
-        let chunks = chunker.chunk(source, "src/types.ts");
+        let (chunks, _tree) = chunker.chunk(source, "src/types.ts");
 
         let iface = chunks.iter().find(|c| c.chunk_type == ChunkType::Interface);
         assert!(iface.is_some());
@@ -424,7 +501,8 @@ import type { Config } from './config';
 import fs from 'fs';
 "#;
         let chunker = TypeScriptChunker::new();
-        let imports = chunker.extract_imports(source);
+        let (_chunks, tree) = chunker.chunk(source, "src/imports.ts");
+        let imports = chunker.extract_imports(&tree.unwrap(), source);
 
         assert_eq!(imports.len(), 4, "got {:?}: {:?}", imports.len(), imports);
 

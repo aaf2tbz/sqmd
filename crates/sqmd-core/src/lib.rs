@@ -2,12 +2,14 @@ pub mod chunk;
 pub mod chunker;
 pub mod context;
 pub mod daemon;
+pub mod dampening;
 pub mod entities;
 #[cfg(feature = "embed")]
 pub mod embed;
 pub mod files;
 pub mod index;
 pub mod languages;
+pub mod query_cache;
 pub mod relationships;
 pub mod schema;
 pub mod search;

@@ -1,8 +1,11 @@
-use tree_sitter::Tree;
 use crate::chunk::{Chunk, ChunkType};
-use crate::chunker::{LanguageChunker, make_chunk};
+use crate::chunker::{make_chunk, LanguageChunker};
+use tree_sitter::Tree;
 
-fn parse_go_import_spec(node: &tree_sitter::Node, source: &str) -> Option<crate::relationships::ImportInfo> {
+fn parse_go_import_spec(
+    node: &tree_sitter::Node,
+    source: &str,
+) -> Option<crate::relationships::ImportInfo> {
     let mut module_path = String::new();
     let mut names = Vec::new();
     if let Some(name_node) = node.child_by_field_name("name") {
@@ -49,7 +52,13 @@ impl LanguageChunker for GoChunker {
         "go"
     }
 
-    fn walk_declarations(&self, tree: &Tree, source: &str, file_path: &str, chunks: &mut Vec<Chunk>) {
+    fn walk_declarations(
+        &self,
+        tree: &Tree,
+        source: &str,
+        file_path: &str,
+        chunks: &mut Vec<Chunk>,
+    ) {
         let mut cursor = tree.root_node().walk();
 
         for child in tree.root_node().children(&mut cursor) {
@@ -57,11 +66,14 @@ impl LanguageChunker for GoChunker {
 
             match kind {
                 "function_declaration" | "method_declaration" => {
-                    let name = child.child_by_field_name("name")
+                    let name = child
+                        .child_by_field_name("name")
                         .and_then(|n| n.utf8_text(source.as_bytes()).ok())
                         .map(|s| s.to_string());
 
-                    let sig = child.utf8_text(source.as_bytes()).ok()
+                    let sig = child
+                        .utf8_text(source.as_bytes())
+                        .ok()
                         .and_then(|t| t.lines().next().map(|l| l.trim().to_string()))
                         .filter(|l| l.len() <= 120);
 
@@ -71,13 +83,27 @@ impl LanguageChunker for GoChunker {
                         ChunkType::Function
                     };
 
-                    if let Some(chunk) = make_chunk(source, child, file_path, "go", ct, name.as_deref(), sig.as_deref(), serde_json::Map::new()) {
+                    if let Some(chunk) = make_chunk(
+                        source,
+                        child,
+                        file_path,
+                        "go",
+                        ct,
+                        name.as_deref(),
+                        sig.as_deref(),
+                        serde_json::Map::new(),
+                    ) {
                         chunks.push(chunk);
                     }
                 }
                 "type_declaration" | "type_spec" => {
-                    let node = if kind == "type_declaration" { child } else { child.parent().unwrap_or(child) };
-                    let name = node.child_by_field_name("name")
+                    let node = if kind == "type_declaration" {
+                        child
+                    } else {
+                        child.parent().unwrap_or(child)
+                    };
+                    let name = node
+                        .child_by_field_name("name")
                         .or_else(|| {
                             node.children(&mut node.walk())
                                 .find(|c| c.kind() == "type_identifier")
@@ -85,7 +111,11 @@ impl LanguageChunker for GoChunker {
                         .and_then(|n| n.utf8_text(source.as_bytes()).ok())
                         .map(|s| s.to_string());
 
-                    let text = node.utf8_text(source.as_bytes()).ok().unwrap_or("").to_string();
+                    let text = node
+                        .utf8_text(source.as_bytes())
+                        .ok()
+                        .unwrap_or("")
+                        .to_string();
                     let ct = if text.contains("struct") {
                         ChunkType::Struct
                     } else if text.contains("interface") {
@@ -94,12 +124,30 @@ impl LanguageChunker for GoChunker {
                         ChunkType::Type
                     };
 
-                    if let Some(chunk) = make_chunk(source, node, file_path, "go", ct, name.as_deref(), None, serde_json::Map::new()) {
+                    if let Some(chunk) = make_chunk(
+                        source,
+                        node,
+                        file_path,
+                        "go",
+                        ct,
+                        name.as_deref(),
+                        None,
+                        serde_json::Map::new(),
+                    ) {
                         chunks.push(chunk);
                     }
                 }
                 "import_declaration" | "import_spec_list" => {
-                    if let Some(chunk) = make_chunk(source, child, file_path, "go", ChunkType::Import, None, None, serde_json::Map::new()) {
+                    if let Some(chunk) = make_chunk(
+                        source,
+                        child,
+                        file_path,
+                        "go",
+                        ChunkType::Import,
+                        None,
+                        None,
+                        serde_json::Map::new(),
+                    ) {
                         chunks.push(chunk);
                     }
                 }
@@ -107,12 +155,26 @@ impl LanguageChunker for GoChunker {
                     let text = child.utf8_text(source.as_bytes()).ok().unwrap_or("");
                     let trimmed = text.trim();
                     if trimmed.starts_with("func ") || trimmed.starts_with("func\t") {
-                        let name = child.child_by_field_name("name")
+                        let name = child
+                            .child_by_field_name("name")
                             .and_then(|n| n.utf8_text(source.as_bytes()).ok())
                             .map(|s| s.to_string());
 
-                        let sig = trimmed.lines().next().map(|l| l.to_string()).filter(|l| l.len() <= 120);
-                        if let Some(chunk) = make_chunk(source, child, file_path, "go", ChunkType::Function, name.as_deref(), sig.as_deref(), serde_json::Map::new()) {
+                        let sig = trimmed
+                            .lines()
+                            .next()
+                            .map(|l| l.to_string())
+                            .filter(|l| l.len() <= 120);
+                        if let Some(chunk) = make_chunk(
+                            source,
+                            child,
+                            file_path,
+                            "go",
+                            ChunkType::Function,
+                            name.as_deref(),
+                            sig.as_deref(),
+                            serde_json::Map::new(),
+                        ) {
                             chunks.push(chunk);
                         }
                     }
@@ -121,16 +183,7 @@ impl LanguageChunker for GoChunker {
         }
     }
 
-    fn extract_imports(&self, source: &str) -> Vec<crate::relationships::ImportInfo> {
-        let mut parser = tree_sitter::Parser::new();
-        if parser.set_language(&self.language()).is_err() {
-            return Vec::new();
-        }
-        let tree = match parser.parse(source, None) {
-            Some(t) => t,
-            None => return Vec::new(),
-        };
-
+    fn extract_imports(&self, tree: &Tree, source: &str) -> Vec<crate::relationships::ImportInfo> {
         let mut imports = Vec::new();
         let mut seen_paths: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut cursor = tree.root_node().walk();
@@ -179,7 +232,13 @@ impl LanguageChunker for GoChunker {
         imports
     }
 
-    fn chunk_unclaimed(&self, _tree: &Tree, source: &str, file_path: &str, chunks: &mut Vec<Chunk>) {
+    fn chunk_unclaimed(
+        &self,
+        _tree: &Tree,
+        source: &str,
+        file_path: &str,
+        chunks: &mut Vec<Chunk>,
+    ) {
         crate::chunker::FileChunker::chunk_file_into(source, file_path, "go", chunks);
     }
 }
@@ -192,7 +251,7 @@ mod tests {
     fn test_go_function() {
         let source = "package main\n\nimport \"fmt\"\n\nfunc greet(name string) string {\n    return \"Hello, \" + name\n}\n";
         let chunker = GoChunker::new();
-        let chunks = chunker.chunk(source, "main.go");
+        let (chunks, _tree) = chunker.chunk(source, "main.go");
 
         assert!(!chunks.is_empty());
         let func = chunks.iter().find(|c| c.chunk_type == ChunkType::Function);
@@ -204,20 +263,32 @@ mod tests {
     fn test_go_struct() {
         let source = "package models\n\ntype User struct {\n    Name string\n    Age  int\n}\n";
         let chunker = GoChunker::new();
-        let chunks = chunker.chunk(source, "user.go");
+        let (chunks, _tree) = chunker.chunk(source, "user.go");
 
-        let st = chunks.iter().find(|c| matches!(c.chunk_type, ChunkType::Type | ChunkType::Struct));
-        assert!(st.is_some(), "Should find a struct/type chunk, got: {:?}", chunks.iter().map(|c| (&c.chunk_type, &c.name)).collect::<Vec<_>>());
+        let st = chunks
+            .iter()
+            .find(|c| matches!(c.chunk_type, ChunkType::Type | ChunkType::Struct));
+        assert!(
+            st.is_some(),
+            "Should find a struct/type chunk, got: {:?}",
+            chunks
+                .iter()
+                .map(|c| (&c.chunk_type, &c.name))
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]
     fn test_go_extract_imports() {
         let source = "package main\n\nimport (\n    \"fmt\"\n    \"net/http\"\n\n    \"github.com/go-chi/chi/v5\"\n)\n";
         let chunker = GoChunker::new();
-        let imports = chunker.extract_imports(source);
+        let (_chunks, tree) = chunker.chunk(source, "test.go");
+        let imports = chunker.extract_imports(&tree.unwrap(), source);
         assert!(!imports.is_empty());
         assert!(imports.iter().any(|i| i.module_path == "fmt"));
         assert!(imports.iter().any(|i| i.module_path == "net/http"));
-        assert!(imports.iter().any(|i| i.module_path == "github.com/go-chi/chi/v5"));
+        assert!(imports
+            .iter()
+            .any(|i| i.module_path == "github.com/go-chi/chi/v5"));
     }
 }

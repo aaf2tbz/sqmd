@@ -1,4 +1,4 @@
-use tree_sitter::{Parser, Language, Tree, Node};
+use tree_sitter::{Language, Node, Parser, Tree};
 
 pub struct ChunkResult {
     pub chunk: crate::chunk::Chunk,
@@ -9,14 +9,18 @@ pub trait LanguageChunker: Send + Sync {
     fn language(&self) -> Language;
     fn language_name(&self) -> &str;
 
-    fn chunk(&self, source: &str, file_path: &str) -> Vec<crate::chunk::Chunk> {
+    fn chunk(&self, source: &str, file_path: &str) -> (Vec<crate::chunk::Chunk>, Option<Tree>) {
         let mut parser = Parser::new();
         if parser.set_language(&self.language()).is_err() {
-            return FileChunker::chunk_file(source, file_path, self.language_name());
+            let chunks = FileChunker::chunk_file(source, file_path, self.language_name());
+            return (chunks, None);
         }
         let tree = match parser.parse(source, None) {
             Some(t) => t,
-            None => return FileChunker::chunk_file(source, file_path, self.language_name()),
+            None => {
+                let chunks = FileChunker::chunk_file(source, file_path, self.language_name());
+                return (chunks, None);
+            }
         };
         let mut chunks = Vec::new();
 
@@ -25,18 +29,34 @@ pub trait LanguageChunker: Send + Sync {
         self.chunk_unclaimed(&tree, source, file_path, &mut chunks);
 
         chunks.sort_by_key(|c| c.line_start);
-        chunks
+        (chunks, Some(tree))
     }
 
-    fn walk_declarations(&self, tree: &Tree, source: &str, file_path: &str, chunks: &mut Vec<crate::chunk::Chunk>);
-    fn chunk_unclaimed(&self, tree: &Tree, source: &str, file_path: &str, chunks: &mut Vec<crate::chunk::Chunk>);
+    fn walk_declarations(
+        &self,
+        tree: &Tree,
+        source: &str,
+        file_path: &str,
+        chunks: &mut Vec<crate::chunk::Chunk>,
+    );
+    fn chunk_unclaimed(
+        &self,
+        tree: &Tree,
+        source: &str,
+        file_path: &str,
+        chunks: &mut Vec<crate::chunk::Chunk>,
+    );
 
-    fn extract_imports(&self, source: &str) -> Vec<crate::relationships::ImportInfo> {
-        let _ = source;
+    fn extract_imports(&self, tree: &Tree, source: &str) -> Vec<crate::relationships::ImportInfo> {
+        let _ = (tree, source);
         Vec::new()
     }
 
-    fn extract_contains(&self, source: &str, file_path: &str) -> Vec<crate::relationships::ImportInfo> {
+    fn extract_contains(
+        &self,
+        source: &str,
+        file_path: &str,
+    ) -> Vec<crate::relationships::ImportInfo> {
         let _ = (source, file_path);
         Vec::new()
     }
@@ -48,7 +68,13 @@ fn lines_before(node: Node, source: &str, count: usize) -> String {
     let mut lines = prefix.rsplit('\n');
     lines.next();
     let take = std::cmp::min(count, 3);
-    lines.take(take).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("\n")
+    lines
+        .take(take)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -78,7 +104,10 @@ pub fn make_chunk(
 
     let mut metadata = extra_metadata;
     if !context.is_empty() {
-        metadata.insert("context_before".to_string(), serde_json::Value::String(context));
+        metadata.insert(
+            "context_before".to_string(),
+            serde_json::Value::String(context),
+        );
     }
 
     Some(crate::chunk::Chunk {
@@ -110,7 +139,12 @@ impl FileChunker {
         chunks
     }
 
-    pub fn chunk_file_into(content: &str, relative: &str, language: &str, chunks: &mut Vec<crate::chunk::Chunk>) {
+    pub fn chunk_file_into(
+        content: &str,
+        relative: &str,
+        language: &str,
+        chunks: &mut Vec<crate::chunk::Chunk>,
+    ) {
         let lines: Vec<&str> = content.lines().collect();
         if lines.is_empty() {
             return;
@@ -137,7 +171,9 @@ impl FileChunker {
                 current_start = i;
             }
 
-            if (i - current_start >= max_section_lines) || (i == lines.len() - 1 && i >= current_start) {
+            if (i - current_start >= max_section_lines)
+                || (i == lines.len() - 1 && i >= current_start)
+            {
                 let end = if i == lines.len() - 1 { i + 1 } else { i };
                 let section_text = lines[current_start..end].join("\n");
                 if !section_text.trim().is_empty() {
@@ -166,13 +202,35 @@ impl FileChunker {
 
     fn is_declaration(trimmed: &str, _language: &str) -> bool {
         let keywords = [
-            "fn ", "function ", "async function ", "const ", "let ", "var ",
-            "class ", "interface ", "type ", "enum ", "struct ", "impl ",
-            "trait ", "def ", "pub fn ", "pub struct ", "pub enum ",
-            "pub trait ", "pub mod ", "mod ", "export function ",
-            "export async function ", "export const ", "export default ",
-            "export class ", "export interface ", "export type ",
-            "@", "#[",
+            "fn ",
+            "function ",
+            "async function ",
+            "const ",
+            "let ",
+            "var ",
+            "class ",
+            "interface ",
+            "type ",
+            "enum ",
+            "struct ",
+            "impl ",
+            "trait ",
+            "def ",
+            "pub fn ",
+            "pub struct ",
+            "pub enum ",
+            "pub trait ",
+            "pub mod ",
+            "mod ",
+            "export function ",
+            "export async function ",
+            "export const ",
+            "export default ",
+            "export class ",
+            "export interface ",
+            "export type ",
+            "@",
+            "#[",
         ];
         keywords.iter().any(|kw| trimmed.starts_with(kw))
     }

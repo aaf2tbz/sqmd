@@ -43,6 +43,9 @@ enum Commands {
         /// Filter by chunk type (function, class, method, etc.)
         #[arg(long)]
         r#type: Option<String>,
+        /// Filter by source type (code, memory, transcript, document, entity)
+        #[arg(long)]
+        source: Option<String>,
         /// Keyword-only search (skip vector)
         #[cfg(feature = "embed")]
         #[arg(long)]
@@ -173,12 +176,12 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         #[cfg(not(feature = "embed"))]
         Commands::Index { path } => cmd_index(&path),
         #[cfg(feature = "embed")]
-        Commands::Search { query, top_k, alpha, file, r#type, keyword } => {
-            cmd_search(&query, top_k, Some(alpha), file, r#type, Some(keyword), cli.json)
+        Commands::Search { query, top_k, alpha, file, r#type, source, keyword } => {
+            cmd_search(&query, top_k, Some(alpha), file, r#type, source, Some(keyword), cli.json)
         }
         #[cfg(not(feature = "embed"))]
-        Commands::Search { query, top_k, file, r#type } => {
-            cmd_search(&query, top_k, None, file, r#type, None, cli.json)
+        Commands::Search { query, top_k, file, r#type, source } => {
+            cmd_search(&query, top_k, None, file, r#type, source, None, cli.json)
         }
         #[cfg(feature = "embed")]
         Commands::Embed => cmd_embed(),
@@ -343,6 +346,7 @@ fn cmd_search(
     alpha: Option<f64>,
     file_filter: Option<String>,
     type_filter: Option<String>,
+    source_filter: Option<String>,
     #[cfg_attr(not(feature = "embed"), allow(unused_variables))]
     keyword_only: Option<bool>,
     json: bool,
@@ -355,6 +359,7 @@ fn cmd_search(
         alpha: alpha.unwrap_or(0.7),
         file_filter,
         type_filter,
+        source_type_filter: source_filter.map(|s| vec![s]),
         ..Default::default()
     };
 
