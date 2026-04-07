@@ -13,7 +13,9 @@ sqmd indexes any codebase into a SQLite database of semantically chunked source 
 
 All measurements taken on the sqmd codebase itself (27 files, 20 `.rs` source files, ~219 KB raw source).
 
-### Storage Size
+### Storage
+
+All measurements on the sqmd codebase itself (27 files, 20 `.rs` source files, ~219 KB raw source):
 
 | Method | Size | vs raw source | What you get |
 |--------|------|--------------|--------------|
@@ -27,19 +29,16 @@ All measurements taken on the sqmd codebase itself (27 files, 20 `.rs` source fi
 | **sqmd (default)** | **904 KB** | **4.2x** | Chunks + FTS5 + relationships + contains + call graph + knowledge |
 | **sqmd (with embeddings)** | **~2.5 MB** | **11.7x** | All above + 768-dim vector search + hybrid scoring |
 
-sqmd at 4.2x raw source stores everything needed: chunked code with names, signatures, types, importance scores, FTS5 full-text index, import/call/contains relationships, entity graph, prospective hints, and a unified knowledge store. No external services.
+On a 243-file TypeScript codebase (~45K lines, 986 KB source):
 
-### Token Efficiency
+| Method | Disk size | Queryable |
+|--------|-----------|-----------|
+| Raw source | 986 KB | grep only |
+| Custom SQLite (chunks + FTS5 + relationships) | ~2.4 MB | + graph traversal |
+| **sqmd (default)** | **~2.1 MB** | **FTS5 + hints + graph + knowledge** |
+| **sqmd (embed)** | **~4.8 MB** | **+ vector hybrid** |
 
-| Approach | Tokens an LLM must process | Notes |
-|----------|--------------------------|-------|
-| Read every file | ~55,000 | Dumps entire codebase into context |
-| Flat markdown dump | ~55,000 | Same content, marginal formatting overhead |
-| Full context markdown | ~99,000 | Worse -- metadata bloat, no filtering |
-| JSONL + embeddings | ~425,000 | Never meant for direct LLM consumption |
-| **sqmd selective query (10 chunks)** | **~4,000** | **96% fewer tokens than full dump** |
-
-The point: you don't need to read the whole index. sqmd queries return only the relevant chunks -- with dependencies -- inside a token budget. A 10-chunk context window (~4K tokens) typically answers most "how does X work" questions.
+sqmd at 4.2x raw source stores everything needed for structured search with relevance ranking. A 10-chunk context window (~4K tokens) typically answers most "how does X work" questions — 96% fewer tokens than reading the whole codebase.
 
 ### Query Speed
 
@@ -123,22 +122,6 @@ That's everything sqmd already does, in a single binary.
 | On-demand Markdown rendering | N/A | N/A | Built-in |
 | Unix socket daemon + JSON protocol | No | DIY | Built-in |
 | File watcher with debounce | No | DIY | Built-in |
-
-### Storage Overhead Comparison
-
-Measured on a 243-file TypeScript codebase (~45K lines, 986 KB source):
-
-| Method | Disk size | Index included | Queryable |
-|---|---|---|---|
-| Raw source files | 986 KB | No | grep only |
-| Concatenated markdown | 1,024 KB | No | grep only |
-| Custom SQLite (chunks + FTS5 only) | ~1.8 MB | Partial | Keyword only |
-| Custom SQLite (chunks + FTS5 + relationships) | ~2.4 MB | Partial | + graph traversal |
-| **sqmd (default)** | **~2.1 MB** | **Full** | **FTS5 + hints + graph + knowledge** |
-| **sqmd (embed)** | **~4.8 MB** | **Full** | **+ vector hybrid** |
-| Custom SQLite (all features, hand-built) | ~5 MB+ | Full | Depends on implementation |
-
-sqmd's overhead is the cost of making code and knowledge actually queryable. At 2.1x raw source (default) or 4.9x (with embeddings), you get structured search, relationship traversal, entity graph, knowledge types, and token-efficient context assembly. Building equivalent functionality yourself costs more in storage and orders of magnitude more in development time.
 
 ## How sqmd Works
 
