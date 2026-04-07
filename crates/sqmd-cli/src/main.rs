@@ -1,9 +1,13 @@
 use clap::{Parser, Subcommand};
-use std::path::{Path, PathBuf};
 use std::io::Write;
+use std::path::{Path, PathBuf};
 
 #[derive(Parser)]
-#[command(name = "sqmd", version, about = "SQLite + Markdown code index for AI agents")]
+#[command(
+    name = "sqmd",
+    version,
+    about = "SQLite + Markdown code index for AI agents"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -154,7 +158,10 @@ fn main() {
     let result = run(cli);
     if let Err(e) = result {
         if is_json {
-            eprintln!("{}", serde_json::json!({"ok": false, "error": e.to_string()}));
+            eprintln!(
+                "{}",
+                serde_json::json!({"ok": false, "error": e.to_string()})
+            );
         } else {
             eprintln!("Error: {e}");
         }
@@ -176,25 +183,52 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         #[cfg(not(feature = "embed"))]
         Commands::Index { path } => cmd_index(&path),
         #[cfg(feature = "embed")]
-        Commands::Search { query, top_k, alpha, file, r#type, source, keyword } => {
-            cmd_search(&query, top_k, Some(alpha), file, r#type, source, Some(keyword), cli.json)
-        }
+        Commands::Search {
+            query,
+            top_k,
+            alpha,
+            file,
+            r#type,
+            source,
+            keyword,
+        } => cmd_search(
+            &query,
+            top_k,
+            Some(alpha),
+            file,
+            r#type,
+            source,
+            Some(keyword),
+            cli.json,
+        ),
         #[cfg(not(feature = "embed"))]
-        Commands::Search { query, top_k, file, r#type, source } => {
-            cmd_search(&query, top_k, None, file, r#type, source, None, cli.json)
-        }
+        Commands::Search {
+            query,
+            top_k,
+            file,
+            r#type,
+            source,
+        } => cmd_search(&query, top_k, None, file, r#type, source, None, cli.json),
         #[cfg(feature = "embed")]
         Commands::Embed => cmd_embed(),
         Commands::Stats => cmd_stats(cli.json),
         Commands::Get { location } => cmd_get(&location, cli.json),
         Commands::Reset => cmd_reset(),
         Commands::Deps { path, depth } => cmd_deps(&path, depth),
-        Commands::Context { query, files, max_tokens, deps, dep_depth } => {
-            cmd_context(query, files, max_tokens, deps, dep_depth)
-        }
+        Commands::Context {
+            query,
+            files,
+            max_tokens,
+            deps,
+            dep_depth,
+        } => cmd_context(query, files, max_tokens, deps, dep_depth),
         Commands::Serve { path } => cmd_serve(&path),
         Commands::Watch { path } => cmd_watch(&path),
-        Commands::Ls { file, r#type, depth } => cmd_ls(file.as_deref(), r#type.as_deref(), depth, cli.json),
+        Commands::Ls {
+            file,
+            r#type,
+            depth,
+        } => cmd_ls(file.as_deref(), r#type.as_deref(), depth, cli.json),
         Commands::Cat { id } => cmd_cat(id, cli.json),
         Commands::Diff { since } => cmd_diff(&since, cli.json),
         Commands::Entities { r#type, limit } => cmd_entities(r#type.as_deref(), limit, cli.json),
@@ -280,10 +314,15 @@ fn cmd_index(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
         "  {} files scanned, {} indexed, {} skipped, {} deleted",
         stats.files_scanned, stats.files_indexed, stats.files_skipped, stats.files_deleted
     );
-    println!("  {} total chunks, {} relationships", stats.chunks_total, stats.relationships_total);
+    println!(
+        "  {} total chunks, {} relationships",
+        stats.chunks_total, stats.relationships_total
+    );
     let d = &stats.decisions;
-    println!("  decisions: {} added, {} updated, {} skipped, {} tombstoned",
-        d.added, d.updated, d.skipped, d.tombstoned);
+    println!(
+        "  decisions: {} added, {} updated, {} skipped, {} tombstoned",
+        d.added, d.updated, d.skipped, d.tombstoned
+    );
 
     Ok(())
 }
@@ -340,6 +379,7 @@ fn cmd_embed_with_db(db: &mut rusqlite::Connection) -> Result<(), Box<dyn std::e
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn cmd_search(
     query: &str,
     top_k: usize,
@@ -347,8 +387,7 @@ fn cmd_search(
     file_filter: Option<String>,
     type_filter: Option<String>,
     source_filter: Option<String>,
-    #[cfg_attr(not(feature = "embed"), allow(unused_variables))]
-    keyword_only: Option<bool>,
+    #[cfg_attr(not(feature = "embed"), allow(unused_variables))] keyword_only: Option<bool>,
     json: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let db = ensure_db()?;
@@ -384,22 +423,28 @@ fn cmd_search(
     }
 
     if json {
-        let arr: Vec<serde_json::Value> = results.iter().map(|r| {
-            serde_json::json!({
-                "file_path": r.file_path,
-                "chunk_type": r.chunk_type,
-                "name": r.name,
-                "line_start": r.line_start + 1,
-                "line_end": r.line_end + 1,
-                "score": r.score,
-                "snippet": r.snippet,
+        let arr: Vec<serde_json::Value> = results
+            .iter()
+            .map(|r| {
+                serde_json::json!({
+                    "file_path": r.file_path,
+                    "chunk_type": r.chunk_type,
+                    "name": r.name,
+                    "line_start": r.line_start + 1,
+                    "line_end": r.line_end + 1,
+                    "score": r.score,
+                    "snippet": r.snippet,
+                })
             })
-        }).collect();
-        println!("{}", serde_json::to_string_pretty(&serde_json::json!({
-            "query": query,
-            "result_count": results.len(),
-            "results": arr,
-        }))?);
+            .collect();
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "query": query,
+                "result_count": results.len(),
+                "results": arr,
+            }))?
+        );
         drop(db);
         return Ok(());
     }
@@ -423,10 +468,7 @@ fn cmd_search(
             r.line_end + 1,
             r.name.as_deref().unwrap_or(""),
         );
-        println!(
-            "   score: {:.3} ({})",
-            r.score, score_tag
-        );
+        println!("   score: {:.3} ({})", r.score, score_tag);
         if let Some(snippet) = &r.snippet {
             println!("   {}", snippet);
         }
@@ -443,21 +485,20 @@ fn cmd_stats(json: bool) -> Result<(), Box<dyn std::error::Error>> {
     let files: i64 = db.query_row("SELECT COUNT(*) FROM files", [], |r| r.get(0))?;
     let chunks: i64 = db.query_row("SELECT COUNT(*) FROM chunks", [], |r| r.get(0))?;
     let rels: i64 = db.query_row("SELECT COUNT(*) FROM relationships", [], |r| r.get(0))?;
-    let embedded: i64 = db.query_row(
-        "SELECT COUNT(*) FROM embeddings",
-        [],
-        |r| r.get(0),
-    )?;
+    let embedded: i64 = db.query_row("SELECT COUNT(*) FROM embeddings", [], |r| r.get(0))?;
     let db_size = std::fs::metadata(db_path())?.len();
 
     if json {
-        println!("{}", serde_json::json!({
-            "files": files,
-            "chunks": chunks,
-            "relationships": rels,
-            "embedded": embedded,
-            "db_size_bytes": db_size,
-        }));
+        println!(
+            "{}",
+            serde_json::json!({
+                "files": files,
+                "chunks": chunks,
+                "relationships": rels,
+                "embedded": embedded,
+                "db_size_bytes": db_size,
+            })
+        );
         drop(db);
         return Ok(());
     }
@@ -471,7 +512,7 @@ fn cmd_stats(json: bool) -> Result<(), Box<dyn std::error::Error>> {
     };
     let types: Vec<(String, i64)> = {
         let mut stmt = db.prepare(
-            "SELECT chunk_type, COUNT(*) FROM chunks GROUP BY chunk_type ORDER BY COUNT(*) DESC"
+            "SELECT chunk_type, COUNT(*) FROM chunks GROUP BY chunk_type ORDER BY COUNT(*) DESC",
         )?;
         stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
             .collect::<Result<Vec<_>, _>>()?
@@ -506,25 +547,30 @@ fn cmd_get(location: &str, json: bool) -> Result<(), Box<dyn std::error::Error>>
     let line_num: i64 = line.parse()?;
 
     let db = ensure_db()?;
-    let result: Option<(i64, i64, String, String, String)> = db.query_row(
-        "SELECT line_start, line_end, name, language, content_raw FROM chunks
+    let result: Option<(i64, i64, String, String, String)> = db
+        .query_row(
+            "SELECT line_start, line_end, name, language, content_raw FROM chunks
          WHERE file_path = ?1 AND line_start <= ?2 AND line_end >= ?2
          LIMIT 1",
-        rusqlite::params![file, line_num],
-        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
-    ).ok();
+            rusqlite::params![file, line_num],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+        )
+        .ok();
 
     match result {
         Some((start, end, name, language, content)) => {
             if json {
-                println!("{}", serde_json::json!({
-                    "name": name,
-                    "file_path": file,
-                    "language": language,
-                    "line_start": start + 1,
-                    "line_end": end + 1,
-                    "content": content,
-                }));
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "name": name,
+                        "file_path": file,
+                        "language": language,
+                        "line_start": start + 1,
+                        "line_end": end + 1,
+                        "content": content,
+                    })
+                );
             } else {
                 println!("Chunk: {} (lines {}-{})", name, start + 1, end + 1);
                 println!("```{}", language);
@@ -561,7 +607,8 @@ fn cmd_deps(file_path: &str, depth: usize) -> Result<(), Box<dyn std::error::Err
                 continue;
             }
             seen.insert(key);
-            println!("  -> {}:{} {} ({})",
+            println!(
+                "  -> {}:{} {} ({})",
                 dep.target_file,
                 dep.target_line + 1,
                 dep.target_name.as_deref().unwrap_or("(unnamed)"),
@@ -578,20 +625,30 @@ fn cmd_deps(file_path: &str, depth: usize) -> Result<(), Box<dyn std::error::Err
                 }
             }
             if !all_dep_ids.is_empty() {
-                let placeholders: Vec<String> = (0..all_dep_ids.len()).map(|i| format!("?{}", i + 1)).collect();
+                let placeholders: Vec<String> = (0..all_dep_ids.len())
+                    .map(|i| format!("?{}", i + 1))
+                    .collect();
                 let sql = format!(
                     "SELECT DISTINCT file_path, name, line_start FROM chunks WHERE id IN ({})",
                     placeholders.join(", ")
                 );
                 let mut stmt = db.prepare(&sql)?;
-                let params: Vec<&dyn rusqlite::ToSql> = all_dep_ids.iter().map(|id| id as &dyn rusqlite::ToSql).collect();
+                let params: Vec<&dyn rusqlite::ToSql> = all_dep_ids
+                    .iter()
+                    .map(|id| id as &dyn rusqlite::ToSql)
+                    .collect();
                 let transitive: Vec<(String, Option<String>, i64)> = stmt
                     .query_map(params.as_slice(), |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
                     .collect::<Result<_, _>>()?;
                 if !transitive.is_empty() {
                     println!("\n  Transitive (depth {}):", depth);
                     for (fp, name, line) in &transitive {
-                        println!("    -> {}:{} {}", fp, line + 1, name.as_deref().unwrap_or("(unnamed)"));
+                        println!(
+                            "    -> {}:{} {}",
+                            fp,
+                            line + 1,
+                            name.as_deref().unwrap_or("(unnamed)")
+                        );
                     }
                 }
             }
@@ -608,7 +665,8 @@ fn cmd_deps(file_path: &str, depth: usize) -> Result<(), Box<dyn std::error::Err
                 continue;
             }
             seen.insert(key);
-            println!("  <- {}:{} {}",
+            println!(
+                "  <- {}:{} {}",
                 dep.source_file,
                 dep.source_line + 1,
                 dep.source_name.as_deref().unwrap_or("(unnamed)"),
@@ -641,7 +699,10 @@ fn cmd_context(
 
     let resp = sqmd_core::context::ContextAssembler::build(&db, &request)?;
     println!("{}", resp.markdown);
-    eprintln!("\n--- {} chunks, ~{} tokens ---", resp.chunk_count, resp.token_count);
+    eprintln!(
+        "\n--- {} chunks, ~{} tokens ---",
+        resp.chunk_count, resp.token_count
+    );
 
     drop(db);
     Ok(())
@@ -671,7 +732,12 @@ fn cmd_watch(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
     sqmd_core::watcher::watch(&root)
 }
 
-fn cmd_ls(file: Option<&str>, type_filter: Option<&str>, depth: usize, json: bool) -> Result<(), Box<dyn std::error::Error>> {
+fn cmd_ls(
+    file: Option<&str>,
+    type_filter: Option<&str>,
+    depth: usize,
+    json: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
     let db = ensure_db()?;
     let entries = sqmd_core::vfs::list_chunks(&db, file, type_filter, depth)?;
 
@@ -698,27 +764,46 @@ fn cmd_cat(id: i64, json: bool) -> Result<(), Box<dyn std::error::Error>> {
     match entry {
         Some(e) => {
             let content: String = db
-                .query_row("SELECT content_raw FROM chunks WHERE id = ?1", rusqlite::params![id], |r| r.get(0))
+                .query_row(
+                    "SELECT content_raw FROM chunks WHERE id = ?1",
+                    rusqlite::params![id],
+                    |r| r.get(0),
+                )
                 .unwrap_or_default();
 
             if json {
-                println!("{}", serde_json::json!({
-                    "id": e.id,
-                    "file_path": e.file_path,
-                    "language": e.language,
-                    "chunk_type": e.chunk_type,
-                    "name": e.name,
-                    "signature": e.signature,
-                    "line_start": e.line_start + 1,
-                    "line_end": e.line_end + 1,
-                    "content": content,
-                }));
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "id": e.id,
+                        "file_path": e.file_path,
+                        "language": e.language,
+                        "chunk_type": e.chunk_type,
+                        "name": e.name,
+                        "signature": e.signature,
+                        "line_start": e.line_start + 1,
+                        "line_end": e.line_end + 1,
+                        "content": content,
+                    })
+                );
             } else {
-                println!("Chunk #{}: {} ({}:{})", e.id, e.name.as_deref().unwrap_or("(unnamed)"), e.file_path, e.line_start + 1);
+                println!(
+                    "Chunk #{}: {} ({}:{})",
+                    e.id,
+                    e.name.as_deref().unwrap_or("(unnamed)"),
+                    e.file_path,
+                    e.line_start + 1
+                );
                 if let Some(sig) = &e.signature {
                     println!("Signature: {}", sig);
                 }
-                println!("Type: {} | Language: {} | Lines: {}-{}", e.chunk_type, e.language, e.line_start + 1, e.line_end + 1);
+                println!(
+                    "Type: {} | Language: {} | Lines: {}-{}",
+                    e.chunk_type,
+                    e.language,
+                    e.line_start + 1,
+                    e.line_end + 1
+                );
                 println!();
                 println!("```{}", e.language);
                 println!("{}", content);
@@ -734,7 +819,11 @@ fn cmd_cat(id: i64, json: bool) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn cmd_entities(entity_type: Option<&str>, limit: usize, json: bool) -> Result<(), Box<dyn std::error::Error>> {
+fn cmd_entities(
+    entity_type: Option<&str>,
+    limit: usize,
+    json: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
     let db = ensure_db()?;
     let ents = sqmd_core::entities::list_entities(&db, entity_type, limit)?;
 
@@ -761,7 +850,10 @@ fn cmd_entity_deps(name: &str, depth: usize) -> Result<(), Box<dyn std::error::E
     let entity = sqmd_core::entities::get_entity(&db, name)?;
     match entity {
         Some(e) => {
-            println!("Entity: {} [{}] (mentions: {})\n", e.name, e.entity_type, e.mentions);
+            println!(
+                "Entity: {} [{}] (mentions: {})\n",
+                e.name, e.entity_type, e.mentions
+            );
 
             let aspects = sqmd_core::entities::get_aspects(&db, e.id)?;
             if !aspects.is_empty() {
@@ -776,11 +868,22 @@ fn cmd_entity_deps(name: &str, depth: usize) -> Result<(), Box<dyn std::error::E
                 let dep_ids = sqmd_core::entities::get_dependency_ids(&db, e.id, depth)?;
                 if !dep_ids.is_empty() {
                     println!("Dependencies (depth {}):", depth);
-                    let placeholders: Vec<String> = dep_ids.iter().enumerate().map(|(i, _)| format!("?{}", i + 1)).collect();
-                    let sql = format!("SELECT id, name, entity_type FROM entities WHERE id IN ({})", placeholders.join(", "));
+                    let placeholders: Vec<String> = dep_ids
+                        .iter()
+                        .enumerate()
+                        .map(|(i, _)| format!("?{}", i + 1))
+                        .collect();
+                    let sql = format!(
+                        "SELECT id, name, entity_type FROM entities WHERE id IN ({})",
+                        placeholders.join(", ")
+                    );
                     let mut stmt = db.prepare(&sql)?;
-                    let params: Vec<&dyn rusqlite::ToSql> = dep_ids.iter().map(|id| id as &dyn rusqlite::ToSql).collect();
-                    let deps: Vec<(i64, String, String)> = stmt.query_map(params.as_slice(), |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+                    let params: Vec<&dyn rusqlite::ToSql> = dep_ids
+                        .iter()
+                        .map(|id| id as &dyn rusqlite::ToSql)
+                        .collect();
+                    let deps: Vec<(i64, String, String)> = stmt
+                        .query_map(params.as_slice(), |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
                         .collect::<Result<_, _>>()?;
                     for (_id, dep_name, dep_type) in &deps {
                         println!("  -> {} [{}]", dep_name, dep_type);
@@ -798,7 +901,10 @@ fn cmd_entity_deps(name: &str, depth: usize) -> Result<(), Box<dyn std::error::E
 fn cmd_prune(days: i64) -> Result<(), Box<dyn std::error::Error>> {
     let db = ensure_db()?;
     let purged = sqmd_core::entities::purge_tombstones(&db, days)?;
-    println!("Purged {} tombstoned chunks older than {} days.", purged, days);
+    println!(
+        "Purged {} tombstoned chunks older than {} days.",
+        purged, days
+    );
     drop(db);
     Ok(())
 }

@@ -80,6 +80,7 @@ impl QueryCache {
         );
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn lookup(
         &self,
         query_text: &str,
@@ -93,6 +94,7 @@ impl QueryCache {
         self.get(&key).cloned()
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn store(
         &mut self,
         query_text: &str,

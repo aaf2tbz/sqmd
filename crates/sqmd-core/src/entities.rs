@@ -623,7 +623,7 @@ fn generate_memory_hints(content: &str) -> Vec<String> {
         for (idx, _) in content.to_lowercase().match_indices(pattern) {
             let after = &content[idx + pattern.len()..];
             let phrase: String = after
-                .split(|c: char| matches!(c, '.' | ',' | '!' | '?' | '\n'))
+                .split(['.', ',', '!', '?', '\n'])
                 .next()
                 .unwrap_or("")
                 .split_whitespace()

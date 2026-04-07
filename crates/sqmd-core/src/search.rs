@@ -110,7 +110,7 @@ fn fts_search_inner(
             let param_refs: Vec<&dyn rusqlite::ToSql> =
                 param_vals.iter().map(|p| p.as_ref()).collect();
 
-            let rows: Vec<(
+            type HintRow = (
                 i64,
                 String,
                 Option<String>,
@@ -120,7 +120,8 @@ fn fts_search_inner(
                 String,
                 String,
                 f64,
-            )> = stmt
+            );
+            let rows: Vec<HintRow> = stmt
                 .query_map(param_refs.as_slice(), |r| {
                     Ok((
                         r.get(0)?,

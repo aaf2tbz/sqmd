@@ -3,7 +3,7 @@ use crate::search::SearchResult;
 /// Post-fusion dampening: diversity only.
 /// Preserves absolute scores — only penalizes source clustering.
 /// Applied after score combination, before truncation.
-pub fn dampen(results: &mut Vec<SearchResult>, _spread_factor: f64) {
+pub fn dampen(results: &mut [SearchResult], _spread_factor: f64) {
     if results.len() < 2 {
         return;
     }
