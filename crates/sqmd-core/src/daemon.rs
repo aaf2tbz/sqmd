@@ -107,10 +107,26 @@ fn handle_connection(
         return Ok(());
     }
 
+    let is_write = matches!(
+        request.method.as_str(),
+        "ingest" | "ingest_batch" | "forget" | "modify"
+    );
+    #[allow(unused_variables)]
+    let is_embed = cfg!(feature = "embed") && matches!(request.method.as_str(), "embed");
+
     #[cfg(feature = "embed")]
-    let mut db = schema::open(&db_path)?;
+    let mut db = if is_write || is_embed {
+        schema::open(&db_path)?
+    } else {
+        schema::open_fast(&db_path)?
+    };
     #[cfg(not(feature = "embed"))]
-    let db = schema::open(&db_path)?;
+    let db = if is_write {
+        schema::open(&db_path)?
+    } else {
+        schema::open_fast(&db_path)?
+    };
+
     let response = match request.method.as_str() {
         "search" => handle_search(&db, &request.params, state),
         "context" => handle_context(&db, &request.params),

@@ -446,14 +446,22 @@ impl<'a> Indexer<'a> {
             decisions.added += 1;
         }
 
-        for (_, (old_id, _)) in old_hashes.iter() {
-            if !used_old_ids.contains(old_id) {
-                self.db.execute(
-                    "UPDATE chunks SET is_deleted = 1, deleted_at = datetime('now') WHERE id = ?1",
-                    params![old_id],
-                )?;
-                decisions.tombstoned += 1;
-            }
+        let stale_ids: Vec<i64> = old_hashes
+            .iter()
+            .filter(|(_, (old_id, _))| !used_old_ids.contains(old_id))
+            .map(|(_, (old_id, _))| *old_id)
+            .collect();
+
+        if !stale_ids.is_empty() {
+            let ph: Vec<String> = (0..stale_ids.len())
+                .map(|i| format!("?{}", i + 1))
+                .collect();
+            let ph = ph.join(", ");
+            self.db.execute(
+                &format!("UPDATE chunks SET is_deleted = 1, deleted_at = datetime('now') WHERE id IN ({ph})"),
+                rusqlite::params_from_iter(stale_ids.iter()),
+            )?;
+            decisions.tombstoned += stale_ids.len();
         }
 
         let rel_count = self.build_relationships(relative, chunks, &chunk_id_map)?;
@@ -667,18 +675,31 @@ impl<'a> Indexer<'a> {
             ids
         };
 
-        for &cid in &chunk_ids {
-            self.db
-                .execute("DELETE FROM hints WHERE chunk_id = ?1", params![cid])?;
-            self.db.execute(
-                "DELETE FROM entity_attributes WHERE chunk_id = ?1",
-                params![cid],
-            )?;
-            self.db.execute(
-                "DELETE FROM relationships WHERE source_id = ?1 OR target_id = ?2",
-                params![cid, cid],
-            )?;
+        if chunk_ids.is_empty() {
+            return Ok(());
         }
+
+        let placeholders: Vec<String> = (0..chunk_ids.len())
+            .map(|i| format!("?{}", i + 1))
+            .collect();
+        let ph = placeholders.join(", ");
+        let ph2: Vec<String> = (0..chunk_ids.len())
+            .map(|i| format!("?{}", i + 1 + chunk_ids.len()))
+            .collect();
+        let ph2 = ph2.join(", ");
+
+        self.db.execute(
+            &format!("DELETE FROM hints WHERE chunk_id IN ({ph})"),
+            rusqlite::params_from_iter(chunk_ids.iter()),
+        )?;
+        self.db.execute(
+            &format!("DELETE FROM entity_attributes WHERE chunk_id IN ({ph})"),
+            rusqlite::params_from_iter(chunk_ids.iter()),
+        )?;
+        self.db.execute(
+            &format!("DELETE FROM relationships WHERE source_id IN ({ph}) OR target_id IN ({ph2})"),
+            rusqlite::params_from_iter(chunk_ids.iter().chain(chunk_ids.iter())),
+        )?;
 
         entities::tombstone_chunks(self.db, relative)?;
         Ok(())
@@ -749,20 +770,36 @@ impl<'a> Indexer<'a> {
             drop(stmt);
             ids
         };
-        for &cid in &chunk_ids {
-            self.db
-                .execute("DELETE FROM hints WHERE chunk_id = ?1", params![cid])?;
+
+        if !chunk_ids.is_empty() {
+            let placeholders: Vec<String> = (0..chunk_ids.len())
+                .map(|i| format!("?{}", i + 1))
+                .collect();
+            let ph = placeholders.join(", ");
+
             self.db.execute(
-                "DELETE FROM entity_attributes WHERE chunk_id = ?1",
-                params![cid],
+                &format!("DELETE FROM hints WHERE chunk_id IN ({ph})"),
+                rusqlite::params_from_iter(chunk_ids.iter()),
             )?;
+            self.db.execute(
+                &format!("DELETE FROM entity_attributes WHERE chunk_id IN ({ph})"),
+                rusqlite::params_from_iter(chunk_ids.iter()),
+            )?;
+            let ph2: Vec<String> = (0..chunk_ids.len())
+                .map(|i| format!("?{}", i + 1 + chunk_ids.len()))
+                .collect();
+            let ph2 = ph2.join(", ");
+            self.db.execute(
+                &format!(
+                    "DELETE FROM relationships WHERE source_id IN ({ph}) OR target_id IN ({ph2})"
+                ),
+                rusqlite::params_from_iter(chunk_ids.iter().chain(chunk_ids.iter())),
+            )?;
+            self.db
+                .execute("DELETE FROM chunks WHERE file_path = ?1", params![relative])?;
         }
-        self.db.execute(
-            "DELETE FROM relationships WHERE source_id IN (SELECT id FROM chunks WHERE file_path = ?1) OR target_id IN (SELECT id FROM chunks WHERE file_path = ?1)",
-            params![relative],
-        )?;
         self.db
-            .execute("DELETE FROM chunks WHERE file_path = ?1", params![relative])?;
+            .execute("DELETE FROM files WHERE path = ?1", params![relative])?;
         Ok(())
     }
 }

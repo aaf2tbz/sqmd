@@ -490,6 +490,14 @@ pub fn open(path: &Path) -> SqlResult<Connection> {
     Ok(db)
 }
 
+pub fn open_fast(path: &Path) -> SqlResult<Connection> {
+    let db = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    db.execute_batch("PRAGMA mmap_size = 268435456;")?;
+    db.execute_batch("PRAGMA cache_size = -8000;")?;
+    db.execute_batch("PRAGMA foreign_keys = ON;")?;
+    Ok(db)
+}
+
 fn migrate_v5(db: &mut Connection) -> SqlResult<()> {
     let has_stemmer: bool = db
         .prepare(
