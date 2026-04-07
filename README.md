@@ -11,11 +11,9 @@ sqmd indexes any codebase into a SQLite database of semantically chunked source 
 
 ## Benchmarks
 
-All measurements taken on the sqmd codebase itself (27 files, 20 `.rs` source files, ~219 KB raw source).
+All measurements on the sqmd codebase itself (27 files, 20 `.rs` source files, ~219 KB raw source).
 
 ### Storage
-
-All measurements on the sqmd codebase itself (27 files, 20 `.rs` source files, ~219 KB raw source):
 
 | Method | Size | vs raw source | What you get |
 |--------|------|--------------|--------------|
@@ -23,22 +21,11 @@ All measurements on the sqmd codebase itself (27 files, 20 `.rs` source files, ~
 | LSP symbol JSON | 53 KB | 0.2x | Names + positions only, no content |
 | Tree-sitter JSON AST | 642-1071 KB | 3-5x | Full AST, no search, no relationships |
 | Flat markdown dump | 216 KB | 1.0x | All code in one file, no structure, no search |
-| Full context markdown | 387 KB | 1.8x | All code + metadata, no search, no query |
-| JSONL vector store (no embeddings) | 408 KB | 1.9x | Documents + metadata, needs external DB |
 | JSONL + vector embeddings (768d) | 1,660 KB | 7.8x | Vectors + content, needs Chroma/Pinecone |
 | **sqmd (default)** | **904 KB** | **4.2x** | Chunks + FTS5 + relationships + contains + call graph + knowledge |
 | **sqmd (with embeddings)** | **~2.5 MB** | **11.7x** | All above + 768-dim vector search + hybrid scoring |
 
-On a 243-file TypeScript codebase (~45K lines, 986 KB source):
-
-| Method | Disk size | Queryable |
-|--------|-----------|-----------|
-| Raw source | 986 KB | grep only |
-| Custom SQLite (chunks + FTS5 + relationships) | ~2.4 MB | + graph traversal |
-| **sqmd (default)** | **~2.1 MB** | **FTS5 + hints + graph + knowledge** |
-| **sqmd (embed)** | **~4.8 MB** | **+ vector hybrid** |
-
-sqmd at 4.2x raw source stores everything needed for structured search with relevance ranking. A 10-chunk context window (~4K tokens) typically answers most "how does X work" questions — 96% fewer tokens than reading the whole codebase.
+On a 243-file TypeScript codebase (~45K lines, 986 KB source): sqmd default is ~2.1 MB, sqmd embed is ~4.8 MB. A 10-chunk context window (~4K tokens) typically answers most "how does X work" questions — 96% fewer tokens than reading the whole codebase.
 
 ### Query Speed
 
@@ -51,77 +38,42 @@ sqmd at 4.2x raw source stores everything needed for structured search with rele
 
 ## Comparison: Markdown vs SQLite vs sqmd
 
-Most code intelligence approaches fall into three categories. Here's how they compare across the dimensions that matter for agent consumption.
-
-### At a Glance
-
 | | Raw Markdown | Raw SQLite | **sqmd** |
 |---|---|---|---|
 | **Format** | Flat files on disk | Single `.db` file | Single `.db` file |
 | **Structure** | None (or manual headers) | Manual schema | Tree-sitter AST-derived |
 | **Chunking** | Manual or none | Manual or none | Automatic per declaration |
-| **Search** | `grep` / filesystem | Manual SQL queries | FTS5 + vector hybrid |
+| **Search** | `grep` / filesystem | Manual SQL queries | FTS5 (porter-stemmed) + vector hybrid |
 | **Relationships** | None | Manual foreign keys | Import/call/contains graph |
 | **Incremental updates** | Rewrite entire file | Manual diffing | Content-hash decision pipeline |
 | **Token efficiency** | Dump everything | Query but no relevance ranking | Relevance-ranked + budget-aware |
 | **Entity graph** | None | Manual tables | Auto-built from code structure |
 | **Semantic hints** | None | None | Prospective FTS5 bridge |
 | **Knowledge ingest** | Manual | Manual | Built-in API (facts, decisions, preferences) |
-| **Offline** | Yes | Yes | Yes |
-| **Network required** | No | No | No |
-| **External services** | None | None | None |
+| **Offline / zero network** | Yes | Yes | Yes |
 | **Binary size** | N/A | N/A | ~10MB (27MB with embeddings) |
 
-### The Problem with Raw Markdown
+### What sqmd Adds (over building it yourself)
 
-Agents today often get code context as markdown files -- concatenated source, hand-formatted headers, maybe some structure. This works for small codebases but breaks down fast:
+You'd need to: write a code parser, design a schema, build FTS5 triggers, implement sqlite-vec, write an ONNX embedding pipeline, build a change detection system, implement a relationship extractor, build a token-budgeting context assembler, add an entity graph, and build knowledge ingest. That's everything sqmd already does, in a single binary.
 
-- **No query capability.** You grep or you read the whole file. No "find the auth middleware and everything it depends on."
-- **No relevance ranking.** Every chunk is equal. The agent burns tokens on boilerplate, imports, and tests when it needs the core logic.
-- **No relationships.** You can't ask "what calls this function?" or "what does this module import?" without the agent reading every file.
-- **Stale on change.** Regenerate the whole file on every code change, or accept drift. No incremental updates.
-- **Token waste.** A 50K-token codebase becomes a 50K-token markdown file. sqmd returns 10 relevant chunks in ~4K tokens (96% reduction).
-- **No semantic gap bridge.** An agent asking "how does authentication work" won't find a function called `verify_jwt` through keyword search on raw markdown.
-
-### The Problem with Raw SQLite
-
-You could build a SQLite database yourself. But you'd need to:
-
-1. Write a code parser or use tree-sitter bindings in your language
-2. Design a schema that handles chunks, relationships, embeddings, entities, knowledge
-3. Build an FTS5 index with content-sync triggers
-4. Implement a vector search extension (sqlite-vec)
-5. Write an embedding pipeline with ONNX Runtime
-6. Build a change detection system (content hashes, decision pipeline)
-7. Implement a relationship extractor (imports, calls, contains)
-8. Build a token-budgeting context assembler
-9. Add entity graph with aspects and attributes
-10. Build knowledge ingest with source type discrimination
-
-That's everything sqmd already does, in a single binary.
-
-### What sqmd Adds Over Either
-
-| Capability | Markdown | SQLite | sqmd |
-|---|---|---|---|
-| Parse 6 languages to semantic chunks | No | DIY | Built-in |
-| Content-hash incremental re-index | No | DIY | Built-in |
-| Decision pipeline (skip/update/tombstone) | No | DIY | Built-in |
-| FTS5 full-text search | No | DIY | Built-in |
-| Vector embeddings (768d) | No | DIY | `--features embed` |
-| Hybrid alpha-blended scoring | No | DIY | Built-in |
-| Import/call/contains graph | No | DIY | Built-in |
-| Recursive CTE graph traversal | No | DIY | Built-in |
-| Entity/aspect/attribute model | No | DIY | Built-in |
-| Prospective hint indexing | No | No | Built-in |
-| Graph-boosted search ranking | No | DIY | Built-in |
-| Soft-delete with retention decay | No | DIY | Built-in |
-| Knowledge ingest (facts, decisions, etc.) | No | DIY | Built-in |
-| Multi-agent scoping (agent_id) | No | DIY | Built-in |
-| Token-budgeted context assembly | No | DIY | Built-in |
-| On-demand Markdown rendering | N/A | N/A | Built-in |
-| Unix socket daemon + JSON protocol | No | DIY | Built-in |
-| File watcher with debounce | No | DIY | Built-in |
+| Capability | Built-in? |
+|---|---|
+| Parse 6 languages to semantic chunks | Yes |
+| Content-hash incremental re-index (skip/update/tombstone) | Yes |
+| FTS5 full-text search with Porter stemming | Yes |
+| Vector embeddings (768d) + hybrid alpha-blended scoring | `--features embed` |
+| Import/call/contains graph + recursive CTE traversal | Yes |
+| Entity/aspect/attribute model | Yes |
+| Prospective hint indexing (semantic gap bridge) | Yes |
+| Graph-boosted + importance-aware search ranking | Yes |
+| Diversity dampening (same-file penalty) | Yes |
+| Soft-delete with retention decay | Yes |
+| Knowledge ingest (facts, decisions, preferences) | Yes |
+| Multi-agent scoping (agent_id) | Yes |
+| Token-budgeted context assembly with dependency expansion | Yes |
+| Unix socket daemon + JSON protocol | Yes |
+| File watcher with debounce | Yes |
 
 ## How sqmd Works
 
@@ -173,7 +125,7 @@ external system (Signet, agent, user)
 chunk (code or knowledge)
     |
     +--> chunks table       (raw code + metadata + knowledge fields)
-    +--> chunks_fts          (FTS5 auto-sync via triggers)
+    +--> chunks_fts          (FTS5 auto-sync via triggers, porter-stemmed)
     +--> relationships       (imports, contains, calls, contradicts, ...)
     +--> entities            (files, structs, functions, etc.)
     +--> entity_aspects      (exports, implementation, constraints)
@@ -184,7 +136,7 @@ chunk (code or knowledge)
     +--> chunks_vec          (768-dim embeddings via sqlite-vec, optional)
 ```
 
-### Query
+### Search Pipeline
 
 ```
 agent query: "how does authentication work"
@@ -195,64 +147,44 @@ agent query: "how does authentication work"
     |
     v BEGIN (read-consistent snapshot)
     |
-    +--> FTS5 MATCH          (keyword search on chunks_fts, porter-stemmed)
+    +--> FTS5 MATCH          (keyword search, porter-stemmed)
     +--> hints_fts MATCH     (prospective hint bridging, porter-stemmed)
-    |       |
     |       v batch hint merge (single IN (...) query for missing hint IDs)
-    |
-    +--> graph boost         (batch entity LIKE query + recursive CTE expansion)
-    |
+    +--> graph boost         (batch entity LIKE + recursive CTE expansion)
     +--> sqlite-vec KNN      (cosine similarity, optional)
     |
     v normalize + alpha-blend (default 70% vector / 30% keyword)
-    |
     v importance_boost()     (0.7x-1.0x based on chunk importance field)
-    v dampen()               (same-source penalty: 3rd from same file → 85%, 4th → 72%)
-    |
+    v dampen()               (same-file penalty: 3rd from same file -> 85%, 4th -> 72%)
     v COMMIT
     |
     v filter by source_type, agent_id, tags
-    |
-    v top-K results → store in cache
-    |
+    v top-K results -> store in cache
     v optional: dependency expansion (recursive CTE, depth N)
-    |
     v token budget -> trim to limit
-    |
     v Chunk::render_md() -> on-demand Markdown for each chunk
-    |
     v assembled context -> agent
 ```
 
+Default: `alpha=0.7` (70% vector, 30% keyword). Single-source penalty (0.8) downranks chunks that appear in only one ranking.
+
+### Embedding Details
+
+Embeddings use nomic-embed-text-v1.5 with asymmetric retrieval (`search_query:` / `search_document:` prefixes). Documents are embedded with `search_document:` and queries with `search_query:`, which significantly improves recall for Q&A workloads.
+
+`embed_batch` performs actual batched ONNX inference — inputs are tokenized once (not twice), padded to the nearest multiple of 64 (not power-of-two), stacked into `[N, seq_len]` tensors, and run in a single forward pass.
+
+Embeddings use ONNX Runtime (ort) with a quantized model cached at `~/.sqmd/models/`. Auto-downloads on first `sqmd embed` if missing.
+
 ### Key Design Decisions
 
-1. **Raw code, not Markdown.** `content_raw` stores the original source. Markdown is derived on demand via `Chunk::render_md()`. Source of truth stays in the code.
-
-2. **Content-hash decision pipeline.** Every chunk gets a SHA-256 hash. On re-index, only changed chunks are updated. Zero-mutation runs produce zero writes. Code chunks and knowledge chunks both use SHA-256 — no algorithm mismatch.
-
-3. **Soft-delete with retention.** Deleted files are tombstoned, not hard-deleted. `sqmd prune --days N` purges old tombstones. Prevents data loss during re-indexes.
-
-4. **Prospective hints.** Natural-language queries like "how does authenticate work" are generated per chunk and indexed in FTS5. Bridges the gap between code names and agent language.
-
-5. **Graph density as relevance signal.** Highly-depended-upon code (high in-degree, many contains edges) gets boosted in search. A utility function called by 50 modules ranks higher than a private helper.
-
-6. **Unified code + knowledge store.** Code chunks and knowledge chunks (facts, decisions, preferences) live in the same table with source type discrimination. One query searches both.
-
-7. **Single binary, zero network.** Everything runs locally. SQLite does the heavy lifting (FTS5, WAL mode, recursive CTEs). No server, no API keys, no external services.
-
-8. **Multi-threaded daemon with shared state.** Each client connection is handled in its own thread. The ONNX embedder is loaded once and shared across all connections via `Arc<Mutex>` — no per-request model reload. A 256-entry LRU query cache deduplicates repeated agent searches.
-
-9. **Asymmetric retrieval.** Nomic query/document prefixes (`search_query:`, `search_document:`) improve recall for Q&A workloads by encoding queries and documents differently.
-
-10. **Temporal decay.** Knowledge chunks can decay over time via an exponential decay function on `decay_rate` × days since `last_accessed`, preventing stale knowledge from dominating search results.
-
-11. **Single-pass parsing.** Tree-sitter parses each file once; the resulting AST is reused for both chunking and import extraction. No double-parse.
-
-12. **Diversity dampening.** Search results from the same file get progressively penalized (3rd result: 85%, 4th: 72%), preventing "file flooding" where most results come from one file.
-
-13. **Read-consistent snapshots.** FTS search runs inside a SQLite transaction so FTS5 results, hint merges, and graph boosts all see the same data state.
-
-14. **Memory-mapped I/O.** SQLite reads go through a 256MB mmap region, letting the OS page cache handle repeated reads at memory speed with no syscall overhead.
+1. **Raw code, not Markdown.** `content_raw` stores the original source. Markdown is derived on demand via `Chunk::render_md()`.
+2. **Content-hash decision pipeline.** Every chunk gets a SHA-256 hash. Zero-mutation runs produce zero writes.
+3. **Soft-delete with retention.** Deleted files are tombstoned, not hard-deleted. `sqmd prune --days N` purges old tombstones.
+4. **Single-pass parsing.** Tree-sitter parses each file once; the resulting AST is reused for both chunking and import extraction.
+5. **Memory-mapped I/O.** SQLite reads go through a 256MB mmap region. No checkpoint stalls (`wal_autocheckpoint=1000`).
+6. **Shared daemon state.** ONNX embedder loaded once (`Arc<Mutex>`), shared across all connections. 256-entry LRU query cache deduplicates repeated agent searches.
+7. **Read-consistent snapshots.** FTS search runs inside a `BEGIN`/`COMMIT` transaction so all phases see the same data state.
 
 ## Quick Start
 
@@ -379,8 +311,6 @@ sqmd --json search "auth"   # machine-readable results
 | `document` | external ingest | Document sections, summaries |
 | `entity` | external ingest | Entity descriptions |
 
-### Knowledge Columns
-
 Each chunk stores: raw content, source type, optional agent ID (multi-agent scoping), JSON tags, decay rate (for retention scoring), last accessed timestamp, and created-by pipeline stage.
 
 ## Languages Supported
@@ -416,34 +346,6 @@ sqmd extracts relationships automatically from code and supports manual creation
 - **`relates_to`** -- generic association
 
 Query with `sqmd deps <file> --depth N` to traverse the graph bidirectionally.
-
-## Hybrid Search
-
-sqmd blends two search modes with configurable alpha weighting:
-
-- **FTS5** (keyword): fast exact/near-match on code text, function names, signatures — Porter stemmer enabled so "authenticate" matches "authentication"
-- **Vector KNN** (semantic): cosine similarity via sqlite-vec on 768-dim embeddings (nomic-embed-text-v1.5)
-- **Hint bridging**: prospective hints bridge the semantic gap between agent language and code names
-- **Graph boost**: batch entity LIKE query + recursive CTE expansion for entity graph density ranking
-- **Importance scoring**: each result's importance field (0.0-1.0) applies a 0.7x-1.0x multiplier
-- **Diversity dampening**: results from the same file get progressively penalized (3rd: 85%, 4th: 72%)
-- **Decay scoring**: knowledge chunks with a `decay_rate` lose relevance over time via exponential decay based on days since `last_accessed`
-
-Default: `alpha=0.7` (70% vector, 30% keyword). Single-source penalty (0.8) downranks chunks that appear in only one ranking.
-
-### Asymmetric Retrieval
-
-Embeddings use nomic-embed-text-v1.5's `search_query:` / `search_document:` prefixes for asymmetric retrieval. Documents are embedded with `search_document:` and queries with `search_query:`, which significantly improves recall quality for question-answering workloads.
-
-### Real Batch Embedding
-
-`embed_batch` performs actual batched ONNX inference — inputs are tokenized once (not twice), padded to the nearest multiple of 64 (not power-of-two), stacked into `[N, seq_len]` tensors, and run in a single forward pass.
-
-### Filter Parity
-
-Both FTS and vector search respect the same filters: `file`, `type`, `source_types`, and `agent_id`. Previously, vector search only accepted file and type filters, meaning `source_type` and `agent_id` scoping could leak non-matching code chunks into results.
-
-Embeddings use ONNX Runtime (ort) with a quantized model cached at `~/.sqmd/models/`. Auto-downloads on first `sqmd embed` if missing.
 
 ## Architecture
 
@@ -486,50 +388,6 @@ sqmd/
 +-- .github/workflows/rust.yml
 +-- Cargo.toml
 ```
-
-## Current Status
-
-v1.2.0. All 7 phases complete + production hardening + performance overhaul. 70 tests, CI passing.
-
-| Phase | What it adds |
-|-------|-------------|
-| 0 -- Spike | Validated sqlite-vec + ort |
-| 1 -- Foundations | Schema, CLI, file ingestion, FTS5 search |
-| 2 -- Tree-sitter | TS/Rust/Python/Go/Java chunkers, relationships, importance |
-| 3 -- Incremental | Rayon pipeline, file watcher, hash-based change detection |
-| 4 -- Embeddings | Vector search, hybrid scoring, model auto-download |
-| 5 -- Relationship Graph | Cross-file call graph + recursive CTE depth traversal |
-| 6 -- Agent API | Daemon mode, context assembly, token budgets |
-| 7 -- Knowledge Store | Schema v4, knowledge types, ingest/forget/modify, unified search |
-
-### v1.2.0 Changes (performance + quality overhaul)
-
-9 of 10 planned improvements shipped. Single-pass tree-sitter parsing, adaptive embedding padding, Porter stemming on FTS5, query caching, read-consistent snapshots, shared daemon embedder, N+1 query fixes, importance-aware ranking, and mmap I/O tuning.
-
-| Change | Impact |
-|--------|--------|
-| **Single-pass tree-sitter** | ~50% less CPU during indexing — parse once, pass `Tree` to import extraction instead of re-parsing |
-| **Adaptive embedding padding** | ceil-to-64 instead of next-power-of-2 (300 tokens → 320 pad instead of 512, saving ~37% ONNX compute) |
-| **Single-pass tokenization** | Batch embed tokenizes each input once instead of twice (measure then pad) |
-| **Porter stemmer on FTS5** | Schema v5 migration adds `porter unicode61` tokenization — "authenticate" now matches "authentication", "parsing" matches "parse" |
-| **Read-consistent search snapshots** | FTS search wrapped in `BEGIN`/`COMMIT` so results are consistent across the hint merge + graph boost phases |
-| **LRU query cache** | 10-second TTL, 256-entry cache keyed on `(query, top_k, filters)`. Repeated agent queries return instantly |
-| **Shared daemon Embedder** | ONNX session loaded once and shared via `Arc<Mutex<Option<Embedder>>>` across all daemon connections — eliminates per-request model reload |
-| **Batched hint merge** | N+1 individual `SELECT` per hint hit replaced with single `WHERE chunk_id IN (...)` batch query |
-| **Importance-aware ranking** | `SearchResult` now carries `importance` field; `importance_boost()` applies 0.7x-1.0x multiplier based on chunk importance |
-| **Diversity dampening wired in** | `dampen()` and `importance_boost()` finally called from search pipeline — same-file penalty and importance weighting now active |
-| **mmap I/O + WAL tuning** | `PRAGMA mmap_size=268MB`, `wal_autocheckpoint=1000`, `cache_size=-8MB` — memory-mapped reads, no checkpoint stalls |
-
-### v1.1.0 Changes (production hardening)
-
-| Change | What it fixes |
-|--------|--------------|
-| **Nomic query/document prefixes** | `embed_query()` / `embed_document()` / `embed_batch_documents()` / `embed_batch_queries()` use `search_query:` / `search_document:` prefixes for asymmetric retrieval |
-| **Real batch ONNX embedding** | `embed_batch` stacks inputs into `[N, seq_len]` tensors for single forward pass instead of looping `embed_one` N times |
-| **vec_search filter parity** | `source_type_filter` and `agent_id_filter` now applied to vector search, not just FTS |
-| **Unified SHA-256 hashing** | `Chunk::knowledge()` now uses SHA-256 (64-hex) matching code indexing path, fixing dedup when same content enters via both paths |
-| **Temporal decay scoring** | Search scores multiplied by exponential decay factor based on `decay_rate` × days since `last_accessed` |
-| **Multi-threaded daemon** | Each connection handled in its own thread with its own SQLite connection (WAL mode) |
 
 ## Daemon Protocol
 
