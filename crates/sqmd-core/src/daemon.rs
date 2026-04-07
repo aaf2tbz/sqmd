@@ -230,7 +230,16 @@ fn handle_search(
         let mut embedder = {
             let mut e = state.embedder.lock().unwrap_or_else(|e| e.into_inner());
             if e.is_none() {
-                *e = Some(crate::embed::Embedder::new()?);
+                match crate::embed::Embedder::new() {
+                    Ok(emb) => *e = Some(emb),
+                    Err(err) => {
+                        return Response {
+                            ok: false,
+                            result: None,
+                            error: Some(err.to_string()),
+                        }
+                    }
+                }
             }
             e.take().unwrap()
         };
