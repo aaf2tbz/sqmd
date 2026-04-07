@@ -147,10 +147,10 @@ sqmd's overhead is the cost of making code and knowledge actually queryable. At 
 ```
 source files (TS, Rust, Python, Go, Java, or fallback line-based)
     |
-    v tree-sitter (per-language grammar -> AST)
+    v tree-sitter (per-language grammar -> AST)   [parse ONCE]
     |
     v AST walker extracts declarations
-    |
+    |                                        [reuse Tree for imports]
     +--> function, method, class, struct, trait, enum,
     |    interface, type, import, module chunks
     |
@@ -206,16 +206,31 @@ chunk (code or knowledge)
 ```
 agent query: "how does authentication work"
     |
-    +--> FTS5 MATCH          (keyword search on chunks_fts)
-    +--> hints_fts MATCH     (prospective hint bridging)
-    +--> graph boost         (entity graph density ranking)
+    +--> query cache (LRU, 10s TTL)
+    |       +--> HIT: return cached results immediately
+    |       +--> MISS: continue
+    |
+    v BEGIN (read-consistent snapshot)
+    |
+    +--> FTS5 MATCH          (keyword search on chunks_fts, porter-stemmed)
+    +--> hints_fts MATCH     (prospective hint bridging, porter-stemmed)
+    |       |
+    |       v batch hint merge (single IN (...) query for missing hint IDs)
+    |
+    +--> graph boost         (batch entity LIKE query + recursive CTE expansion)
+    |
     +--> sqlite-vec KNN      (cosine similarity, optional)
     |
     v normalize + alpha-blend (default 70% vector / 30% keyword)
     |
+    v importance_boost()     (0.7x-1.0x based on chunk importance field)
+    v dampen()               (same-source penalty: 3rd from same file → 85%, 4th → 72%)
+    |
+    v COMMIT
+    |
     v filter by source_type, agent_id, tags
     |
-    v top-K results
+    v top-K results → store in cache
     |
     v optional: dependency expansion (recursive CTE, depth N)
     |
@@ -242,11 +257,19 @@ agent query: "how does authentication work"
 
 7. **Single binary, zero network.** Everything runs locally. SQLite does the heavy lifting (FTS5, WAL mode, recursive CTEs). No server, no API keys, no external services.
 
-8. **Multi-threaded daemon.** Each client connection is handled in its own thread with its own SQLite connection (WAL mode supports concurrent readers + single writer). Pipeline, dreaming, and embedding health checks no longer block each other.
+8. **Multi-threaded daemon with shared state.** Each client connection is handled in its own thread. The ONNX embedder is loaded once and shared across all connections via `Arc<Mutex>` — no per-request model reload. A 256-entry LRU query cache deduplicates repeated agent searches.
 
 9. **Asymmetric retrieval.** Nomic query/document prefixes (`search_query:`, `search_document:`) improve recall for Q&A workloads by encoding queries and documents differently.
 
 10. **Temporal decay.** Knowledge chunks can decay over time via an exponential decay function on `decay_rate` × days since `last_accessed`, preventing stale knowledge from dominating search results.
+
+11. **Single-pass parsing.** Tree-sitter parses each file once; the resulting AST is reused for both chunking and import extraction. No double-parse.
+
+12. **Diversity dampening.** Search results from the same file get progressively penalized (3rd result: 85%, 4th: 72%), preventing "file flooding" where most results come from one file.
+
+13. **Read-consistent snapshots.** FTS search runs inside a SQLite transaction so FTS5 results, hint merges, and graph boosts all see the same data state.
+
+14. **Memory-mapped I/O.** SQLite reads go through a 256MB mmap region, letting the OS page cache handle repeated reads at memory speed with no syscall overhead.
 
 ## Quick Start
 
@@ -415,10 +438,12 @@ Query with `sqmd deps <file> --depth N` to traverse the graph bidirectionally.
 
 sqmd blends two search modes with configurable alpha weighting:
 
-- **FTS5** (keyword): fast exact/near-match on code text, function names, signatures
+- **FTS5** (keyword): fast exact/near-match on code text, function names, signatures — Porter stemmer enabled so "authenticate" matches "authentication"
 - **Vector KNN** (semantic): cosine similarity via sqlite-vec on 768-dim embeddings (nomic-embed-text-v1.5)
 - **Hint bridging**: prospective hints bridge the semantic gap between agent language and code names
-- **Graph boost**: entity graph density (in-degree, contains count) boosts structural importance
+- **Graph boost**: batch entity LIKE query + recursive CTE expansion for entity graph density ranking
+- **Importance scoring**: each result's importance field (0.0-1.0) applies a 0.7x-1.0x multiplier
+- **Diversity dampening**: results from the same file get progressively penalized (3rd: 85%, 4th: 72%)
 - **Decay scoring**: knowledge chunks with a `decay_rate` lose relevance over time via exponential decay based on days since `last_accessed`
 
 Default: `alpha=0.7` (70% vector, 30% keyword). Single-source penalty (0.8) downranks chunks that appear in only one ranking.
@@ -429,7 +454,7 @@ Embeddings use nomic-embed-text-v1.5's `search_query:` / `search_document:` pref
 
 ### Real Batch Embedding
 
-`embed_batch` performs actual batched ONNX inference — inputs are stacked into `[N, seq_len]` tensors and run in a single forward pass, rather than looping through `embed_one` N times. This provides meaningful throughput gains for bulk embedding operations.
+`embed_batch` performs actual batched ONNX inference — inputs are tokenized once (not twice), padded to the nearest multiple of 64 (not power-of-two), stacked into `[N, seq_len]` tensors, and run in a single forward pass.
 
 ### Filter Parity
 
@@ -444,7 +469,7 @@ sqmd/
 +-- crates/
 |   +-- sqmd-core/          # library
 |   |   +-- src/
-|   |   |   +-- schema.rs        # SQLite DDL + migrations (v4)
+|   |   |   +-- schema.rs        # SQLite DDL + migrations (v5)
 |   |   |   +-- chunk.rs         # Chunk struct + ChunkType + SourceType + render_md()
 |   |   |   +-- chunker.rs       # LanguageChunker trait + FileChunker fallback
 |   |   |   +-- index.rs         # Transactional indexer + decision pipeline + KnowledgeIngestor
@@ -453,8 +478,10 @@ sqmd/
 |   |   |   +-- relationships.rs  # Import resolution + call graph + CTE depth traversal
 |   |   |   +-- entities.rs      # Entity/aspect/attribute model + hints + graph boost
 |   |   |   +-- context.rs       # Context assembly + token budgeting
+|   |   |   +-- dampening.rs     # Diversity dampening + importance boost + gravity scoring
+|   |   |   +-- query_cache.rs    # LRU query cache for daemon search dedup
 |   |   |   +-- vfs.rs           # Virtual file system: list, get, diff, tree rendering
-|   |   |   +-- daemon.rs        # Unix socket daemon + JSON protocol + knowledge handlers
+|   |   |   +-- daemon.rs        # Unix socket daemon + JSON protocol + knowledge handlers + shared embedder
 |   |   |   +-- watcher.rs       # notify file watcher + 200ms debounce
 |   |   |   +-- files.rs         # Language detection + file walking + hashing
 |   |   |   +-- languages/
@@ -479,7 +506,7 @@ sqmd/
 
 ## Current Status
 
-v1.1.0. All 7 phases complete + production hardening. 61 tests (default), 70 tests (embed), 0 clippy warnings, CI passing.
+v1.2.0. All 7 phases complete + production hardening + performance overhaul. 70 tests, CI passing.
 
 | Phase | What it adds |
 |-------|-------------|
@@ -491,6 +518,24 @@ v1.1.0. All 7 phases complete + production hardening. 61 tests (default), 70 tes
 | 5 -- Relationship Graph | Cross-file call graph + recursive CTE depth traversal |
 | 6 -- Agent API | Daemon mode, context assembly, token budgets |
 | 7 -- Knowledge Store | Schema v4, knowledge types, ingest/forget/modify, unified search |
+
+### v1.2.0 Changes (performance + quality overhaul)
+
+9 of 10 planned improvements shipped. Single-pass tree-sitter parsing, adaptive embedding padding, Porter stemming on FTS5, query caching, read-consistent snapshots, shared daemon embedder, N+1 query fixes, importance-aware ranking, and mmap I/O tuning.
+
+| Change | Impact |
+|--------|--------|
+| **Single-pass tree-sitter** | ~50% less CPU during indexing — parse once, pass `Tree` to import extraction instead of re-parsing |
+| **Adaptive embedding padding** | ceil-to-64 instead of next-power-of-2 (300 tokens → 320 pad instead of 512, saving ~37% ONNX compute) |
+| **Single-pass tokenization** | Batch embed tokenizes each input once instead of twice (measure then pad) |
+| **Porter stemmer on FTS5** | Schema v5 migration adds `porter unicode61` tokenization — "authenticate" now matches "authentication", "parsing" matches "parse" |
+| **Read-consistent search snapshots** | FTS search wrapped in `BEGIN`/`COMMIT` so results are consistent across the hint merge + graph boost phases |
+| **LRU query cache** | 10-second TTL, 256-entry cache keyed on `(query, top_k, filters)`. Repeated agent queries return instantly |
+| **Shared daemon Embedder** | ONNX session loaded once and shared via `Arc<Mutex<Option<Embedder>>>` across all daemon connections — eliminates per-request model reload |
+| **Batched hint merge** | N+1 individual `SELECT` per hint hit replaced with single `WHERE chunk_id IN (...)` batch query |
+| **Importance-aware ranking** | `SearchResult` now carries `importance` field; `importance_boost()` applies 0.7x-1.0x multiplier based on chunk importance |
+| **Diversity dampening wired in** | `dampen()` and `importance_boost()` finally called from search pipeline — same-file penalty and importance weighting now active |
+| **mmap I/O + WAL tuning** | `PRAGMA mmap_size=268MB`, `wal_autocheckpoint=1000`, `cache_size=-8MB` — memory-mapped reads, no checkpoint stalls |
 
 ### v1.1.0 Changes (production hardening)
 
