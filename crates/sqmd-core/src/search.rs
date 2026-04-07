@@ -234,7 +234,7 @@ fn fts_content_search(
 
     let sql = format!(
         "SELECT c.id, c.file_path, c.name, c.signature, c.line_start, c.line_end, c.chunk_type, f.rank, \
-         snippet(chunks_fts, 2, '>>>', '<<<', '...', 32), c.source_type, c.decay_rate, c.last_accessed, c.importance \
+         snippet(chunks_fts, 2, '>>>', '<<<', '...', 32), c.source_type, c.decay_rate, c.last_accessed, c.importance, c.updated_at \
          FROM chunks_fts f JOIN chunks c ON f.rowid = c.id \
          WHERE chunks_fts MATCH ?1 AND c.is_deleted = 0 {} \
          ORDER BY f.rank LIMIT ?2",
@@ -258,6 +258,7 @@ fn fts_content_search(
         f64,
         Option<String>,
         f64,
+        Option<String>,
     );
     let rows: Vec<FtsRow> = stmt
         .query_map(param_refs.as_slice(), |r| {
@@ -275,6 +276,7 @@ fn fts_content_search(
                 r.get(10)?,
                 r.get(11)?,
                 r.get(12)?,
+                r.get(13)?,
             ))
         })?
         .collect::<Result<_, _>>()?;
@@ -301,9 +303,11 @@ fn fts_content_search(
                 decay_rate,
                 last_accessed,
                 importance,
+                updated_at,
             )| {
                 let normalized = 1.0 - ((rank - min_rank) / rank_range);
-                let decay_factor = compute_decay_factor(decay_rate, last_accessed.as_deref(), &now);
+                let recency = compute_recency(updated_at.as_deref(), &now);
+                let score = three_factor_score(normalized, recency, importance);
                 SearchResult {
                     chunk_id: id,
                     file_path,
@@ -313,7 +317,7 @@ fn fts_content_search(
                     line_end: end,
                     chunk_type: ct,
                     source_type,
-                    score: normalized * decay_factor,
+                    score,
                     vec_distance: None,
                     fts_rank: Some(normalized),
                     snippet: Some(snippet),
@@ -385,7 +389,7 @@ pub fn vec_search(
     let filter_clause = extra_clauses.join(" ");
 
     let sql = format!(
-        "SELECT v.rowid, v.distance, c.file_path, c.name, c.signature, c.line_start, c.line_end, c.chunk_type, c.source_type, c.decay_rate, c.last_accessed, c.importance \
+        "SELECT v.rowid, v.distance, c.file_path, c.name, c.signature, c.line_start, c.line_end, c.chunk_type, c.source_type, c.decay_rate, c.last_accessed, c.importance, c.updated_at \
          FROM chunks_vec v JOIN chunks c ON v.rowid = c.id \
          WHERE v.embedding MATCH ?1 AND k = {} AND c.is_deleted = 0 {}",
         top_k, filter_clause
@@ -407,6 +411,7 @@ pub fn vec_search(
         f64,
         Option<String>,
         f64,
+        Option<String>,
     );
     let rows: Vec<VecRow> = stmt
         .query_map(param_refs.as_slice(), |r| {
@@ -423,6 +428,7 @@ pub fn vec_search(
                 r.get(9)?,
                 r.get(10)?,
                 r.get(11)?,
+                r.get(12)?,
             ))
         })?
         .collect::<Result<_, _>>()?;
@@ -444,8 +450,11 @@ pub fn vec_search(
                 decay_rate,
                 last_accessed,
                 importance,
+                updated_at,
             )| {
-                let decay_factor = compute_decay_factor(decay_rate, last_accessed.as_deref(), &now);
+                let relevance = 1.0 - distance.min(1.0);
+                let recency = compute_recency(updated_at.as_deref(), &now);
+                let score = three_factor_score(relevance, recency, importance);
                 SearchResult {
                     chunk_id: id,
                     file_path,
@@ -455,7 +464,7 @@ pub fn vec_search(
                     line_end: end,
                     chunk_type: ct,
                     source_type,
-                    score: (1.0 - distance.min(1.0)) * decay_factor,
+                    score,
                     vec_distance: Some(distance),
                     fts_rank: None,
                     snippet: None,
@@ -553,17 +562,18 @@ fn chrono_now() -> i64 {
         .unwrap_or(0) as i64
 }
 
-fn compute_decay_factor(decay_rate: f64, last_accessed: Option<&str>, now: &i64) -> f64 {
-    if decay_rate <= 0.0 {
-        return 1.0;
-    }
-    let accessed_ts = last_accessed
+fn compute_recency(updated_at: Option<&str>, now: &i64) -> f64 {
+    let updated_ts = updated_at
         .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
-        .and_then(|dt| dt.timestamp().try_into().ok())
-        .unwrap_or(0);
-    let days_since = ((*now - accessed_ts as i64).max(0) as f64) / 86400.0;
-    let factor = (-decay_rate * days_since).exp();
-    factor.clamp(0.1, 1.0)
+        .map(|dt| dt.timestamp())
+        .unwrap_or(*now);
+    let days_since = ((*now - updated_ts).max(0) as f64) / 86400.0;
+    let half_life = 90.0;
+    (2.0_f64).powf(-days_since / half_life)
+}
+
+fn three_factor_score(relevance: f64, recency: f64, importance: f64) -> f64 {
+    relevance * recency * importance
 }
 
 fn format_vector(vec: &[f32]) -> String {
