@@ -62,6 +62,224 @@ pub fn fts_search(
     result
 }
 
+const SHORT_CIRCUIT_THRESHOLD: f64 = 0.7;
+const MIN_SHORT_CIRCUIT_HITS: usize = 3;
+
+pub fn layered_search(
+    db: &Connection,
+    query: &SearchQuery,
+) -> Result<LayeredResult, Box<dyn std::error::Error>> {
+    let mut all_results: Vec<SearchResult> = Vec::new();
+    let mut layers_hit: Vec<String> = Vec::new();
+
+    // Layer 1: FTS
+    let fts_results = fts_search(db, query).unwrap_or_default();
+    let fts_top_score = fts_results.first().map(|r| r.score).unwrap_or(0.0);
+
+    if !fts_results.is_empty() {
+        layers_hit.push("fts".to_string());
+        let high_confidence = fts_results
+            .iter()
+            .filter(|r| r.score >= SHORT_CIRCUIT_THRESHOLD)
+            .count();
+        all_results.extend(fts_results);
+
+        if high_confidence >= MIN_SHORT_CIRCUIT_HITS && fts_top_score > 0.85 {
+            all_results.sort_by(|a, b| {
+                b.score
+                    .partial_cmp(&a.score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+            all_results.truncate(query.top_k);
+            return Ok(LayeredResult {
+                results: all_results,
+                layers_hit,
+            });
+        }
+    }
+
+    // Layer 2: Graph traversal expansion
+    if let Ok(graph_chunks) = graph_expansion_search(db, &query.text, query.top_k) {
+        if !graph_chunks.is_empty() {
+            layers_hit.push("graph".to_string());
+            let existing_ids: std::collections::HashSet<i64> =
+                all_results.iter().map(|r| r.chunk_id).collect();
+            for gc in graph_chunks {
+                if !existing_ids.contains(&gc.chunk_id) {
+                    all_results.push(gc);
+                }
+            }
+        }
+    }
+
+    // Layer 3: Community summaries
+    if let Ok(community_hits) = community_summary_search(db, &query.text) {
+        if !community_hits.is_empty() {
+            layers_hit.push("community".to_string());
+            let existing_ids: std::collections::HashSet<i64> =
+                all_results.iter().map(|r| r.chunk_id).collect();
+            for ch in community_hits {
+                if !existing_ids.contains(&ch.chunk_id) {
+                    all_results.push(ch);
+                }
+            }
+        }
+    }
+
+    all_results.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    dampening::importance_boost(&mut all_results);
+    dampening::dampen(&mut all_results, 0.8);
+    all_results.truncate(query.top_k);
+
+    Ok(LayeredResult {
+        results: all_results,
+        layers_hit,
+    })
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct LayeredResult {
+    pub results: Vec<SearchResult>,
+    pub layers_hit: Vec<String>,
+}
+
+fn graph_expansion_search(
+    db: &Connection,
+    query: &str,
+    top_k: usize,
+) -> Result<Vec<SearchResult>, Box<dyn std::error::Error>> {
+    let scored = crate::entities::graph_boost_scored(db, query, top_k)?;
+    if scored.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let chunk_ids: Vec<i64> = scored.iter().map(|(id, _)| *id).collect();
+    let score_map: std::collections::HashMap<i64, f64> = scored.into_iter().collect();
+
+    let placeholders: Vec<String> = (0..chunk_ids.len())
+        .map(|i| format!("?{}", i + 1))
+        .collect();
+    let sql = format!(
+        "SELECT id, file_path, name, signature, line_start, line_end, chunk_type, source_type, importance, updated_at \
+         FROM chunks WHERE id IN ({}) AND is_deleted = 0",
+        placeholders.join(", ")
+    );
+    let mut stmt = db.prepare(&sql)?;
+    let param_vals: Vec<Box<dyn rusqlite::ToSql>> = chunk_ids
+        .iter()
+        .map(|id| Box::new(*id) as Box<dyn rusqlite::ToSql>)
+        .collect();
+    let param_refs: Vec<&dyn rusqlite::ToSql> = param_vals.iter().map(|p| p.as_ref()).collect();
+
+    type GraphChunkRow = (
+        i64,
+        String,
+        Option<String>,
+        Option<String>,
+        i64,
+        i64,
+        String,
+        String,
+        f64,
+        Option<String>,
+    );
+    let now = chrono_now();
+    let rows: Vec<GraphChunkRow> = stmt
+        .query_map(param_refs.as_slice(), |r| {
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                r.get(2)?,
+                r.get(3)?,
+                r.get(4)?,
+                r.get(5)?,
+                r.get(6)?,
+                r.get(7)?,
+                r.get(8)?,
+                r.get(9)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let results: Vec<SearchResult> = rows
+        .into_iter()
+        .map(|(id, fp, name, sig, ls, le, ct, st, importance, ua)| {
+            let graph_score = score_map.get(&id).copied().unwrap_or(0.0);
+            let recency = compute_recency(ua.as_deref(), &now);
+            let score = three_factor_score(graph_score, recency, importance);
+            SearchResult {
+                chunk_id: id,
+                file_path: fp,
+                name,
+                signature: sig,
+                line_start: ls,
+                line_end: le,
+                chunk_type: ct,
+                source_type: st,
+                score,
+                vec_distance: None,
+                fts_rank: None,
+                snippet: Some("[graph expansion]".to_string()),
+                decay_rate: 0.0,
+                last_accessed: None,
+                importance,
+            }
+        })
+        .collect();
+
+    Ok(results)
+}
+
+fn community_summary_search(
+    db: &Connection,
+    query: &str,
+) -> Result<Vec<SearchResult>, Box<dyn std::error::Error>> {
+    let communities = crate::communities::search_communities(db, query, 3)?;
+    if communities.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut results: Vec<SearchResult> = Vec::new();
+    for community in &communities {
+        if let Ok(chunks) = crate::communities::get_community_chunks(db, community.id) {
+            let _now = chrono_now();
+            for (cid, fp, name, ct, ls, le) in chunks {
+                if let Ok(importance) = db.query_row(
+                    "SELECT importance FROM chunks WHERE id = ?1",
+                    params![cid],
+                    |r| r.get::<_, f64>(0),
+                ) {
+                    let score = three_factor_score(0.5, 1.0, importance);
+                    results.push(SearchResult {
+                        chunk_id: cid,
+                        file_path: fp,
+                        name: name.clone(),
+                        signature: None,
+                        line_start: ls,
+                        line_end: le,
+                        chunk_type: ct,
+                        source_type: "code".to_string(),
+                        score: score * 0.6,
+                        vec_distance: None,
+                        fts_rank: None,
+                        snippet: Some(format!("[community: {}]", community.path)),
+                        decay_rate: 0.0,
+                        last_accessed: None,
+                        importance,
+                    });
+                }
+            }
+        }
+    }
+
+    Ok(results)
+}
+
 fn fts_search_inner(
     db: &Connection,
     query: &SearchQuery,

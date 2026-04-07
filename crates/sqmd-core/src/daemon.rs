@@ -152,6 +152,7 @@ fn handle_connection(
         "fact_history" => handle_fact_history(&db, &request.params),
         "episodes" => handle_episodes(&db, &request.params),
         "episode_stats" => handle_episode_stats(&db),
+        "layered_search" => handle_layered_search(&db, &request.params, state),
         _ => Response {
             ok: false,
             result: None,
@@ -1093,6 +1094,73 @@ fn handle_episode_stats(db: &Connection) -> Response {
             result: Some(serde_json::json!({ "stats": stats })),
             error: None,
         },
+        Err(e) => Response {
+            ok: false,
+            result: None,
+            error: Some(e.to_string()),
+        },
+    }
+}
+
+fn handle_layered_search(
+    db: &Connection,
+    params: &serde_json::Value,
+    state: &Arc<DaemonState>,
+) -> Response {
+    let query = params["query"].as_str().unwrap_or("");
+    let top_k = params["top_k"].as_u64().unwrap_or(10) as usize;
+
+    if query.is_empty() {
+        return Response {
+            ok: false,
+            result: None,
+            error: Some("Missing query parameter".to_string()),
+        };
+    }
+
+    if let Some(cached) = {
+        let c = state.cache.lock().unwrap_or_else(|e| e.into_inner());
+        c.lookup(query, top_k, None, None, None, None)
+    } {
+        return Response {
+            ok: true,
+            result: Some(serde_json::json!({
+                "results": cached,
+                "layers_hit": ["fts", "cached"],
+            })),
+            error: None,
+        };
+    }
+
+    let search_query = crate::search::SearchQuery {
+        text: query.to_string(),
+        top_k,
+        ..Default::default()
+    };
+
+    match crate::search::layered_search(db, &search_query) {
+        Ok(layered) => {
+            let markdown = crate::search::render_search_markdown(db, &layered.results).ok();
+            let mut arr =
+                serde_json::to_value(&layered.results).unwrap_or(serde_json::Value::Array(vec![]));
+            if let (Some(md), serde_json::Value::Array(ref mut items)) = (markdown, &mut arr) {
+                for (i, item) in items.iter_mut().enumerate() {
+                    if let Some(m) = md.get(i) {
+                        item.as_object_mut().map(|obj| {
+                            obj.insert("markdown".to_string(), serde_json::Value::String(m.clone()))
+                        });
+                    }
+                }
+            }
+            Response {
+                ok: true,
+                result: Some(serde_json::json!({
+                    "results": arr,
+                    "layers_hit": layered.layers_hit,
+                })),
+                error: None,
+            }
+        }
         Err(e) => Response {
             ok: false,
             result: None,
