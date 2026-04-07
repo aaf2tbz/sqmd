@@ -406,13 +406,35 @@ fn fts_search_inner(
     Ok(results)
 }
 
+fn escape_fts_query(input: &str) -> String {
+    let tokens: Vec<String> = input
+        .split_whitespace()
+        .filter(|t| t.len() > 1)
+        .map(|t| {
+            let escaped: String = t
+                .chars()
+                .flat_map(|c| {
+                    if "\"*():^?".contains(c) {
+                        vec!['"', c, '"']
+                    } else {
+                        vec![c]
+                    }
+                })
+                .collect();
+            format!("\"{}\"", escaped)
+        })
+        .collect();
+    tokens.join(" OR ")
+}
+
 fn fts_content_search(
     db: &Connection,
     query: &SearchQuery,
 ) -> Result<Vec<SearchResult>, Box<dyn std::error::Error>> {
     let mut extra_clauses = Vec::new();
+    let fts_safe = escape_fts_query(&query.text);
     let mut param_values: Vec<Box<dyn rusqlite::ToSql>> =
-        vec![Box::new(query.text.clone()), Box::new(query.top_k as i64)];
+        vec![Box::new(fts_safe), Box::new(query.top_k as i64)];
     let mut next_param = 3;
 
     if let Some(ref f) = query.file_filter {
