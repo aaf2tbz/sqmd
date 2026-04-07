@@ -142,7 +142,7 @@ chunk (code or knowledge)
 agent query: "how does authentication work"
     |
     +--> query cache (LRU, 10s TTL)
-    |       +--> HIT: return cached results immediately
+    |       +--> HIT: return cached results (structured + markdown)
     |       +--> MISS: continue
     |
     v BEGIN (read-consistent snapshot)
@@ -158,16 +158,33 @@ agent query: "how does authentication work"
     v dampen()               (same-file penalty: 3rd from same file -> 85%, 4th -> 72%)
     v COMMIT
     |
-    v render_search_markdown() (batch-fetch content, render via Chunk::render_md)
-    v filter by source_type, agent_id, tags
-    v top-K results -> store in cache
+    v top-K results
     |
-    v JSON response { ...fields..., "markdown": "### `fn auth()` ..." }
-       ^-- callers that need raw fields use them; agents grab "markdown" directly
+    v render_search_markdown()
+    |   SELECT content_raw, language, source_type, importance, tags
+    |   FROM chunks WHERE id IN (...)  -- single batch query
+    |   for each result: Chunk::render_md() -> rendered markdown string
     |
-    v optional: dependency expansion (recursive CTE, depth N)
-    v token budget -> trim to limit
-    v assembled context -> agent
+    v build JSON response array:
+    |   [
+    |     {
+    |       "chunk_id": 42,
+    |       "file_path": "src/auth.rs",
+    |       "name": "authenticate",
+    |       "score": 0.92,
+    |       ...                       -- all structured fields for tooling/callers
+    |       "markdown": "<document>\n<source>src/auth.rs</source>\n..."  -- ready for agent prompt
+    |     },
+    |     ...
+    |   ]
+    |
+    v store results in query cache
+    |
+    v response over unix socket -> caller
+    |
+    +--> tooling/callers:  use structured fields (chunk_id, file_path, line_start, ...)
+    +--> agents:           grab "markdown" directly -> inject into prompt context
+                           (optional: dependency expansion, token budget trim)
 ```
 
 Default: `alpha=0.7` (70% vector, 30% keyword). Single-source penalty (0.8) downranks chunks that appear in only one ranking.
