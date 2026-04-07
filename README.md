@@ -43,13 +43,16 @@ On a 243-file TypeScript codebase (~45K lines, 986 KB source): sqmd default is ~
 | **Format** | Flat files on disk | Single `.db` file | Single `.db` file |
 | **Structure** | None (or manual headers) | Manual schema | Tree-sitter AST-derived |
 | **Chunking** | Manual or none | Manual or none | Automatic per declaration |
-| **Search** | `grep` / filesystem | Manual SQL queries | FTS5 (porter-stemmed) + vector hybrid |
-| **Relationships** | None | Manual foreign keys | Import/call/contains graph |
-| **Incremental updates** | Rewrite entire file | Manual diffing | Content-hash decision pipeline |
+| **Search** | `grep` / filesystem | Manual SQL queries | FTS5 + vector hybrid + multi-layer |
+| **Scoring** | None | Manual | Three-factor: relevance × recency × importance |
+| **Relationships** | None | Manual foreign keys | Import/call/contains graph + bi-temporal |
+| **Incremental updates** | Rewrite entire file | Manual diffing | Content-hash decision pipeline + episodes |
 | **Token efficiency** | Dump everything | Query but no relevance ranking | Relevance-ranked + budget-aware |
 | **Entity graph** | None | Manual tables | Auto-built from code structure |
+| **Community summaries** | None | None | Directory-based GraphRAG communities |
 | **Semantic hints** | None | None | Prospective FTS5 bridge |
 | **Knowledge ingest** | Manual | Manual | Built-in API (facts, decisions, preferences) |
+| **Change provenance** | Git only | Manual | Automatic episode recording |
 | **Offline / zero network** | Yes | Yes | Yes |
 | **Binary size** | N/A | N/A | ~10MB (27MB with embeddings) |
 
@@ -67,11 +70,16 @@ You'd need to: write a code parser, design a schema, build FTS5 triggers, implem
 | Entity/aspect/attribute model | Yes |
 | Prospective hint indexing (semantic gap bridge) | Yes |
 | Graph-boosted + importance-aware search ranking | Yes |
+| Three-factor retrieval scoring (relevance × recency × importance) | Yes |
+| Multi-layer retrieval with short-circuit (FTS → graph → community) | Yes |
 | Diversity dampening (same-file penalty) | Yes |
 | Soft-delete with retention decay | Yes |
 | Knowledge ingest (facts, decisions, preferences) | Yes |
 | Multi-agent scoping (agent_id) | Yes |
 | Token-budgeted context assembly with dependency expansion | Yes |
+| Hierarchical community summaries (directory-based GraphRAG) | Yes |
+| Bi-temporal fact tracking (valid_from/valid_to on entity deps) | Yes |
+| Episodic ingestion pipeline (change provenance) | Yes |
 | Unix socket daemon + JSON protocol | Yes |
 | File watcher with debounce | Yes |
 
@@ -130,8 +138,10 @@ chunk (code or knowledge)
     +--> entities            (files, structs, functions, etc.)
     +--> entity_aspects      (exports, implementation, constraints)
     +--> entity_attributes   (per-chunk annotations linked to entities)
-    +--> entity_dependencies (entity-level dependency edges)
+    +--> entity_dependencies (entity-level dependency edges, bi-temporal)
     +--> hints + hints_fts   (prospective natural-language queries)
+    +--> communities          (directory-based code communities + summaries)
+    +--> episodes             (change provenance: added/modified/deleted)
     +--> structural importance (graph density: in-degree, contains count)
     +--> chunks_vec          (768-dim embeddings via sqlite-vec, optional)
 ```
@@ -145,19 +155,24 @@ agent query: "how does authentication work"
     |       +--> HIT: return cached results (structured + markdown)
     |       +--> MISS: continue
     |
-    v BEGIN (read-consistent snapshot)
+    v layered_search (multi-layer with short-circuit)
     |
-    +--> FTS5 MATCH          (keyword search, porter-stemmed)
-    +--> hints_fts MATCH     (prospective hint bridging, porter-stemmed)
-    |       v batch hint merge (single IN (...) query for missing hint IDs)
-    +--> graph boost         (batch entity LIKE + recursive CTE expansion)
-    +--> sqlite-vec KNN      (cosine similarity, optional)
+    +--> Layer 1: FTS5 MATCH
+    |       +--> hints_fts MATCH (prospective hint bridging)
+    |       +--> graph boost (entity LIKE + recursive CTE expansion)
+    |       +--> SHORT-CIRCUIT: if 3+ hits with score > 0.7 and top > 0.85 -> return
     |
-    v normalize + alpha-blend (default 70% vector / 30% keyword)
+    +--> Layer 2: Graph expansion
+    |       +--> entity dependency graph -> related chunks
+    |       +--> three-factor scoring: relevance × recency × importance
+    |
+    +--> Layer 3: Community summaries
+    |       +--> directory-based community lookup
+    |       +--> member chunk expansion
+    |
+    v normalize + rank by three-factor score
     v importance_boost()     (0.7x-1.0x based on chunk importance field)
     v dampen()               (same-file penalty: 3rd from same file -> 85%, 4th -> 72%)
-    v COMMIT
-    |
     v top-K results
     |
     v render_search_markdown()
@@ -172,8 +187,8 @@ agent query: "how does authentication work"
     |       "file_path": "src/auth.rs",
     |       "name": "authenticate",
     |       "score": 0.92,
-    |       ...                       -- all structured fields for tooling/callers
-    |       "markdown": "<document>\n<source>src/auth.rs</source>\n..."  -- ready for agent prompt
+    |       "layers_hit": ["fts", "graph"],
+    |       "markdown": "<document>\n<source>src/auth.rs</source>\n..."
     |     },
     |     ...
     |   ]
@@ -181,13 +196,14 @@ agent query: "how does authentication work"
     v store results in query cache
     |
     v response over unix socket -> caller
-    |
-    +--> tooling/callers:  use structured fields (chunk_id, file_path, line_start, ...)
-    +--> agents:           grab "markdown" directly -> inject into prompt context
-                           (optional: dependency expansion, token budget trim)
 ```
 
-Default: `alpha=0.7` (70% vector, 30% keyword). Single-source penalty (0.8) downranks chunks that appear in only one ranking.
+Three-factor scoring replaces simple cosine/FTS ranking:
+- **relevance** = FTS rank or vector cosine similarity
+- **recency** = time decay with 90-day half-life based on `updated_at`
+- **importance** = stored importance weight (0.0-1.0)
+
+Multi-layer retrieval short-circuits when Layer 1 (FTS) produces 3+ high-confidence hits (score > 0.7, top score > 0.85), skipping graph and community layers entirely.
 
 ### Embedding Details
 
@@ -206,6 +222,9 @@ Embeddings use ONNX Runtime (ort) with a quantized model cached at `~/.sqmd/mode
 5. **Memory-mapped I/O.** SQLite reads go through a 256MB mmap region. No checkpoint stalls (`wal_autocheckpoint=1000`).
 6. **Shared daemon state.** ONNX embedder loaded once (`Arc<Mutex>`), shared across all connections. 256-entry LRU query cache deduplicates repeated agent searches.
 7. **Read-consistent snapshots.** FTS search runs inside a `BEGIN`/`COMMIT` transaction so all phases see the same data state.
+8. **Bi-temporal facts.** Entity dependencies track `valid_from`/`valid_to` timestamps. Superseded facts remain in history for point-in-time queries. Graph traversal filters to current facts by default.
+9. **Episodic provenance.** Every index change (add/modify/delete) records an episode with file path, change type, chunk count, and optional commit hash/author.
+10. **Directory-based communities.** File path prefixes form natural code communities. Community summaries provide graph-level context without external clustering dependencies.
 
 ## Quick Start
 
@@ -375,19 +394,21 @@ sqmd/
 +-- crates/
 |   +-- sqmd-core/          # library
 |   |   +-- src/
-|   |   |   +-- schema.rs        # SQLite DDL + migrations (v5)
+|   |   |   +-- schema.rs        # SQLite DDL + migrations (v8)
 |   |   |   +-- chunk.rs         # Chunk struct + ChunkType + SourceType + render_md()
 |   |   |   +-- chunker.rs       # LanguageChunker trait + FileChunker fallback
 |   |   |   +-- index.rs         # Transactional indexer + decision pipeline + KnowledgeIngestor
 |   |   |   +-- embed.rs         # ONNX embedding (ort) + BPE tokenizer + auto-download
-|   |   |   +-- search.rs        # FTS5 + vector hybrid search engine
+|   |   |   +-- search.rs        # FTS5 + vector hybrid + multi-layer retrieval + three-factor scoring
 |   |   |   +-- relationships.rs  # Import resolution + call graph + CTE depth traversal
-|   |   |   +-- entities.rs      # Entity/aspect/attribute model + hints + graph boost
+|   |   |   +-- entities.rs      # Entity/aspect/attribute + hints + graph boost + bi-temporal tracking
+|   |   |   +-- communities.rs   # Directory-based community detection + summaries
+|   |   |   +-- episodes.rs      # Episodic ingestion pipeline + change provenance
 |   |   |   +-- context.rs       # Context assembly + token budgeting
 |   |   |   +-- dampening.rs     # Diversity dampening + importance boost + gravity scoring
 |   |   |   +-- query_cache.rs    # LRU query cache for daemon search dedup
 |   |   |   +-- vfs.rs           # Virtual file system: list, get, diff, tree rendering
-|   |   |   +-- daemon.rs        # Unix socket daemon + JSON protocol + knowledge handlers + shared embedder
+|   |   |   +-- daemon.rs        # Unix socket daemon + JSON protocol + all handlers
 |   |   |   +-- watcher.rs       # notify file watcher + 200ms debounce
 |   |   |   +-- files.rs         # Language detection + file walking + hashing
 |   |   |   +-- languages/
@@ -417,6 +438,7 @@ sqmd/
 ```json
 {"method": "search", "params": {"query": "authentication", "top_k": 10}}
 {"method": "search", "params": {"query": "decision", "source_types": ["memory"]}}
+{"method": "layered_search", "params": {"query": "how does auth work", "top_k": 10}}
 {"method": "context", "params": {"query": "how does auth work", "max_tokens": 8000, "include_deps": true}}
 {"method": "stats", "params": {}}
 {"method": "index_file", "params": {"path": "src/main.rs"}}
@@ -429,6 +451,14 @@ sqmd/
 {"method": "modify", "params": {"id": 42, "importance": 0.9, "tags": ["security"]}}
 {"method": "ls", "params": {"file": "src/auth.ts", "depth": 1}}
 {"method": "cat", "params": {"id": 42}}
+{"method": "communities", "params": {"limit": 20}}
+{"method": "community_summary", "params": {"id": 1}}
+{"method": "project_summary", "params": {}}
+{"method": "supersede_fact", "params": {"source_entity": 1, "target_entity": 2, "dep_type": "imports"}}
+{"method": "facts_at", "params": {"entity_id": 1, "as_of": "2025-06-01"}}
+{"method": "fact_history", "params": {"source_entity": 1, "target_entity": 2, "dep_type": "imports"}}
+{"method": "episodes", "params": {"file_path": "src/auth.rs", "limit": 10}}
+{"method": "episode_stats", "params": {}}
 ```
 
 > `embed`, `embed_text`, `embed_batch` methods and hybrid search require `--features embed`. Without it, `search` uses FTS5 keyword matching.
