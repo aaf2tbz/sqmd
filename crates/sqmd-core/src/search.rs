@@ -413,16 +413,11 @@ fn escape_fts_query(input: &str) -> String {
         .map(|t| {
             let escaped: String = t
                 .chars()
-                .flat_map(|c| {
-                    if "\"*():^?".contains(c) {
-                        vec!['"', c, '"']
-                    } else {
-                        vec![c]
-                    }
-                })
+                .map(|c| if "\"*():^?".contains(c) { ' ' } else { c })
                 .collect();
-            format!("\"{}\"", escaped)
+            escaped
         })
+        .filter(|t| !t.is_empty())
         .collect();
     tokens.join(" OR ")
 }
