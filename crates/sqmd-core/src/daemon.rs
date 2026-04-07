@@ -150,6 +150,8 @@ fn handle_connection(
         "supersede_fact" => handle_supersede_fact(&db, &request.params),
         "facts_at" => handle_facts_at(&db, &request.params),
         "fact_history" => handle_fact_history(&db, &request.params),
+        "episodes" => handle_episodes(&db, &request.params),
+        "episode_stats" => handle_episode_stats(&db),
         _ => Response {
             ok: false,
             result: None,
@@ -1057,6 +1059,44 @@ fn handle_fact_history(db: &Connection, params: &serde_json::Value) -> Response 
             ok: false,
             result: None,
             error: Some("source_entity, target_entity, and dep_type required".into()),
+        },
+    }
+}
+
+fn handle_episodes(db: &Connection, params: &serde_json::Value) -> Response {
+    let file_path = params.get("file_path").and_then(|v| v.as_str());
+    let limit = params.get("limit").and_then(|v| v.as_u64()).unwrap_or(20) as usize;
+
+    let result = match file_path {
+        Some(fp) => crate::episodes::get_file_episodes(db, fp, limit),
+        None => crate::episodes::get_recent_episodes(db, limit),
+    };
+
+    match result {
+        Ok(episodes) => Response {
+            ok: true,
+            result: Some(serde_json::json!({ "episodes": episodes })),
+            error: None,
+        },
+        Err(e) => Response {
+            ok: false,
+            result: None,
+            error: Some(e.to_string()),
+        },
+    }
+}
+
+fn handle_episode_stats(db: &Connection) -> Response {
+    match crate::episodes::get_episode_stats(db) {
+        Ok(stats) => Response {
+            ok: true,
+            result: Some(serde_json::json!({ "stats": stats })),
+            error: None,
+        },
+        Err(e) => Response {
+            ok: false,
+            result: None,
+            error: Some(e.to_string()),
         },
     }
 }

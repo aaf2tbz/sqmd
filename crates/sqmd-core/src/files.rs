@@ -1,4 +1,4 @@
-use sha2::{Sha256, Digest};
+use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize)]
@@ -116,13 +116,25 @@ impl SourceFile {
 
 pub fn walk_project(root: &Path) -> impl Iterator<Item = PathBuf> {
     let mut builder = ignore::WalkBuilder::new(root);
-    let builder = builder.hidden(true).git_ignore(true).git_exclude(true).git_global(true);
+    let builder = builder
+        .hidden(true)
+        .git_ignore(true)
+        .git_exclude(true)
+        .git_global(true);
     builder.filter_entry(|entry| {
         let name = entry.file_name().to_string_lossy();
-        if name == ".git" || name == "node_modules" || name == "target"
-            || name == ".sqmd" || name == "dist" || name == "build"
-            || name == "__pycache__" || name == ".venv" || name == "vendor"
-            || name == ".next" || name == ".nuxt" || name == "coverage"
+        if name == ".git"
+            || name == "node_modules"
+            || name == "target"
+            || name == ".sqmd"
+            || name == "dist"
+            || name == "build"
+            || name == "__pycache__"
+            || name == ".venv"
+            || name == "vendor"
+            || name == ".next"
+            || name == ".nuxt"
+            || name == "coverage"
         {
             return false;
         }
@@ -149,7 +161,10 @@ mod tests {
 
     #[test]
     fn test_detect_language() {
-        assert_eq!(detect_language(Path::new("src/main.ts")), Language::TypeScript);
+        assert_eq!(
+            detect_language(Path::new("src/main.ts")),
+            Language::TypeScript
+        );
         assert_eq!(detect_language(Path::new("src/App.tsx")), Language::TSX);
         assert_eq!(detect_language(Path::new("src/main.rs")), Language::Rust);
         assert_eq!(detect_language(Path::new("src/main.py")), Language::Python);
@@ -171,7 +186,12 @@ mod tests {
     #[test]
     fn test_walk_project() {
         let dir = std::env::var("CARGO_MANIFEST_DIR").unwrap();
-        let root = PathBuf::from(dir).parent().unwrap().parent().unwrap().to_path_buf();
+        let root = PathBuf::from(dir)
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .to_path_buf();
         let files: Vec<_> = walk_project(&root).collect();
         assert!(!files.is_empty());
         for f in &files {

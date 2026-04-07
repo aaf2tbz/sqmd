@@ -309,9 +309,17 @@ impl<'a> Indexer<'a> {
             Ok(c) => c,
             Err(_) => {
                 self.db.execute_batch("BEGIN")?;
-                self.delete_file_chunks(&relative)?;
+                let deleted_count = self.delete_file_chunks(&relative)?;
                 self.db
                     .execute("DELETE FROM files WHERE path = ?1", params![relative])?;
+                let _ = crate::episodes::record_episode(
+                    self.db,
+                    &relative,
+                    "deleted",
+                    None,
+                    None,
+                    deleted_count,
+                );
                 self.db.execute_batch("COMMIT")?;
                 return Ok(Some(FileIndexResult {
                     file_path: relative,
@@ -365,6 +373,20 @@ impl<'a> Indexer<'a> {
         rel_count += self.decision_write_chunks(&relative, &chunks, &mut file_decisions)?;
         rel_count += self.write_import_relationships(&relative, &raw_imports)?;
         self.build_entity_graph(&relative, &chunks)?;
+
+        let change_type = if existing_hash.is_some() {
+            "modified"
+        } else {
+            "added"
+        };
+        let _ = crate::episodes::record_episode(
+            self.db,
+            &relative,
+            change_type,
+            None,
+            None,
+            chunks.len() as i64,
+        );
 
         self.db.execute_batch("COMMIT")?;
 
@@ -759,7 +781,7 @@ impl<'a> Indexer<'a> {
         Ok(Some(self.db.last_insert_rowid()))
     }
 
-    fn delete_file_chunks(&self, relative: &str) -> Result<(), Box<dyn std::error::Error>> {
+    fn delete_file_chunks(&self, relative: &str) -> Result<i64, Box<dyn std::error::Error>> {
         let chunk_ids: Vec<i64> = {
             let mut stmt = self
                 .db
@@ -770,6 +792,8 @@ impl<'a> Indexer<'a> {
             drop(stmt);
             ids
         };
+
+        let count = chunk_ids.len() as i64;
 
         if !chunk_ids.is_empty() {
             let placeholders: Vec<String> = (0..chunk_ids.len())
@@ -789,6 +813,7 @@ impl<'a> Indexer<'a> {
                 .map(|i| format!("?{}", i + 1 + chunk_ids.len()))
                 .collect();
             let ph2 = ph2.join(", ");
+
             self.db.execute(
                 &format!(
                     "DELETE FROM relationships WHERE source_id IN ({ph}) OR target_id IN ({ph2})"
@@ -798,9 +823,7 @@ impl<'a> Indexer<'a> {
             self.db
                 .execute("DELETE FROM chunks WHERE file_path = ?1", params![relative])?;
         }
-        self.db
-            .execute("DELETE FROM files WHERE path = ?1", params![relative])?;
-        Ok(())
+        Ok(count)
     }
 }
 

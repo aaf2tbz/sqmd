@@ -2,7 +2,7 @@ use rusqlite::{Connection, Result as SqlResult};
 use sqlite_vec::sqlite3_vec_init;
 use std::path::Path;
 
-const CURRENT_VERSION: i64 = 7;
+const CURRENT_VERSION: i64 = 8;
 
 pub fn init(db: &mut Connection) -> SqlResult<()> {
     #[allow(clippy::missing_transmute_annotations)]
@@ -57,6 +57,9 @@ pub fn init(db: &mut Connection) -> SqlResult<()> {
             if sql_version < 7 {
                 migrate_v7(db)?;
             }
+            if sql_version < 8 {
+                migrate_v8(db)?;
+            }
         }
         return Ok(());
     }
@@ -83,6 +86,10 @@ pub fn init(db: &mut Connection) -> SqlResult<()> {
 
     if version < 7 {
         migrate_v7(db)?;
+    }
+
+    if version < 8 {
+        migrate_v8(db)?;
     }
 
     Ok(())
@@ -637,6 +644,26 @@ fn migrate_v7(db: &mut Connection) -> SqlResult<()> {
     }
 
     db.execute_batch("INSERT OR IGNORE INTO schema_version (version) VALUES (7);")?;
+    Ok(())
+}
+
+fn migrate_v8(db: &mut Connection) -> SqlResult<()> {
+    db.execute_batch(
+        "CREATE TABLE IF NOT EXISTS episodes (
+            id               INTEGER PRIMARY KEY,
+            file_path        TEXT NOT NULL,
+            change_type      TEXT NOT NULL CHECK(change_type IN ('added', 'modified', 'deleted')),
+            commit_hash      TEXT,
+            author           TEXT,
+            summary          TEXT,
+            chunks_affected  INTEGER NOT NULL DEFAULT 0,
+            created_at       TEXT NOT NULL DEFAULT ''
+        );",
+    )?;
+    db.execute_batch("CREATE INDEX IF NOT EXISTS idx_episodes_file ON episodes(file_path);")?;
+    db.execute_batch("CREATE INDEX IF NOT EXISTS idx_episodes_type ON episodes(change_type);")?;
+    db.execute_batch("CREATE INDEX IF NOT EXISTS idx_episodes_time ON episodes(created_at);")?;
+    db.execute_batch("INSERT OR IGNORE INTO schema_version (version) VALUES (8);")?;
     Ok(())
 }
 

@@ -28,7 +28,10 @@ pub fn watch(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let mut watcher = notify::recommended_watcher(tx)?;
     watcher.watch(root, RecursiveMode::Recursive)?;
 
-    println!("Watching {} for changes... (Ctrl+C to stop)", root.display());
+    println!(
+        "Watching {} for changes... (Ctrl+C to stop)",
+        root.display()
+    );
 
     let mut pending: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
     let debounce = Duration::from_millis(200);

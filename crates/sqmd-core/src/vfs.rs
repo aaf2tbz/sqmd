@@ -27,7 +27,10 @@ pub fn list_chunks(
     );
 
     if let Some(f) = file_pattern {
-        sql.push_str(&format!(" AND file_path LIKE '%{}%'", f.replace('\'', "''")));
+        sql.push_str(&format!(
+            " AND file_path LIKE '%{}%'",
+            f.replace('\'', "''")
+        ));
     }
     if let Some(t) = type_filter {
         sql.push_str(&format!(" AND chunk_type = '{}'", t.replace('\'', "''")));
@@ -38,16 +41,36 @@ pub fn list_chunks(
     let mut stmt = db.prepare(&sql)?;
 
     #[allow(clippy::type_complexity)]
-    let rows: Vec<(i64, String, String, String, Option<String>, Option<String>, i64, i64, f64)> = stmt
+    let rows: Vec<(
+        i64,
+        String,
+        String,
+        String,
+        Option<String>,
+        Option<String>,
+        i64,
+        i64,
+        f64,
+    )> = stmt
         .query_map([], |r| {
-            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?, r.get(8)?))
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                r.get(2)?,
+                r.get(3)?,
+                r.get(4)?,
+                r.get(5)?,
+                r.get(6)?,
+                r.get(7)?,
+                r.get(8)?,
+            ))
         })?
         .collect::<Result<Vec<_>, _>>()?;
 
     let entries: Vec<VfsEntry> = rows
         .into_iter()
-        .map(|(id, file_path, language, chunk_type, name, signature, line_start, line_end, importance)| {
-            VfsEntry {
+        .map(
+            |(
                 id,
                 file_path,
                 language,
@@ -57,23 +80,36 @@ pub fn list_chunks(
                 line_start,
                 line_end,
                 importance,
-                children: Vec::new(),
-            }
-        })
+            )| {
+                VfsEntry {
+                    id,
+                    file_path,
+                    language,
+                    chunk_type,
+                    name,
+                    signature,
+                    line_start,
+                    line_end,
+                    importance,
+                    children: Vec::new(),
+                }
+            },
+        )
         .collect();
 
     if max_depth > 0 {
         let entry_ids: Vec<i64> = entries.iter().map(|e| e.id).collect();
         let children = build_contains_tree(db, &entry_ids, max_depth)?;
-        let child_map: std::collections::HashMap<i64, Vec<VfsEntry>> = children
-            .into_iter()
-            .fold(std::collections::HashMap::new(), |mut map, entry| {
-                map.entry(entry.id).or_default();
-                if let Some(parent_id) = find_parent_id(db, entry.id) {
-                    map.entry(parent_id).or_default().push(entry);
-                }
-                map
-            });
+        let child_map: std::collections::HashMap<i64, Vec<VfsEntry>> =
+            children
+                .into_iter()
+                .fold(std::collections::HashMap::new(), |mut map, entry| {
+                    map.entry(entry.id).or_default();
+                    if let Some(parent_id) = find_parent_id(db, entry.id) {
+                        map.entry(parent_id).or_default().push(entry);
+                    }
+                    map
+                });
 
         let mut result = entries;
         attach_children(&mut result, &child_map);
@@ -101,7 +137,11 @@ fn build_contains_tree(
         return Ok(Vec::new());
     }
 
-    let placeholders: Vec<String> = parent_ids.iter().enumerate().map(|(i, _)| format!("?{}", i + 1)).collect();
+    let placeholders: Vec<String> = parent_ids
+        .iter()
+        .enumerate()
+        .map(|(i, _)| format!("?{}", i + 1))
+        .collect();
     let sql = format!(
         "SELECT c.id, c.file_path, c.language, c.chunk_type, c.name, c.signature, c.line_start, c.line_end, c.importance
          FROM relationships r
@@ -112,19 +152,42 @@ fn build_contains_tree(
     );
 
     let mut stmt = db.prepare(&sql)?;
-    let p: Vec<&dyn rusqlite::ToSql> = parent_ids.iter().map(|id| id as &dyn rusqlite::ToSql).collect();
+    let p: Vec<&dyn rusqlite::ToSql> = parent_ids
+        .iter()
+        .map(|id| id as &dyn rusqlite::ToSql)
+        .collect();
 
     #[allow(clippy::type_complexity)]
-    let rows: Vec<(i64, String, String, String, Option<String>, Option<String>, i64, i64, f64)> = stmt
+    let rows: Vec<(
+        i64,
+        String,
+        String,
+        String,
+        Option<String>,
+        Option<String>,
+        i64,
+        i64,
+        f64,
+    )> = stmt
         .query_map(p.as_slice(), |r| {
-            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?, r.get(8)?))
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                r.get(2)?,
+                r.get(3)?,
+                r.get(4)?,
+                r.get(5)?,
+                r.get(6)?,
+                r.get(7)?,
+                r.get(8)?,
+            ))
         })?
         .collect::<Result<Vec<_>, _>>()?;
 
     let entries: Vec<VfsEntry> = rows
         .into_iter()
-        .map(|(id, file_path, language, chunk_type, name, signature, line_start, line_end, importance)| {
-            VfsEntry {
+        .map(
+            |(
                 id,
                 file_path,
                 language,
@@ -134,15 +197,28 @@ fn build_contains_tree(
                 line_start,
                 line_end,
                 importance,
-                children: Vec::new(),
-            }
-        })
+            )| {
+                VfsEntry {
+                    id,
+                    file_path,
+                    language,
+                    chunk_type,
+                    name,
+                    signature,
+                    line_start,
+                    line_end,
+                    importance,
+                    children: Vec::new(),
+                }
+            },
+        )
         .collect();
 
     let child_ids: Vec<i64> = entries.iter().map(|e| e.id).collect();
     let mut grandchildren = build_contains_tree(db, &child_ids, max_depth - 1)?;
 
-    let mut child_map: std::collections::HashMap<i64, Vec<VfsEntry>> = std::collections::HashMap::new();
+    let mut child_map: std::collections::HashMap<i64, Vec<VfsEntry>> =
+        std::collections::HashMap::new();
     for entry in grandchildren.drain(..) {
         if let Some(parent_id) = find_parent_id(db, entry.id) {
             child_map.entry(parent_id).or_default().push(entry);
@@ -154,7 +230,10 @@ fn build_contains_tree(
     Ok(result)
 }
 
-fn attach_children(entries: &mut [VfsEntry], child_map: &std::collections::HashMap<i64, Vec<VfsEntry>>) {
+fn attach_children(
+    entries: &mut [VfsEntry],
+    child_map: &std::collections::HashMap<i64, Vec<VfsEntry>>,
+) {
     for entry in entries.iter_mut() {
         if let Some(children) = child_map.get(&entry.id) {
             entry.children = children.clone();
@@ -218,16 +297,16 @@ pub fn diff_snapshots(
 
     let diffs: Vec<ChunkDiff> = rows
         .into_iter()
-        .map(|(file_path, name, chunk_type, content, updated_at)| {
-            ChunkDiff {
+        .map(
+            |(file_path, name, chunk_type, content, updated_at)| ChunkDiff {
                 file_path,
                 name,
                 chunk_type,
                 change: format!("modified at {}", updated_at),
                 old_content: None,
                 new_content: Some(content),
-            }
-        })
+            },
+        )
         .collect();
 
     Ok(diffs)

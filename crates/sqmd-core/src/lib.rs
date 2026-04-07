@@ -4,9 +4,10 @@ pub mod communities;
 pub mod context;
 pub mod daemon;
 pub mod dampening;
-pub mod entities;
 #[cfg(feature = "embed")]
 pub mod embed;
+pub mod entities;
+pub mod episodes;
 pub mod files;
 pub mod index;
 pub mod languages;

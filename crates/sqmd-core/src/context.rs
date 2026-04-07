@@ -31,7 +31,19 @@ pub struct ChunkSource {
     pub source_type: String,
 }
 
-type SelectedChunk = (i64, String, Option<String>, String, i64, i64, String, String, f64, String, String);
+type SelectedChunk = (
+    i64,
+    String,
+    Option<String>,
+    String,
+    i64,
+    i64,
+    String,
+    String,
+    f64,
+    String,
+    String,
+);
 
 pub struct ContextAssembler;
 
@@ -58,7 +70,8 @@ impl ContextAssembler {
             let results = crate::search::fts_search(db, &search_query)?;
             for r in &results {
                 if seen_ids.insert(r.chunk_id) {
-                    let (content, language, source_type) = get_chunk_content_and_lang(db, r.chunk_id)?;
+                    let (content, language, source_type) =
+                        get_chunk_content_and_lang(db, r.chunk_id)?;
                     selected.push((
                         r.chunk_id,
                         r.file_path.clone(),
@@ -83,15 +96,49 @@ impl ContextAssembler {
                  ORDER BY importance DESC",
             )?;
             #[allow(clippy::type_complexity)]
-            let rows: Vec<(i64, String, Option<String>, String, i64, i64, f64, String, String, String)> = stmt
+            let rows: Vec<(
+                i64,
+                String,
+                Option<String>,
+                String,
+                i64,
+                i64,
+                f64,
+                String,
+                String,
+                String,
+            )> = stmt
                 .query_map(rusqlite::params![file_path], |r| {
-                    Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?, r.get(8)?, r.get(9)?))
+                    Ok((
+                        r.get(0)?,
+                        r.get(1)?,
+                        r.get(2)?,
+                        r.get(3)?,
+                        r.get(4)?,
+                        r.get(5)?,
+                        r.get(6)?,
+                        r.get(7)?,
+                        r.get(8)?,
+                        r.get(9)?,
+                    ))
                 })?
                 .collect::<Result<Vec<_>, _>>()?;
 
             for (id, fp, name, ct, ls, le, imp, content, lang, st) in rows {
                 if seen_ids.insert(id) {
-                    selected.push((id, fp, name, ct, ls, le, format!("{:.2}", imp), content, imp, lang, st));
+                    selected.push((
+                        id,
+                        fp,
+                        name,
+                        ct,
+                        ls,
+                        le,
+                        format!("{:.2}", imp),
+                        content,
+                        imp,
+                        lang,
+                        st,
+                    ));
                 }
             }
         }
@@ -102,7 +149,19 @@ impl ContextAssembler {
                 let deps = get_related_chunks(db, &chunk_ids, request.dep_depth)?;
                 for (id, fp, name, ct, ls, le, content, lang, st) in &deps {
                     if seen_ids.insert(*id) {
-                        selected.push((*id, fp.clone(), name.clone(), ct.clone(), *ls, *le, "0.5".to_string(), content.clone(), 0.5, lang.clone(), st.clone()));
+                        selected.push((
+                            *id,
+                            fp.clone(),
+                            name.clone(),
+                            ct.clone(),
+                            *ls,
+                            *le,
+                            "0.5".to_string(),
+                            content.clone(),
+                            0.5,
+                            lang.clone(),
+                            st.clone(),
+                        ));
                     }
                 }
             }
@@ -120,8 +179,29 @@ impl ContextAssembler {
         let mut token_count = 0;
         let mut sources = Vec::new();
 
-        for (_id, file_path, name, chunk_type, line_start, line_end, _score, content, score, language, source_type) in &selected {
-            let rendered = render_chunk(file_path, name, chunk_type, *line_start, *line_end, content, language);
+        for (
+            _id,
+            file_path,
+            name,
+            chunk_type,
+            line_start,
+            line_end,
+            _score,
+            content,
+            score,
+            language,
+            source_type,
+        ) in &selected
+        {
+            let rendered = render_chunk(
+                file_path,
+                name,
+                chunk_type,
+                *line_start,
+                *line_end,
+                content,
+                language,
+            );
             let chunk_tokens = estimate_tokens(&rendered);
 
             if token_count + chunk_tokens > request.max_tokens && token_count > 0 {
@@ -174,7 +254,10 @@ fn render_chunk(
     )
 }
 
-fn get_chunk_content_and_lang(db: &Connection, chunk_id: i64) -> Result<(String, String, String), Box<dyn std::error::Error>> {
+fn get_chunk_content_and_lang(
+    db: &Connection,
+    chunk_id: i64,
+) -> Result<(String, String, String), Box<dyn std::error::Error>> {
     let result: (String, String, String) = db
         .query_row(
             "SELECT content_raw, COALESCE(language, ''), COALESCE(source_type, '') FROM chunks WHERE id = ?1",
@@ -190,12 +273,27 @@ fn get_related_chunks(
     db: &Connection,
     chunk_ids: &[i64],
     depth: usize,
-) -> Result<Vec<(i64, String, Option<String>, String, i64, i64, String, String, String)>, Box<dyn std::error::Error>> {
+) -> Result<
+    Vec<(
+        i64,
+        String,
+        Option<String>,
+        String,
+        i64,
+        i64,
+        String,
+        String,
+        String,
+    )>,
+    Box<dyn std::error::Error>,
+> {
     if chunk_ids.is_empty() || depth == 0 {
         return Ok(Vec::new());
     }
 
-    let placeholders: Vec<String> = (0..chunk_ids.len()).map(|i| format!("?{}", i + 1)).collect();
+    let placeholders: Vec<String> = (0..chunk_ids.len())
+        .map(|i| format!("?{}", i + 1))
+        .collect();
     let sql = format!(
         "WITH RECURSIVE rel_graph(id, depth) AS (
             SELECT target_id, 1 FROM relationships WHERE source_id IN ({0}) AND rel_type = 'imports'
@@ -215,10 +313,33 @@ fn get_related_chunks(
     );
 
     let mut stmt = db.prepare(&sql)?;
-    let params: Vec<&dyn rusqlite::ToSql> = chunk_ids.iter().map(|id| id as &dyn rusqlite::ToSql).collect();
-    let rows: Vec<(i64, String, Option<String>, String, i64, i64, String, String, String)> = stmt
+    let params: Vec<&dyn rusqlite::ToSql> = chunk_ids
+        .iter()
+        .map(|id| id as &dyn rusqlite::ToSql)
+        .collect();
+    let rows: Vec<(
+        i64,
+        String,
+        Option<String>,
+        String,
+        i64,
+        i64,
+        String,
+        String,
+        String,
+    )> = stmt
         .query_map(params.as_slice(), |r| {
-            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?, r.get(8)?))
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                r.get(2)?,
+                r.get(3)?,
+                r.get(4)?,
+                r.get(5)?,
+                r.get(6)?,
+                r.get(7)?,
+                r.get(8)?,
+            ))
         })?
         .collect::<Result<_, _>>()?;
 
@@ -257,7 +378,11 @@ mod tests {
             [],
         ).unwrap();
         // Import relationship: auth.login imports db.connect
-        db.execute("INSERT INTO relationships (source_id, target_id, rel_type) VALUES (1, 3, 'imports')", []).unwrap();
+        db.execute(
+            "INSERT INTO relationships (source_id, target_id, rel_type) VALUES (1, 3, 'imports')",
+            [],
+        )
+        .unwrap();
         db
     }
 
@@ -293,7 +418,10 @@ mod tests {
         let resp = ContextAssembler::build(&db, &req).unwrap();
         // Should include db.connect since auth.login imports it
         assert!(resp.chunk_count >= 3);
-        let has_connect = resp.sources.iter().any(|s| s.name.as_deref() == Some("connect"));
+        let has_connect = resp
+            .sources
+            .iter()
+            .any(|s| s.name.as_deref() == Some("connect"));
         assert!(has_connect, "should include connect dependency");
     }
 
@@ -333,7 +461,10 @@ mod tests {
         };
         let resp = ContextAssembler::build(&db, &req).unwrap();
         assert!(resp.chunk_count >= 1);
-        let has_login = resp.sources.iter().any(|s| s.name.as_deref() == Some("login"));
+        let has_login = resp
+            .sources
+            .iter()
+            .any(|s| s.name.as_deref() == Some("login"));
         assert!(has_login);
     }
 }
