@@ -158,11 +158,15 @@ agent query: "how does authentication work"
     v dampen()               (same-file penalty: 3rd from same file -> 85%, 4th -> 72%)
     v COMMIT
     |
+    v render_search_markdown() (batch-fetch content, render via Chunk::render_md)
     v filter by source_type, agent_id, tags
     v top-K results -> store in cache
+    |
+    v JSON response { ...fields..., "markdown": "### `fn auth()` ..." }
+       ^-- callers that need raw fields use them; agents grab "markdown" directly
+    |
     v optional: dependency expansion (recursive CTE, depth N)
     v token budget -> trim to limit
-    v Chunk::render_md() -> on-demand Markdown for each chunk
     v assembled context -> agent
 ```
 

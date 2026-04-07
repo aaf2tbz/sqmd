@@ -253,13 +253,24 @@ fn handle_search(
                     let mut e = state.embedder.lock().unwrap_or_else(|e| e.into_inner());
                     *e = Some(embedder);
                 }
-                let serialized = serde_json::to_string(&results).unwrap_or_default();
+                let markdown = crate::search::render_search_markdown(db, &results).ok();
+                let mut arr =
+                    serde_json::to_value(&results).unwrap_or(serde_json::Value::Array(vec![]));
+                if let (Some(md), serde_json::Value::Array(ref mut items)) = (markdown, &mut arr) {
+                    for (i, item) in items.iter_mut().enumerate() {
+                        if let Some(m) = md.get(i) {
+                            item.as_object_mut().map(|obj| {
+                                obj.insert(
+                                    "markdown".to_string(),
+                                    serde_json::Value::String(m.clone()),
+                                )
+                            });
+                        }
+                    }
+                }
                 Response {
                     ok: true,
-                    result: Some(
-                        serde_json::from_str(&serialized)
-                            .unwrap_or(serde_json::Value::Array(vec![])),
-                    ),
+                    result: Some(arr),
                     error: None,
                 }
             }
@@ -287,13 +298,24 @@ fn handle_search(
                         results_clone,
                     );
                 }
-                let serialized = serde_json::to_string(&results).unwrap_or_default();
+                let markdown = crate::search::render_search_markdown(db, &results).ok();
+                let mut arr =
+                    serde_json::to_value(&results).unwrap_or(serde_json::Value::Array(vec![]));
+                if let (Some(md), serde_json::Value::Array(ref mut items)) = (markdown, &mut arr) {
+                    for (i, item) in items.iter_mut().enumerate() {
+                        if let Some(m) = md.get(i) {
+                            item.as_object_mut().map(|obj| {
+                                obj.insert(
+                                    "markdown".to_string(),
+                                    serde_json::Value::String(m.clone()),
+                                )
+                            });
+                        }
+                    }
+                }
                 Response {
                     ok: true,
-                    result: Some(
-                        serde_json::from_str(&serialized)
-                            .unwrap_or(serde_json::Value::Array(vec![])),
-                    ),
+                    result: Some(arr),
                     error: None,
                 }
             }

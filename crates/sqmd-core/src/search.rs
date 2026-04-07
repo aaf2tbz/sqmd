@@ -645,6 +645,77 @@ pub fn embed_unembedded(
     Ok(texts.len())
 }
 
+pub fn render_search_markdown(
+    db: &Connection,
+    results: &[SearchResult],
+) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+    if results.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let ids: Vec<i64> = results.iter().map(|r| r.chunk_id).collect();
+    let placeholders: Vec<String> = (0..ids.len()).map(|i| format!("?{}", i + 1)).collect();
+    let ph = placeholders.join(", ");
+
+    let sql = format!(
+        "SELECT id, content_raw, language, source_type, importance, tags FROM chunks WHERE id IN ({ph})"
+    );
+    let mut stmt = db.prepare(&sql)?;
+    let rows: Vec<(i64, String, String, String, f64, Option<String>)> = stmt
+        .query_map(rusqlite::params_from_iter(ids.iter()), |r| {
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                r.get(2)?,
+                r.get(3)?,
+                r.get(4)?,
+                r.get(5)?,
+            ))
+        })?
+        .collect::<Result<_, _>>()?;
+    drop(stmt);
+
+    let row_map: std::collections::HashMap<i64, _> = rows.into_iter().map(|r| (r.0, r)).collect();
+
+    let rendered: Vec<String> = results
+        .iter()
+        .map(|r| {
+            if let Some((_, content_raw, language, source_type, importance, tags_json)) =
+                row_map.get(&r.chunk_id)
+            {
+                let tags: Option<Vec<String>> = tags_json
+                    .as_ref()
+                    .and_then(|t| serde_json::from_str(t).ok());
+                let chunk = crate::chunk::Chunk {
+                    file_path: r.file_path.clone(),
+                    language: language.clone(),
+                    chunk_type: crate::chunk::ChunkType::from_str_name(&r.chunk_type)
+                        .unwrap_or(crate::chunk::ChunkType::Fact),
+                    name: r.name.clone(),
+                    signature: r.signature.clone(),
+                    line_start: r.line_start as usize,
+                    line_end: r.line_end as usize,
+                    content_raw: content_raw.clone(),
+                    content_hash: String::new(),
+                    importance: *importance,
+                    source_type: crate::chunk::SourceType::from_str_name(source_type)
+                        .unwrap_or(crate::chunk::SourceType::Code),
+                    metadata: serde_json::Map::new(),
+                    agent_id: None,
+                    tags,
+                    decay_rate: r.decay_rate,
+                    created_by: None,
+                };
+                chunk.render_md()
+            } else {
+                String::new()
+            }
+        })
+        .collect();
+
+    Ok(rendered)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
