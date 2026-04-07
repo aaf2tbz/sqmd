@@ -2,11 +2,11 @@
 
 ## Overview
 
-A single Rust binary (~5MB) that turns any codebase into a queryable SQLite database of semantically chunked code, with tree-sitter parsing, local embeddings, FTS5 + vector hybrid search, and an import/call relationship graph. Zero network. Zero external services. Works offline.
+A single Rust binary (~10MB) that turns any codebase into a queryable SQLite database of semantically chunked code, with tree-sitter parsing, local embeddings, FTS5 + vector hybrid search, and an import/call relationship graph. Zero network. Zero external services. Works offline.
 
 ### Design principle: raw code, derived Markdown
 
-sqmd stores raw source code (`content_raw`) in the database, **not** pre-rendered Markdown. Markdown is derived on demand via `Chunk::render_md()` at query time. This avoids stale renderings, keeps the source of truth in the code itself, and lets consumers choose their own rendering format.
+sqmd stores raw source code (`content_raw`) in the database, **not** pre-rendered Markdown. Markdown is derived on demand via `Chunk::render_md()` at query time and returned as a `"markdown"` field in every query response. Agents grab it directly into their prompts; tooling uses the structured fields alongside it.
 
 ---
 
@@ -16,8 +16,8 @@ Validated the two riskiest dependencies before committing to the stack.
 
 ### Results
 
-- **sqlite-vec**: Cannot be loaded as a `.dylib` extension from source (linking issues), but compiles statically via the `sqlite-vec` Rust crate (`cc::Build`). Registered as a process-level singleton via `sqlite3_auto_extension`. The `chunks_vec` virtual table is created non-fatally in schema init.
-- **ort v2.0.0-rc.12**: Works. Model load ~220ms (cached), inference ~17ms/chunk. nomic-embed-text-v1.5 q8 ONNX model (768 dims, 522MB) cached at `~/.sqmd/models/`. Test skips gracefully when model absent (CI-safe).
+- **sqlite-vec**: Compiled statically via the `sqlite-vec` Rust crate. Registered as a process-level singleton via `sqlite3_auto_extension`.
+- **ort v2.0.0-rc.12**: Works. Model load ~220ms (cached), inference ~17ms/chunk. nomic-embed-text-v1.5 q8 ONNX model (768 dims) cached at `~/.sqmd/models/`.
 
 ---
 
@@ -41,28 +41,13 @@ Validated the two riskiest dependencies before committing to the stack.
 
 ### What shipped
 
-- Language chunkers for TypeScript, Rust, Python via tree-sitter
+- Language chunkers for TypeScript, TSX, Rust, Python, Go, Java via tree-sitter
 - `LanguageChunker` trait with graceful fallback to `FileChunker` on parse failure
 - Chunk types: Function, Method, Class, Struct, Enum, Interface, Type, Impl, Module, Section
-- `content_raw` stored in DB (not `content_md`); Markdown derived via `Chunk::render_md()`
-- Import relationship extraction for all three languages
-- `contains` relationship extraction (class→method, impl→method, module→function)
-- Importance scoring: `ChunkType::importance()` (functions=0.9, classes=0.85, sections=0.2, etc.)
-- Context lines: 2-3 lines before each chunk (decorators, comments) via O(k) `rsplit`
+- Single-pass parsing: AST reused for both chunking and import extraction
+- Import/contains relationship extraction
+- Importance scoring: `ChunkType::importance()` (functions=0.9, classes=0.85, sections=0.2)
 - Schema migration system (versioned, reads `schema_version` table)
-
-### Key learnings
-
-- tree-sitter node kind names differ from docs (e.g., Rust: `function_item` not `fn_item`)
-- `tree_sitter::Language` does not implement `Copy`; must use `.clone()`
-- TypeScript import specifiers are nested 3 levels deep; must walk recursively
-- Python `decorated_definition` wraps decorated methods; `expression_statement` wraps top-level assignments
-- FTS5 tokenization: `unicode61` only (no Porter stemmer) — code identifiers don't stem well
-
-### E2E validation
-
-- Indexing sqmd itself: 220 chunks, 13 relationships in ~38ms
-- 28 tests pass, 0 clippy warnings
 
 ---
 
@@ -72,21 +57,11 @@ Validated the two riskiest dependencies before committing to the stack.
 
 ### What shipped
 
-- Rayon parallelism: 4-phase pipeline (walk → read → chunk → write)
-  - Phase 1: serial walk + mtime pre-filter against DB
-  - Phase 2: parallel file reading + hashing (`into_par_iter`)
-  - Phase 3: parallel chunking (CPU-bound tree-sitter)
-  - Phase 4: serial DB writes (single connection)
-- mtime pre-filter: skip files where mtime unchanged (fast path); content hash verified before writing
-- `index_file()`: single-file re-index for watcher integration; handles file deletion gracefully
-- File watcher via `notify` crate: recursive watch, 200ms debounce, language-aware filtering, initial full index
-- Fixed parent tracking bug: `contains` relationship now compares line ranges (was comparing chunk IDs)
-- Dependencies added: `rayon`, `notify`, `tempfile`
-
-### E2E validation
-
-- 33 tests pass (5 new), 0 clippy warnings
-- Parallel consistency: 20 files indexed correctly in parallel, re-index skips all
+- Rayon parallelism: 4-phase pipeline (walk -> read -> chunk -> write)
+- mtime pre-filter: skip files where mtime unchanged; content hash verified before writing
+- `index_file()`: single-file re-index for watcher integration
+- File watcher via `notify` crate: recursive watch, 200ms debounce
+- Batch tombstone cleanup via `IN (...)` queries
 
 ---
 
@@ -96,19 +71,13 @@ Validated the two riskiest dependencies before committing to the stack.
 
 ### What shipped
 
-- `Embedder` struct: lazy-loads nomic-embed-text-v1.5 ONNX model (768 dims, unit-normalized), batch embed
-- Hybrid search engine (`search.rs`):
-  - `fts_search()`: FTS5 with file/type filters, rank normalization to 0..1
+- `Embedder` struct: lazy-loads nomic-embed-text-v1.5 ONNX model (768 dims)
+- Hybrid search engine:
+  - `fts_search()`: FTS5 with Porter stemming, file/type filters, rank normalization
   - `vec_search()`: KNN via `chunks_vec` (sqlite-vec), cosine distance
-  - `hybrid_search()`: alpha-blended merge (`alpha*vec + (1-alpha)*fts`), single-source penalty (0.8)
-  - `embed_unembedded()`: batch embeds unindexed chunks (64/batch, prioritized by importance)
-  - `store_embedding()`: writes to both `embeddings` table and `chunks_vec`
-- CLI: `sqmd search` (hybrid by default), `sqmd embed`, `sqmd index --embed`, `sqmd stats` (embedding count)
-
-### E2E validation
-
-- 43 tests pass (10 new), 0 clippy warnings
-- CI-safe: all embedding tests skip gracefully without model
+  - `hybrid_search()`: alpha-blended merge, single-source penalty (0.8)
+- Adaptive padding to nearest multiple-of-64 (not power-of-two)
+- Real batched ONNX inference (single forward pass)
 
 ---
 
@@ -118,18 +87,10 @@ Validated the two riskiest dependencies before committing to the stack.
 
 ### What shipped
 
-- `extract_calls()`: regex-based call graph extraction from function bodies
+- `extract_calls()`: regex-based call graph extraction
 - Cross-file resolution via import relationships
-- `get_dependency_ids()` / `get_dependent_ids()`: recursive CTE depth traversal
-- `write_chunks_contains_calls()`: indexer now wires call graph into DB on every index
-- `sqmd deps --depth N`: CLI command for dependency graph queries
-- Inherently approximate for dynamic languages — treated as hints, not proofs
-
-### E2E validation
-
-- Call extraction filters keywords (`if`, `for`, `return`, etc.)
-- Depth traversal correctly limits recursive CTE
-- Import resolution handles relative paths, `crate::`, `super::`, `self::`
+- Recursive CTE depth traversal
+- `sqmd deps --depth N` CLI command
 
 ---
 
@@ -139,18 +100,10 @@ Validated the two riskiest dependencies before committing to the stack.
 
 ### What shipped
 
-- `ContextAssembler`: builds Markdown context from search results, working files, and dependency graph
-- Token budgeting via `estimate_tokens()` (~3.4 chars/token for code)
-- `sqmd context --query --files --max-tokens --deps --dep-depth`: CLI command
-- `sqmd serve`: Unix socket daemon (`~/.sqmd/daemon.sock`) with JSON request/response protocol
-- Background file watcher + incremental re-index in daemon mode
-- Methods: `search`, `embed`, `context`, `stats`, `index_file`
-
-### E2E validation
-
-- Context assembly respects token budget
-- Search + deps + file context all compose correctly
-- Daemon listens on Unix socket and responds to JSON queries
+- `ContextAssembler`: token-budgeted context assembly
+- `sqmd context --query --files --max-tokens --deps --dep-depth`
+- Unix socket daemon (`~/.sqmd/daemon.sock`) with JSON protocol
+- Methods: `search`, `cat`, `get`, `ls`, `context`, `stats`, `ingest`, `ingest_batch`, `forget`, `modify`, `embed`, `embed_text`, `embed_batch`
 
 ---
 
@@ -160,37 +113,50 @@ Validated the two riskiest dependencies before committing to the stack.
 
 ### What shipped
 
-- **Schema v4 migration**: extends chunks table with 6 new columns (source_type, agent_id, tags, decay_rate, last_accessed, created_by)
-- **6 new chunk types**: fact, summary, entity_description, document_section, preference, decision
-- **5 new source types**: code, memory, transcript, document, entity
-- **SourceType enum** with `as_str()` / `from_str_name()` and `#[default]`
-- **6 new relationship types**: contradicts, supersedes, elaborates, derived_from, mentioned_in, relates_to
-- **KnowledgeIngestor**: `ingest()`, `ingest_batch()`, `forget()`, `modify()` with content-hash dedup
-- **CLI commands**: `sqmd ingest`, `sqmd forget`, `sqmd modify`
-- **Daemon methods**: `ingest`, `ingest_batch`, `forget`, `modify`, `embed_text`, `embed_batch`
-- **Search filters**: `--source-type`, `--agent-id` for scoped queries
-- **Integration test**: knowledge ingest + unified search E2E
-
-### E2E validation
-
-- 62 tests (default), 70 tests (embed), 0 clippy warnings
-- Knowledge chunks coexist with code chunks in unified search
-- Content-hash dedup prevents duplicate ingest
+- Schema v4: source_type, agent_id, tags, decay_rate, last_accessed, created_by
+- 6 new chunk types: fact, summary, decision, preference, entity_description, document_section
+- `KnowledgeIngestor`: `ingest()`, `ingest_batch()`, `forget()`, `modify()` with content-hash dedup
+- CLI commands: `sqmd ingest`, `sqmd forget`, `sqmd modify`
 
 ---
 
-## Dependency Risk Matrix
+## Phase 8: Production Hardening — COMPLETE
 
-| Dependency | Risk | Status |
-|-----------|------|--------|
-| `tree-sitter` + language grammars | Low | Validated (Phase 2) |
-| `rusqlite` (bundled) | Low | Shipped (Phase 1) |
-| `sqlite-vec` (static compile) | Medium | Validated (Phase 0) — compiled in, non-fatal |
-| `ort` v2 RC (ONNX Runtime) | Medium | Validated (Phase 0) — test skips without model |
-| `notify` (file watcher) | Low | Shipped (Phase 3) |
-| `tiktoken-rs` | Low | Pending (Phase 6) |
-| `clap` (derive) | Low | Shipped (Phase 1) |
-| `rayon` | Low | Shipped (Phase 3) |
+**Goal:** Fix correctness issues and improve production readiness.
+
+### What shipped
+
+- Asymmetric retrieval (`search_query:` / `search_document:` prefixes)
+- Real batch ONNX embedding (was a loop calling `embed_one`)
+- vec_search filter parity (source_type, agent_id)
+- Temporal decay scoring
+- Multi-threaded daemon (one connection per client thread)
+
+---
+
+## Phase 9: Performance Overhaul — COMPLETE
+
+**Goal:** Speed, memory, and search quality improvements for v1.2.0.
+
+### What shipped
+
+- **Wired dampening + importance boost** into both FTS and hybrid search
+- **mmap + WAL tuning** (256MB mmap, autocheckpoint=1000, 8K page cache)
+- **Read-consistent snapshots** (FTS search in BEGIN/COMMIT)
+- **Single-pass tree-sitter** (AST reused for import extraction)
+- **Fixed N+1 hint merge** (batch `IN (...)` query)
+- **Adaptive embedding padding** (multiple-of-64, single-pass tokenization)
+- **Shared daemon Embedder** (`Arc<Mutex<Option<Embedder>>>`)
+- **FTS5 Porter stemming** (schema v5 migration)
+- **Batch tombstone writes** (hints, entity_attributes, relationships via `IN (...)`)
+- **Read-only fast-path** (`open_fast()` for daemon read handlers)
+- **LRU query cache** (256 entries, 10s TTL)
+- **Pre-rendered markdown** in search, cat, and get responses
+
+### E2E validation
+
+- 70 tests (default), 78 tests (embed), 0 clippy warnings
+- CI green on all jobs (build + test + clippy, default + embed)
 
 ---
 
@@ -207,26 +173,23 @@ Validated the two riskiest dependencies before committing to the stack.
 | 6 — Agent API + Context Assembly | **COMPLETE** |
 | 7 — Knowledge Store | **COMPLETE** |
 | 8 — Production Hardening | **COMPLETE** |
+| 9 — Performance Overhaul | **COMPLETE** |
 
-**v1.0.0 — all phases complete.**
+**v1.0.0** — all phases through 8 complete.
+**v1.1.0** — production hardening for signet-sqmd integration.
+**v1.2.0** — performance overhaul, markdown output, CI reliability.
 
 ---
 
-## Phase 8: Production Hardening — COMPLETE
+## Dependency Risk Matrix
 
-**Goal:** Fix correctness issues and improve production readiness for the signet-sqmd integration.
-
-### What shipped
-
-- **Nomic query/document prefixes**: `embed_query()`, `embed_document()`, `embed_batch_documents()`, `embed_batch_queries()` use `search_query:` / `search_document:` prefixes for asymmetric retrieval
-- **Real batch ONNX embedding**: `embed_batch` stacks inputs into `[N, seq_len]` tensors for single forward pass (was a loop calling `embed_one`)
-- **vec_search filter parity**: `source_type_filter` and `agent_id_filter` now applied to vector search (were FTS-only, causing filter leakage)
-- **Unified SHA-256 hashing**: `Chunk::knowledge()` uses SHA-256 (was `DefaultHasher`/16-hex), matching the code indexing path (was SHA-256/64-hex)
-- **Temporal decay scoring**: Search scores multiplied by exponential decay factor (`e^(-rate * days)`, clamped to [0.1, 1.0]) based on `decay_rate` × days since `last_accessed`
-- **Multi-threaded daemon**: Each connection handled in its own thread with its own SQLite connection (was single-threaded, blocking concurrent access)
-- **chrono dependency** added for RFC3339 timestamp parsing in decay scoring
-
-### E2E validation
-
-- 61 tests (default), 70 tests (embed), 0 clippy warnings
-- Backward compatible: no schema migration needed
+| Dependency | Risk | Status |
+|-----------|------|--------|
+| `tree-sitter` + language grammars | Low | Shipped (Phase 2) |
+| `rusqlite` (bundled) | Low | Shipped (Phase 1) |
+| `sqlite-vec` (static compile) | Medium | Shipped — compiled in, non-fatal |
+| `ort` v2 RC (ONNX Runtime) | Medium | Shipped — feature-gated |
+| `notify` (file watcher) | Low | Shipped (Phase 3) |
+| `rayon` | Low | Shipped (Phase 3) |
+| `chrono` | Low | Shipped (Phase 8) |
+| `clap` (derive) | Low | Shipped (Phase 1) |

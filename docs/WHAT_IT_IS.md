@@ -6,13 +6,13 @@ Every AI agent that reads code does it poorly. Here's why:
 
 1. **File-level granularity.** Agents read entire files when they need one function. A 500-line file with 15 functions wastes 93% of the tokens on irrelevant code.
 
-2. **Keyword-only search.** Grep and ripgrep are fast but blind. Searching for "auth" won't find `authenticate_credentials` unless you think to search for it. It can't find code that *conceptually* relates to authentication without sharing a keyword.
+2. **Keyword-only search.** Grep and ripgrep are fast but blind. Searching for "auth" won't find `authenticate_credentials` unless you think to search for it.
 
-3. **No structural awareness.** When an agent finds the auth middleware, it has no idea what the middleware imports, what calls it, or what it depends on. It has to make separate tool calls to trace each dependency manually.
+3. **No structural awareness.** When an agent finds the auth middleware, it has no idea what imports it, what calls it, or what it depends on.
 
-4. **Expensive extraction pipelines.** Many code intelligence tools rely on cloud APIs or LLM calls for code understanding — slow, expensive, and offline-incapable.
+4. **Expensive extraction pipelines.** Many tools rely on cloud APIs or LLM calls for code understanding — slow, expensive, offline-incapable.
 
-5. **Context assembly is ad hoc.** Agents manually stitch together file reads, grep results, and glob matches into something coherent. There's no system that assembles a token-budgeted, structured context from a codebase.
+5. **Context assembly is ad hoc.** Agents manually stitch together file reads, grep results, and glob matches.
 
 ## The Solution
 
@@ -20,16 +20,17 @@ sqmd is a local-first code index that makes codebases fully queryable by agents 
 
 ### How It Works
 
-**Ingestion** — tree-sitter parses every source file into semantic chunks. Not lines, not files — actual language constructs: functions, classes, methods, interfaces, types, modules. Each chunk is rendered as Markdown with its signature, file path, line range, and metadata.
+**Ingestion** — tree-sitter parses every source file into semantic chunks: functions, classes, methods, interfaces, types, modules. Each chunk stores raw source code (`content_raw`), not pre-rendered Markdown. Also accepts external knowledge (facts, decisions, preferences) via the ingest API.
 
 **Storage** — Every chunk goes into a single SQLite file alongside:
-- An FTS5 full-text index for keyword search
+- An FTS5 full-text index with Porter stemming for keyword search
 - Vector embeddings (via local ONNX model) for semantic search
-- An import/call relationship graph for dependency traversal
+- An import/call/contains relationship graph for dependency traversal
+- An entity knowledge graph with hints for bridging the semantic gap
 
-**Query** — A hybrid search engine combines vector similarity (70%) and keyword relevance (30%), then optionally traverses the dependency graph to include related chunks. Results are assembled into a token-budgeted Markdown document ready for direct context injection.
+**Query** — A hybrid search engine combines vector similarity (70%) and keyword relevance (30%), boosted by entity graph density and importance scoring. Results are returned as JSON with both structured fields and a pre-rendered `"markdown"` field — agents grab `markdown` directly into their prompts, no extra formatting step.
 
-**Incremental updates** — A file watcher detects changes and re-indexes only what changed, in under 200ms.
+**Incremental updates** — A file watcher detects changes and re-indexes only what changed, in under 200ms. Content-hash decision pipeline: SKIP (unchanged), UPDATE (modified), TOMBSTONE (deleted).
 
 ### Performance Characteristics
 
@@ -54,18 +55,20 @@ sqmd is a local-first code index that makes codebases fully queryable by agents 
 | Local only | Yes | No | Yes | Yes |
 | Sub-20ms queries | Yes | No (~100ms) | No | Yes |
 | Token-budgeted output | No | No | No | Yes |
+| Markdown output | No | No | No | Yes (pre-rendered) |
+| Knowledge ingest | No | No | No | Yes (facts, decisions, preferences) |
 
 ### Design Philosophy
 
 1. **Local first.** No network, no API keys, no cloud services. A single SQLite file per project.
 
-2. **Deterministic over probabilistic.** Use tree-sitter parsing instead of LLM extraction. Use cosine similarity instead of LLM-based deduplication. LLMs are a last resort, not a first step.
+2. **Deterministic over probabilistic.** Use tree-sitter parsing instead of LLM extraction. Use cosine similarity instead of LLM-based deduplication.
 
-3. **Query-time extraction.** Don't pre-classify everything into rigid categories at index time. Store raw, well-structured chunks and let the query decide what's relevant.
+3. **Raw code, derived Markdown.** `content_raw` stores original source. Markdown derived on demand via `Chunk::render_md()`. Every query response includes both structured fields and a `markdown` field.
 
-4. **Markdown everywhere.** Every chunk is Markdown. Every search result is Markdown. Every assembled context is Markdown. Agents already speak Markdown fluently — meet them where they are.
+4. **Single binary.** Rust + static linking. No runtime dependencies. Drop it on any machine and it works.
 
-5. **Single binary.** Rust + static linking. No runtime dependencies. Drop it on any machine and it works.
+5. **Agent-native output.** JSON responses with a pre-rendered `markdown` field that agents can inject directly into their prompt context. No parsing, no formatting step.
 
 ## Intended Use Cases
 

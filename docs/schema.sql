@@ -1,8 +1,10 @@
 -- sqmd SQLite Schema
-
--- sqmd SQLite Schema
--- Version: 1.0.0 (schema v4)
+-- Version: 1.2.0 (schema v5)
 -- Source: https://github.com/aaf2tbz/sqmd
+--
+-- NOTE: This is a reference only. The actual schema lives in
+-- crates/sqmd-core/src/schema.rs and is managed by the migration system.
+-- Schema v5 adds Porter stemming to chunks_fts and hints_fts.
 
 -- ============================================================
 -- Source file metadata
@@ -179,7 +181,7 @@ CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
     file_path,
     content='chunks',
     content_rowid='id',
-    tokenize='unicode61'
+    tokenize='porter unicode61'
 );
 
 CREATE TRIGGER IF NOT EXISTS chunks_fts_insert AFTER INSERT ON chunks BEGIN
@@ -207,7 +209,7 @@ CREATE VIRTUAL TABLE IF NOT EXISTS hints_fts USING fts5(
     hint_text,
     content='hints',
     content_rowid='id',
-    tokenize='unicode61'
+    tokenize='porter unicode61'
 );
 
 CREATE TRIGGER IF NOT EXISTS hints_fts_insert AFTER INSERT ON hints BEGIN
@@ -227,4 +229,4 @@ CREATE TABLE IF NOT EXISTS schema_version (
     applied_at TEXT NOT NULL DEFAULT ''
 );
 
-INSERT OR IGNORE INTO schema_version (version) VALUES (1);
+INSERT OR IGNORE INTO schema_version (version) VALUES (5);
