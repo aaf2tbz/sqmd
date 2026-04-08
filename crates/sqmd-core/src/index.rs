@@ -403,6 +403,7 @@ impl<'a> Indexer<'a> {
             .query_row("SELECT COUNT(*) FROM chunks", [], |r| r.get(0))?;
 
         crate::relationships::materialize_entity_deps_to_relationships(self.db)?;
+        entities::generate_relational_hints(self.db)?;
 
         self.db.execute_batch("COMMIT")?;
         Ok(stats)
