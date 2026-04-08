@@ -836,7 +836,15 @@ fn cmd_entities(
         }
         println!("Entities ({}):\n", ents.len());
         for e in &ents {
-            println!("  {} [{}] mentions: {}", e.name, e.entity_type, e.mentions);
+            let loc = match (e.file_path.as_deref(), e.line_start) {
+                (Some(fp), Some(ls)) => format!(" ({fp}:{})", ls + 1),
+                (Some(fp), _) => format!(" ({fp})"),
+                _ => String::new(),
+            };
+            println!(
+                "  {} [{}] mentions: {}{}",
+                e.name, e.entity_type, e.mentions, loc
+            );
         }
     }
 

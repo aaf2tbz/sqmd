@@ -2,7 +2,7 @@ use rusqlite::{Connection, Result as SqlResult};
 use sqlite_vec::sqlite3_vec_init;
 use std::path::Path;
 
-const CURRENT_VERSION: i64 = 8;
+const CURRENT_VERSION: i64 = 9;
 
 pub fn init(db: &mut Connection) -> SqlResult<()> {
     #[allow(clippy::missing_transmute_annotations)]
@@ -59,6 +59,9 @@ pub fn init(db: &mut Connection) -> SqlResult<()> {
             }
             if sql_version < 8 {
                 migrate_v8(db)?;
+            }
+            if sql_version < 9 {
+                migrate_v9(db)?;
             }
         }
         return Ok(());
@@ -664,6 +667,31 @@ fn migrate_v8(db: &mut Connection) -> SqlResult<()> {
     db.execute_batch("CREATE INDEX IF NOT EXISTS idx_episodes_type ON episodes(change_type);")?;
     db.execute_batch("CREATE INDEX IF NOT EXISTS idx_episodes_time ON episodes(created_at);")?;
     db.execute_batch("INSERT OR IGNORE INTO schema_version (version) VALUES (8);")?;
+    Ok(())
+}
+
+fn migrate_v9(db: &mut Connection) -> SqlResult<()> {
+    let has_file_path: bool = db
+        .prepare("SELECT COUNT(*) FROM pragma_table_info('entities') WHERE name='file_path'")?
+        .query_row([], |r| r.get::<_, i64>(0))
+        .map(|c| c > 0)
+        .unwrap_or(false);
+
+    if !has_file_path {
+        db.execute_batch("ALTER TABLE entities ADD COLUMN file_path TEXT;")?;
+        db.execute_batch("ALTER TABLE entities ADD COLUMN language TEXT;")?;
+        db.execute_batch("ALTER TABLE entities ADD COLUMN line_start INTEGER;")?;
+        db.execute_batch("ALTER TABLE entities ADD COLUMN line_end INTEGER;")?;
+        db.execute_batch("ALTER TABLE entities ADD COLUMN signature TEXT;")?;
+        db.execute_batch(
+            "ALTER TABLE entities ADD COLUMN chunk_id INTEGER REFERENCES chunks(id);",
+        )?;
+        db.execute_batch("CREATE INDEX IF NOT EXISTS idx_entities_file ON entities(file_path);")?;
+        db.execute_batch("CREATE INDEX IF NOT EXISTS idx_entities_chunk ON entities(chunk_id);")?;
+        db.execute_batch("CREATE INDEX IF NOT EXISTS idx_entities_type_file ON entities(entity_type, file_path);")?;
+    }
+
+    db.execute_batch("INSERT OR IGNORE INTO schema_version (version) VALUES (9);")?;
     Ok(())
 }
 

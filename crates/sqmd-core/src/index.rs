@@ -720,37 +720,54 @@ impl<'a> Indexer<'a> {
         let export_aspect_id = entities::ensure_aspect(self.db, file_entity_id, "exports")?;
 
         for chunk in chunks {
-            if matches!(
-                chunk.chunk_type,
-                chunk::ChunkType::Function
-                    | chunk::ChunkType::Method
-                    | chunk::ChunkType::Class
-                    | chunk::ChunkType::Struct
-                    | chunk::ChunkType::Interface
-                    | chunk::ChunkType::Trait
-                    | chunk::ChunkType::Enum
-                    | chunk::ChunkType::Impl
-                    | chunk::ChunkType::Constant
-            ) {
-                let name = chunk.name.as_deref().unwrap_or("");
-                if !name.is_empty() {
-                    let chunk_id: Option<i64> = self.db.query_row(
-                        "SELECT id FROM chunks WHERE file_path = ?1 AND content_hash = ?2 AND is_deleted = 0 LIMIT 1",
-                        params![relative, chunk.content_hash],
-                        |r| r.get(0),
-                    ).ok();
+            let name = chunk.name.as_deref().unwrap_or("");
+            if name.is_empty() {
+                continue;
+            }
 
-                    if let Some(cid) = chunk_id {
-                        entities::add_attribute(
-                            self.db,
-                            file_entity_id,
-                            Some(export_aspect_id),
-                            cid,
-                            "attribute",
-                            &format!("{}: {}", chunk.chunk_type.as_str(), name),
-                        )?;
-                    }
-                }
+            let entity_type = match chunk.chunk_type {
+                chunk::ChunkType::Function => "function",
+                chunk::ChunkType::Method => "method",
+                chunk::ChunkType::Class => "class",
+                chunk::ChunkType::Struct => "struct",
+                chunk::ChunkType::Interface => "interface",
+                chunk::ChunkType::Trait => "trait",
+                chunk::ChunkType::Enum => "enum",
+                chunk::ChunkType::Impl => "impl",
+                chunk::ChunkType::Constant => "constant",
+                chunk::ChunkType::Macro => "macro",
+                chunk::ChunkType::Type => "type",
+                chunk::ChunkType::Module => "module",
+                _ => continue,
+            };
+
+            let chunk_id: Option<i64> = self.db.query_row(
+                "SELECT id FROM chunks WHERE file_path = ?1 AND content_hash = ?2 AND is_deleted = 0 LIMIT 1",
+                params![relative, chunk.content_hash],
+                |r| r.get(0),
+            ).ok();
+
+            if let Some(cid) = chunk_id {
+                let symbol_input = entities::SymbolEntityInput {
+                    name,
+                    entity_type,
+                    file_path: relative,
+                    language: &chunk.language,
+                    line_start: chunk.line_start as i64,
+                    line_end: chunk.line_end as i64,
+                    signature: chunk.signature.as_deref(),
+                    chunk_id: Some(cid),
+                };
+                entities::ensure_symbol_entity(self.db, &symbol_input)?;
+
+                entities::add_attribute(
+                    self.db,
+                    file_entity_id,
+                    Some(export_aspect_id),
+                    cid,
+                    "attribute",
+                    &format!("{}: {}", entity_type, name),
+                )?;
             }
         }
 
@@ -879,6 +896,10 @@ impl<'a> Indexer<'a> {
             )?;
             self.db.execute(
                 &format!("DELETE FROM entity_attributes WHERE chunk_id IN ({ph})"),
+                rusqlite::params_from_iter(chunk_ids.iter()),
+            )?;
+            self.db.execute(
+                &format!("UPDATE entities SET chunk_id = NULL WHERE chunk_id IN ({ph})"),
                 rusqlite::params_from_iter(chunk_ids.iter()),
             )?;
             let ph2: Vec<String> = (0..chunk_ids.len())
