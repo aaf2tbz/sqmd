@@ -11,6 +11,18 @@ pub struct Entity {
     pub canonical_name: String,
     pub entity_type: String,
     pub mentions: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub language: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub line_start: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub line_end: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub signature: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chunk_id: Option<i64>,
 }
 
 #[derive(Debug, Clone)]
@@ -51,6 +63,45 @@ pub fn ensure_entity(
         db.execute(
             "INSERT INTO entities (name, canonical_name, entity_type, created_at, updated_at) VALUES (?1, ?2, ?3, datetime('now'), datetime('now'))",
             params![name, canon, entity_type],
+        )?;
+        Ok(db.last_insert_rowid())
+    }
+}
+
+pub struct SymbolEntityInput<'a> {
+    pub name: &'a str,
+    pub entity_type: &'a str,
+    pub file_path: &'a str,
+    pub language: &'a str,
+    pub line_start: i64,
+    pub line_end: i64,
+    pub signature: Option<&'a str>,
+    pub chunk_id: Option<i64>,
+}
+
+pub fn ensure_symbol_entity(
+    db: &rusqlite::Connection,
+    input: &SymbolEntityInput,
+) -> Result<i64, Box<dyn std::error::Error>> {
+    let canon = canonicalize(input.name);
+    let existing: Option<i64> = db
+        .query_row(
+            "SELECT id FROM entities WHERE canonical_name = ?1",
+            params![canon],
+            |r| r.get(0),
+        )
+        .ok();
+
+    if let Some(id) = existing {
+        db.execute(
+            "UPDATE entities SET mentions = mentions + 1, entity_type = ?1, file_path = COALESCE(?2, file_path), language = COALESCE(?3, language), line_start = COALESCE(?4, line_start), line_end = COALESCE(?5, line_end), signature = COALESCE(?6, signature), chunk_id = COALESCE(?7, chunk_id), updated_at = datetime('now') WHERE id = ?8",
+            params![input.entity_type, input.file_path, input.language, input.line_start, input.line_end, input.signature, input.chunk_id, id],
+        )?;
+        Ok(id)
+    } else {
+        db.execute(
+            "INSERT INTO entities (name, canonical_name, entity_type, file_path, language, line_start, line_end, signature, chunk_id, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, datetime('now'), datetime('now'))",
+            params![input.name, canon, input.entity_type, input.file_path, input.language, input.line_start, input.line_end, input.signature, input.chunk_id],
         )?;
         Ok(db.last_insert_rowid())
     }
@@ -192,7 +243,7 @@ pub fn get_entity(
 ) -> Result<Option<Entity>, Box<dyn std::error::Error>> {
     let canon = canonicalize(name);
     let result = db.query_row(
-        "SELECT id, name, canonical_name, entity_type, mentions FROM entities WHERE canonical_name = ?1",
+        "SELECT id, name, canonical_name, entity_type, mentions, file_path, language, line_start, line_end, signature, chunk_id FROM entities WHERE canonical_name = ?1",
         params![canon],
         |r| Ok(Entity {
             id: r.get(0)?,
@@ -200,6 +251,12 @@ pub fn get_entity(
             canonical_name: r.get(2)?,
             entity_type: r.get(3)?,
             mentions: r.get(4)?,
+            file_path: r.get(5)?,
+            language: r.get(6)?,
+            line_start: r.get(7)?,
+            line_end: r.get(8)?,
+            signature: r.get(9)?,
+            chunk_id: r.get(10)?,
         }),
     ).ok();
     Ok(result)
@@ -339,7 +396,7 @@ pub fn graph_boost_scored(
         .map(|(i, _)| format!("?{}", i + 1))
         .collect();
     let sql = format!(
-        "SELECT DISTINCT chunk_id, entity_id FROM entity_attributes WHERE entity_id IN ({}) AND chunk_id IS NOT NULL",
+        "SELECT DISTINCT chunk_id, id FROM entities WHERE id IN ({}) AND chunk_id IS NOT NULL",
         placeholders.join(", "),
     );
     let mut stmt = db.prepare(&sql)?;
@@ -484,8 +541,8 @@ pub fn list_entities(
     limit: usize,
 ) -> Result<Vec<Entity>, Box<dyn std::error::Error>> {
     let sql = match entity_type_filter {
-        Some(_) => format!("SELECT id, name, canonical_name, entity_type, mentions FROM entities WHERE entity_type = ?1 ORDER BY mentions DESC LIMIT {}", limit),
-        None => format!("SELECT id, name, canonical_name, entity_type, mentions FROM entities ORDER BY mentions DESC LIMIT {}", limit),
+        Some(_) => format!("SELECT id, name, canonical_name, entity_type, mentions, file_path, language, line_start, line_end, signature, chunk_id FROM entities WHERE entity_type = ?1 ORDER BY mentions DESC LIMIT {}", limit),
+        None => format!("SELECT id, name, canonical_name, entity_type, mentions, file_path, language, line_start, line_end, signature, chunk_id FROM entities ORDER BY mentions DESC LIMIT {}", limit),
     };
     let mut stmt = db.prepare(&sql)?;
     let rows: Vec<Entity> = if let Some(et) = entity_type_filter {
@@ -496,6 +553,12 @@ pub fn list_entities(
                 canonical_name: r.get(2)?,
                 entity_type: r.get(3)?,
                 mentions: r.get(4)?,
+                file_path: r.get(5)?,
+                language: r.get(6)?,
+                line_start: r.get(7)?,
+                line_end: r.get(8)?,
+                signature: r.get(9)?,
+                chunk_id: r.get(10)?,
             })
         })?
         .collect::<Result<_, _>>()?
@@ -507,6 +570,12 @@ pub fn list_entities(
                 canonical_name: r.get(2)?,
                 entity_type: r.get(3)?,
                 mentions: r.get(4)?,
+                file_path: r.get(5)?,
+                language: r.get(6)?,
+                line_start: r.get(7)?,
+                line_end: r.get(8)?,
+                signature: r.get(9)?,
+                chunk_id: r.get(10)?,
             })
         })?
         .collect::<Result<_, _>>()?
@@ -1049,5 +1118,107 @@ mod tests {
             now_facts.is_empty(),
             "now should see superseded fact as inactive"
         );
+    }
+
+    #[test]
+    fn test_ensure_symbol_entity_creates_with_metadata() {
+        let db = make_db();
+        db.execute("INSERT INTO files (path, language, size, mtime, hash) VALUES ('lib.rs', 'rust', 10, 0, 'a')", []).unwrap();
+        db.execute("INSERT INTO chunks (id, file_path, language, chunk_type, name, line_start, line_end, content_raw, content_hash) VALUES (1, 'lib.rs', 'rust', 'function', 'my_func', 5, 10, 'fn my_func() {}', 'x')", []).unwrap();
+
+        let input = SymbolEntityInput {
+            name: "my_func",
+            entity_type: "function",
+            file_path: "lib.rs",
+            language: "rust",
+            line_start: 5,
+            line_end: 10,
+            signature: Some("fn my_func()"),
+            chunk_id: Some(1),
+        };
+        let id = ensure_symbol_entity(&db, &input).unwrap();
+
+        let entity = get_entity(&db, "my_func").unwrap().unwrap();
+        assert_eq!(entity.id, id);
+        assert_eq!(entity.entity_type, "function");
+        assert_eq!(entity.file_path.as_deref(), Some("lib.rs"));
+        assert_eq!(entity.language.as_deref(), Some("rust"));
+        assert_eq!(entity.line_start, Some(5));
+        assert_eq!(entity.line_end, Some(10));
+        assert_eq!(entity.signature.as_deref(), Some("fn my_func()"));
+        assert_eq!(entity.chunk_id, Some(1));
+    }
+
+    #[test]
+    fn test_ensure_symbol_entity_dedup_and_update() {
+        let db = make_db();
+        db.execute("INSERT INTO files (path, language, size, mtime, hash) VALUES ('lib.rs', 'rust', 10, 0, 'a')", []).unwrap();
+        db.execute("INSERT INTO chunks (id, file_path, language, chunk_type, name, line_start, line_end, content_raw, content_hash) VALUES (1, 'lib.rs', 'rust', 'function', 'my_func', 5, 10, 'fn my_func() {}', 'x')", []).unwrap();
+        db.execute("INSERT INTO chunks (id, file_path, language, chunk_type, name, line_start, line_end, content_raw, content_hash) VALUES (2, 'lib.rs', 'rust', 'function', 'my_func', 15, 20, 'fn my_func() { new }', 'y')", []).unwrap();
+
+        let input1 = SymbolEntityInput {
+            name: "my_func",
+            entity_type: "function",
+            file_path: "lib.rs",
+            language: "rust",
+            line_start: 5,
+            line_end: 10,
+            signature: Some("fn my_func()"),
+            chunk_id: Some(1),
+        };
+        let id1 = ensure_symbol_entity(&db, &input1).unwrap();
+
+        let input2 = SymbolEntityInput {
+            name: "my_func",
+            entity_type: "function",
+            file_path: "lib.rs",
+            language: "rust",
+            line_start: 15,
+            line_end: 20,
+            signature: Some("fn my_func() { new }"),
+            chunk_id: Some(2),
+        };
+        let id2 = ensure_symbol_entity(&db, &input2).unwrap();
+        assert_eq!(id1, id2, "same canonical name should return same entity id");
+
+        let entity = get_entity(&db, "my_func").unwrap().unwrap();
+        assert_eq!(entity.mentions, 2);
+        assert_eq!(
+            entity.line_end,
+            Some(20),
+            "should update to latest metadata"
+        );
+        assert_eq!(entity.chunk_id, Some(2), "should update chunk_id");
+    }
+
+    #[test]
+    fn test_graph_boost_scored_uses_entity_chunk_id() {
+        let db = make_db();
+        db.execute("INSERT INTO files (path, language, size, mtime, hash) VALUES ('lib.rs', 'rust', 10, 0, 'a')", []).unwrap();
+        db.execute("INSERT INTO chunks (id, file_path, language, chunk_type, name, line_start, line_end, content_raw, content_hash) VALUES (1, 'lib.rs', 'rust', 'function', 'database_pool', 0, 5, 'fn database_pool()', 'x')", []).unwrap();
+
+        let input = SymbolEntityInput {
+            name: "DatabasePool",
+            entity_type: "function",
+            file_path: "lib.rs",
+            language: "rust",
+            line_start: 0,
+            line_end: 5,
+            signature: None,
+            chunk_id: Some(1),
+        };
+        let eid = ensure_symbol_entity(&db, &input).unwrap();
+
+        let entity = get_entity(&db, "DatabasePool").unwrap().unwrap();
+        assert_eq!(entity.chunk_id, Some(1));
+
+        let scored = graph_boost_scored(&db, "DatabasePool", 10).unwrap();
+        assert_eq!(
+            scored.len(),
+            1,
+            "entity with chunk_id should produce a scored result, got {:?}",
+            scored
+        );
+        assert_eq!(scored[0].0, 1);
     }
 }
