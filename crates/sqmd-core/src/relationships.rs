@@ -87,6 +87,30 @@ pub fn insert_relationships(
     Ok(count)
 }
 
+pub fn materialize_entity_deps_to_relationships(
+    db: &rusqlite::Connection,
+) -> Result<usize, Box<dyn std::error::Error>> {
+    let count: usize = db
+        .query_row("SELECT COUNT(*) FROM materialize_entity_rels", [], |r| {
+            r.get(0)
+        })
+        .unwrap_or(0);
+
+    if count > 0 {
+        db.execute_batch(
+            "INSERT OR IGNORE INTO relationships (source_id, target_id, rel_type)
+             SELECT e1.chunk_id, e2.chunk_id, ed.dep_type
+             FROM entity_dependencies ed
+             JOIN entities e1 ON ed.source_entity = e1.id AND e1.chunk_id IS NOT NULL
+             JOIN entities e2 ON ed.target_entity = e2.id AND e2.chunk_id IS NOT NULL
+             WHERE ed.valid_to IS NULL AND e1.chunk_id != e2.chunk_id
+             AND ed.dep_type IN ('imports', 'calls', 'contains', 'extends', 'implements')",
+        )?;
+    }
+
+    Ok(count)
+}
+
 fn resolve_module_path(
     db: &rusqlite::Connection,
     source_file: &str,
@@ -401,8 +425,19 @@ pub fn get_dependency_ids(
             SELECT r.target_id, dg.d + 1 FROM relationships r
             JOIN dep_graph dg ON r.source_id = dg.target_id
             WHERE dg.d < {0} AND r.rel_type IN ('imports', 'calls')
+        ),
+        ent_dep_graph(target_id, d) AS (
+            SELECT DISTINCT e2.chunk_id, 1
+            FROM entities e1
+            JOIN entity_dependencies ed ON e1.id = ed.source_entity AND ed.valid_to IS NULL
+            JOIN entities e2 ON ed.target_entity = e2.id
+            WHERE e1.chunk_id = ?1 AND e2.chunk_id IS NOT NULL AND e2.chunk_id != ?1
         )
-        SELECT DISTINCT target_id FROM dep_graph WHERE target_id != ?1",
+        SELECT DISTINCT target_id FROM (
+            SELECT target_id, d FROM dep_graph WHERE target_id != ?1
+            UNION
+            SELECT target_id, d FROM ent_dep_graph WHERE target_id != ?1
+        )",
         depth,
     );
 
@@ -429,8 +464,19 @@ pub fn get_dependent_ids(
             SELECT r.source_id, dg.d + 1 FROM relationships r
             JOIN dep_graph dg ON r.target_id = dg.source_id
             WHERE dg.d < {0} AND r.rel_type IN ('imports', 'calls')
+        ),
+        ent_dep_graph(source_id, d) AS (
+            SELECT DISTINCT e2.chunk_id, 1
+            FROM entities e1
+            JOIN entity_dependencies ed ON e1.id = ed.target_entity AND ed.valid_to IS NULL
+            JOIN entities e2 ON ed.source_entity = e2.id
+            WHERE e1.chunk_id = ?1 AND e2.chunk_id IS NOT NULL AND e2.chunk_id != ?1
         )
-        SELECT DISTINCT source_id FROM dep_graph WHERE source_id != ?1",
+        SELECT DISTINCT source_id FROM (
+            SELECT source_id, d FROM dep_graph WHERE source_id != ?1
+            UNION
+            SELECT source_id, d FROM ent_dep_graph WHERE source_id != ?1
+        )",
         depth,
     );
 
