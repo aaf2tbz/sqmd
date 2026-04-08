@@ -9,7 +9,10 @@ sqmd parses your codebase with tree-sitter, chunks every function, class, struct
 LLMs are bad at reading large codebases. They lose context, hallucinate file paths, and can't navigate import chains. sqmd solves this by giving agents structured, scored access to code:
 
 - **Semantic chunks, not files.** Each function, class, struct, and import is indexed individually with its name, signature, line range, and importance score. An agent gets `authenticate(user, token)` — not a 3,000-line file.
-- **Dependency-aware recall.** Import and call graphs let an agent trace "who calls this" and "what does this depend on" across files, traversing the relationship graph bidirectionally.
+- **Entity graph.** Every named symbol — functions, structs, traits, classes, interfaces — becomes a first-class entity with metadata (kind, signature, parent scope). Entities are linked by structural relationships (extends, implements, contains) and import dependencies, forming a multi-layer graph the agent can traverse.
+- **Dependency-aware recall.** Import and call graphs plus entity dependencies let an agent trace "who calls this" and "what does this depend on" across files, traversing both relationship layers bidirectionally.
+- **Relational hints.** Prospective search hints are generated from the entity graph (e.g., "items that implement Trait" or "functions in this module"), giving search a +15% relevance boost for structurally connected results.
+- **Typed communities.** Beyond directory-based summaries, sqmd detects **module communities** (files connected by imports) and **type-hierarchy communities** (entities connected by extends/implements), providing agent-ready summaries of architectural boundaries.
 - **Ranked retrieval.** Three-factor scoring (relevance × recency × importance) with diversity dampening means the agent sees the most useful code first, not just the highest keyword match.
 - **Token-budgeted context.** `sqmd context` assembles a response within a token budget, expanding dependencies only when budget allows. No more dumping entire files into context windows.
 
@@ -97,20 +100,25 @@ source files
     ↓ tree-sitter (per-language grammar → AST)
     ↓ walk declarations → named chunks (function, class, struct, ...)
     ↓ extract imports → relationship edges
+    ↓ extract structural relations → entity_dependencies (extends, implements, contains)
+    ↓ promote symbols → entities (first-class knowledge graph nodes)
+    ↓ generate relational hints → hints (prospective search anchors)
+    ↓ detect communities → module + type-hierarchy groupings
     ↓ content-hash decision pipeline (skip / update / tombstone)
     ↓
-SQLite database
+SQLite database (schema v11)
     ├── chunks         (raw code + metadata)
     ├── chunks_fts     (FTS5 full-text index)
     ├── chunks_vec     (768-dim vector index, optional)
     ├── relationships  (imports, contains, calls)
-    ├── entities       (files, structs, functions — knowledge graph)
-    ├── hints + hints_fts (prospective search hints)
-    ├── communities    (directory-based summaries)
+    ├── entity_dependencies (structural: extends, implements, contains)
+    ├── entities       (symbol-level: files, structs, functions, traits)
+    ├── hints + hints_fts (typed relational search hints)
+    ├── communities    (directory, module, type-hierarchy summaries)
     └── episodes       (change provenance)
 ```
 
-Single-pass parsing: tree-sitter parses each file once; the AST is reused for both chunking and import extraction. Incremental re-indexing uses content hashes — unchanged files produce zero writes.
+Single-pass parsing: tree-sitter parses each file once; the AST is reused for chunking, import extraction, and structural relationship extraction. Incremental re-indexing uses content hashes — unchanged files produce zero writes.
 
 ## Build & Size
 
