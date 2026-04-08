@@ -430,7 +430,7 @@ fn fts_content_search(
 ) -> Result<Vec<SearchResult>, Box<dyn std::error::Error>> {
     let mut extra_clauses = Vec::new();
     let fts_safe = escape_fts_query(&query.text);
-    let fts_candidate_limit = (query.top_k * 5).max(50);
+    let fts_candidate_limit = (query.top_k * 10).max(100);
 
     let mut param_values: Vec<Box<dyn rusqlite::ToSql>> =
         vec![Box::new(fts_safe), Box::new(fts_candidate_limit as i64)];
@@ -613,6 +613,12 @@ fn name_match_bonus(
     let name_ratio = name_match_count as f64 / query_tokens.len() as f64;
     let total_ratio = total_matching as f64 / query_tokens.len() as f64;
 
+    let camel_bonus: f64 = query_tokens
+        .iter()
+        .filter(|t| name_str.len() > t.len() + 2 && name_str.contains(t.as_str()))
+        .map(|_| 0.05)
+        .sum();
+
     if name_ratio >= 0.8 {
         0.4
     } else if total_ratio >= 0.8 {
@@ -622,7 +628,7 @@ fn name_match_bonus(
     } else if total_ratio >= 0.5 {
         0.15
     } else if name_match_count > 0 {
-        0.12
+        0.12 + camel_bonus
     } else if total_matching > 0 {
         0.06
     } else {
@@ -905,7 +911,7 @@ pub fn get_unembedded_chunk_ids(
     limit: usize,
 ) -> Result<Vec<i64>, Box<dyn std::error::Error>> {
     let mut stmt = db.prepare(
-        "SELECT c.id FROM chunks c LEFT JOIN embeddings e ON c.id = e.chunk_id WHERE e.chunk_id IS NULL ORDER BY c.importance DESC LIMIT ?1"
+        "SELECT c.id FROM chunks c LEFT JOIN embeddings e ON c.id = e.chunk_id WHERE e.chunk_id IS NULL ORDER BY LENGTH(c.content_raw) ASC, c.importance DESC LIMIT ?1"
     )?;
     let ids: Vec<i64> = stmt
         .query_map(params![limit as i64], |r| r.get(0))?
@@ -913,12 +919,14 @@ pub fn get_unembedded_chunk_ids(
     Ok(ids)
 }
 
+const EMBED_MAX_CHARS: usize = 6000;
+
 #[cfg(feature = "embed")]
 pub fn embed_unembedded(
     db: &mut Connection,
     embedder: &mut Embedder,
 ) -> Result<usize, Box<dyn std::error::Error>> {
-    let ids = get_unembedded_chunk_ids(db, 64)?;
+    let ids = get_unembedded_chunk_ids(db, 32)?;
     if ids.is_empty() {
         return Ok(0);
     }
@@ -942,16 +950,27 @@ pub fn embed_unembedded(
         })?
         .collect::<Result<_, _>>()?;
 
-    let text_refs: Vec<&str> = texts.iter().map(|(_, t)| t.as_str()).collect();
+    let truncated: Vec<(i64, String)> = texts
+        .into_iter()
+        .map(|(id, text)| {
+            if text.len() > EMBED_MAX_CHARS {
+                (id, text[..EMBED_MAX_CHARS].to_string())
+            } else {
+                (id, text)
+            }
+        })
+        .collect();
+
+    let text_refs: Vec<&str> = truncated.iter().map(|(_, t)| t.as_str()).collect();
     let vectors = embedder.embed_batch_documents(&text_refs)?;
 
     db.execute_batch("BEGIN")?;
-    for ((chunk_id, _), vector) in texts.iter().zip(vectors.iter()) {
+    for ((chunk_id, _), vector) in truncated.iter().zip(vectors.iter()) {
         store_embedding(db, *chunk_id, vector, embedder.model_name())?;
     }
     db.execute_batch("COMMIT")?;
 
-    Ok(texts.len())
+    Ok(truncated.len())
 }
 
 pub fn render_search_markdown(
