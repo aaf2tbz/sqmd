@@ -141,6 +141,22 @@ fn chunk_file_content(
             let chunks = crate::languages::meson::MesonChunker::chunk(content, relative);
             (chunks, Vec::new())
         }
+        Language::Ruby => {
+            let c = crate::languages::ruby::RubyChunker::new();
+            let (chunks, tree) = c.chunk(content, relative);
+            let imports = tree
+                .map(|t| c.extract_imports(&t, content))
+                .unwrap_or_default();
+            (chunks, imports)
+        }
+        Language::Yaml => {
+            let c = crate::languages::yaml::YamlChunker::new();
+            let (chunks, tree) = c.chunk(content, relative);
+            let imports = tree
+                .map(|t| c.extract_imports(&t, content))
+                .unwrap_or_default();
+            (chunks, imports)
+        }
         _ => (
             crate::chunker::FileChunker::chunk_file(content, relative, language.as_str()),
             Vec::new(),

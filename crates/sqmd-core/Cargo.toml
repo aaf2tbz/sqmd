@@ -35,3 +35,5 @@ chrono = { version = "0.4", features = ["serde"] }
 notify = "7"
 tempfile = "3"
 regex = "1"
+tree-sitter-ruby = "0.23"
+tree-sitter-yaml = "0.7"

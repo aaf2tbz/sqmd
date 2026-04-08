@@ -6,5 +6,7 @@ pub mod java;
 pub mod meson;
 pub mod python;
 pub mod qml;
+pub mod ruby;
 pub mod rust;
 pub mod typescript;
+pub mod yaml;
