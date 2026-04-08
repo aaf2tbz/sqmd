@@ -405,6 +405,11 @@ fn main() {
             top_k: 10,
             alpha: 0.7,
             source_type_filter: Some(vec!["code".to_string()]),
+            exclude_path_prefixes: vec![
+                "deps/".to_string(),
+                "tests/".to_string(),
+                "modules/".to_string(),
+            ],
             ..Default::default()
         };
 
