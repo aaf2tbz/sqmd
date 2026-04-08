@@ -22,10 +22,9 @@ cargo build --release --features embed    # ~27MB: + vector embeddings + hybrid 
 cd /path/to/your/project
 sqmd init     # creates .sqmd/index.db
 sqmd index    # tree-sitter parse → chunk → store (incremental on re-runs)
-
-Note about Embing an entire codebase: This may take a while, Especially
-on lower end systems. This uses nomic-embed-textv1.5 and runs locally on hardware. 
 ```
+
+Note: `sqmd index --embed` generates vector embeddings for hybrid search. This uses nomic-embed-text-v1.5 locally via ONNX and may take a while on large codebases.
 
 Then point your agent at the Unix socket (`sqmd serve`) or use the CLI directly:
 
@@ -161,6 +160,10 @@ sqmd watch                           # live re-index on file changes
 ```
 
 All responses are JSON. Add `--json` to any CLI command for machine-readable output.
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for branch policy, code style, and how to add a new language.
 
 ## License
 
