@@ -13,6 +13,7 @@ pub struct SearchQuery {
     pub source_type_filter: Option<Vec<String>>,
     pub agent_id_filter: Option<String>,
     pub min_score: f64,
+    pub exclude_path_prefixes: Vec<String>,
 }
 
 impl Default for SearchQuery {
@@ -26,6 +27,7 @@ impl Default for SearchQuery {
             source_type_filter: None,
             agent_id_filter: None,
             min_score: 0.1,
+            exclude_path_prefixes: Vec::new(),
         }
     }
 }
@@ -430,7 +432,7 @@ fn fts_content_search(
 ) -> Result<Vec<SearchResult>, Box<dyn std::error::Error>> {
     let mut extra_clauses = Vec::new();
     let fts_safe = escape_fts_query(&query.text);
-    let fts_candidate_limit = (query.top_k * 10).max(100);
+    let fts_candidate_limit: usize = 200;
 
     let mut param_values: Vec<Box<dyn rusqlite::ToSql>> =
         vec![Box::new(fts_safe), Box::new(fts_candidate_limit as i64)];
@@ -467,6 +469,12 @@ fn fts_content_search(
         extra_clauses.push(format!("AND c.agent_id = ?{}", next_param));
         param_values.push(Box::new(agent.clone()));
         let _ = next_param;
+    }
+    for prefix in &query.exclude_path_prefixes {
+        extra_clauses.push(format!(
+            "AND c.file_path NOT LIKE '{}%'",
+            prefix.replace('\'', "''")
+        ));
     }
 
     let filter_clause = extra_clauses.join(" ");
@@ -532,10 +540,74 @@ fn fts_content_search(
         .map(|t| t.to_lowercase())
         .collect();
 
-    let results: Vec<SearchResult> = rows
-        .into_iter()
+    struct ScoredChunk {
+        idx: usize,
+        score: f64,
+        #[allow(dead_code)]
+        raw: f64,
+        #[allow(dead_code)]
+        norm: f64,
+    }
+
+    let name_hit_ids: std::collections::HashSet<i64> = if !query_tokens.is_empty() {
+        let like_clauses: Vec<String> = query_tokens
+            .iter()
+            .map(|t| format!("LOWER(c.name) LIKE '%{}%'", t.replace('\'', "''")))
+            .collect();
+        let mut path_clauses = Vec::new();
+        for prefix in &query.exclude_path_prefixes {
+            path_clauses.push(format!(
+                "AND c.file_path NOT LIKE '{}%'",
+                prefix.replace('\'', "''")
+            ));
+        }
+        let path_filter = path_clauses.join(" ");
+        let sql = format!(
+            "SELECT DISTINCT c.id FROM chunks c WHERE ({}) AND c.is_deleted = 0 {} LIMIT 200",
+            like_clauses.join(" OR "),
+            path_filter
+        );
+        if let Ok(mut stmt) = db.prepare(&sql) {
+            stmt.query_map([], |r| r.get::<_, i64>(0))
+                .ok()
+                .map(|rows| rows.filter_map(|r| r.ok()).collect())
+                .unwrap_or_default()
+        } else {
+            std::collections::HashSet::new()
+        }
+    } else {
+        std::collections::HashSet::new()
+    };
+
+    let scored: Vec<ScoredChunk> = rows
+        .iter()
+        .enumerate()
         .map(
-            |(
+            |(i, (_, _, name, sig, _, _, _ct, rank, _, _, _, _, importance, updated_at))| {
+                let normalized = 1.0 - ((rank - min_rank) / rank_range);
+                let name_bonus = name_match_bonus(name, sig, &query_tokens);
+                let recency = compute_recency(updated_at.as_deref(), &now);
+                let base_score = (normalized + name_bonus).min(1.0);
+                let score = three_factor_score(base_score, recency, *importance);
+                let score = if name_hit_ids.contains(&rows[i].0) {
+                    score * 1.4
+                } else {
+                    score
+                };
+                ScoredChunk {
+                    idx: i,
+                    score,
+                    raw: score,
+                    norm: normalized,
+                }
+            },
+        )
+        .collect();
+
+    let results: Vec<SearchResult> = scored
+        .into_iter()
+        .map(|s| {
+            let (
                 id,
                 file_path,
                 name,
@@ -543,39 +615,42 @@ fn fts_content_search(
                 start,
                 end,
                 ct,
-                rank,
+                _rank,
                 snippet,
                 source_type,
                 decay_rate,
                 last_accessed,
                 importance,
-                updated_at,
-            )| {
-                let normalized = 1.0 - ((rank - min_rank) / rank_range);
-                let name_bonus = name_match_bonus(&name, &sig, &query_tokens);
-                let recency = compute_recency(updated_at.as_deref(), &now);
-                let score =
-                    three_factor_score((normalized + name_bonus).min(1.0), recency, importance);
-                SearchResult {
-                    chunk_id: id,
-                    file_path,
-                    name,
-                    signature: sig,
-                    line_start: start,
-                    line_end: end,
-                    chunk_type: ct,
-                    source_type,
-                    score,
-                    vec_distance: None,
-                    fts_rank: Some(normalized),
-                    snippet: Some(snippet),
-                    decay_rate,
-                    last_accessed,
-                    importance,
-                }
-            },
-        )
+                _updated_at,
+            ) = &rows[s.idx];
+            SearchResult {
+                chunk_id: *id,
+                file_path: file_path.clone(),
+                name: name.clone(),
+                signature: sig.clone(),
+                line_start: *start,
+                line_end: *end,
+                chunk_type: ct.clone(),
+                source_type: source_type.clone(),
+                score: s.score,
+                vec_distance: None,
+                fts_rank: Some(s.norm),
+                snippet: Some(snippet.clone()),
+                decay_rate: *decay_rate,
+                last_accessed: last_accessed.clone(),
+                importance: *importance,
+            }
+        })
         .collect();
+
+    let mut results = results;
+
+    results.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    results.truncate(query.top_k * 3);
 
     Ok(results)
 }
@@ -636,6 +711,7 @@ fn name_match_bonus(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn vec_search(
     db: &Connection,
     query_vec: &[f32],
@@ -644,6 +720,7 @@ pub fn vec_search(
     type_filter: Option<&str>,
     source_type_filter: Option<&[String]>,
     agent_id_filter: Option<&str>,
+    exclude_path_prefixes: &[String],
 ) -> Result<Vec<SearchResult>, Box<dyn std::error::Error>> {
     let vec_count: i64 = db
         .query_row("SELECT COUNT(*) FROM chunks_vec", [], |r| r.get(0))
@@ -688,6 +765,12 @@ pub fn vec_search(
     if let Some(agent) = agent_id_filter {
         extra_clauses.push(format!("AND c.agent_id = ?{}", next_param));
         param_values.push(Box::new(agent.to_string()));
+    }
+    for prefix in exclude_path_prefixes {
+        extra_clauses.push(format!(
+            "AND c.file_path NOT LIKE '{}%'",
+            prefix.replace('\'', "''")
+        ));
     }
 
     let filter_clause = extra_clauses.join(" ");
@@ -801,6 +884,7 @@ pub fn hybrid_search(
             query.type_filter.as_deref(),
             query.source_type_filter.as_deref(),
             query.agent_id_filter.as_deref(),
+            &query.exclude_path_prefixes,
         )?
     } else {
         Vec::new()
@@ -919,6 +1003,7 @@ pub fn get_unembedded_chunk_ids(
     Ok(ids)
 }
 
+#[cfg(feature = "embed")]
 const EMBED_MAX_CHARS: usize = 6000;
 
 #[cfg(feature = "embed")]
@@ -1114,7 +1199,7 @@ mod tests {
     fn test_vec_search_with_fallback() {
         let db = make_test_db();
         let query_vec = vec![0.1f32; 768];
-        let results = vec_search(&db, &query_vec, 5, None, None, None, None).unwrap();
+        let results = vec_search(&db, &query_vec, 5, None, None, None, None, &[]).unwrap();
         // chunks_vec exists but is empty — should return empty, not error
         assert!(results.is_empty());
     }
