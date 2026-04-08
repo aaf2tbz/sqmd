@@ -1,5 +1,10 @@
+pub mod c;
+pub mod cmake;
+pub mod cpp;
 pub mod go;
 pub mod java;
+pub mod meson;
 pub mod python;
+pub mod qml;
 pub mod rust;
 pub mod typescript;

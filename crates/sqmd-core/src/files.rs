@@ -13,6 +13,9 @@ pub enum Language {
     Java,
     C,
     Cpp,
+    CMake,
+    Qml,
+    Meson,
     Ruby,
     Markdown,
     Json,
@@ -33,7 +36,8 @@ impl Language {
             "go" => Language::Go,
             "java" => Language::Java,
             "c" | "h" => Language::C,
-            "cpp" | "cc" | "cxx" | "hpp" => Language::Cpp,
+            "cpp" | "cc" | "cxx" | "hpp" | "hxx" | "hh" => Language::Cpp,
+            "qml" => Language::Qml,
             "rb" => Language::Ruby,
             "md" | "mdx" => Language::Markdown,
             "json" | "jsonc" => Language::Json,
@@ -55,6 +59,9 @@ impl Language {
             Language::Java => "java",
             Language::C => "c",
             Language::Cpp => "cpp",
+            Language::CMake => "cmake",
+            Language::Qml => "qml",
+            Language::Meson => "meson",
             Language::Ruby => "ruby",
             Language::Markdown => "markdown",
             Language::Json => "json",
@@ -70,10 +77,19 @@ impl Language {
 }
 
 pub fn detect_language(path: &Path) -> Language {
-    path.extension()
-        .and_then(|e| e.to_str())
-        .map(Language::from_extension)
-        .unwrap_or(Language::Unknown)
+    let fname = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+    match fname {
+        "CMakeLists.txt" => return Language::CMake,
+        "meson.build" | "meson_options.txt" => return Language::Meson,
+        _ => {}
+    }
+    if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+        if ext == "cmake" {
+            return Language::CMake;
+        }
+        return Language::from_extension(ext);
+    }
+    Language::Unknown
 }
 
 pub fn content_hash(content: &[u8]) -> String {
