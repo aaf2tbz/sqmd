@@ -295,21 +295,41 @@ fn get_related_chunks(
     let placeholders: Vec<String> = (0..chunk_ids.len())
         .map(|i| format!("?{}", i + 1))
         .collect();
+    let ph = placeholders.join(", ");
+
     let sql = format!(
-        "WITH RECURSIVE rel_graph(id, depth) AS (
+        "WITH rel_graph(id, depth) AS (
             SELECT target_id, 1 FROM relationships WHERE source_id IN ({0}) AND rel_type = 'imports'
             UNION
             SELECT target_id, rg.depth + 1 FROM relationships r
             JOIN rel_graph rg ON r.source_id = rg.id
             WHERE rg.depth < {1} AND r.rel_type = 'imports'
+        ),
+        ent_graph(id, depth) AS (
+            SELECT DISTINCT e2.chunk_id, 1
+            FROM entities e1
+            JOIN entity_dependencies ed ON e1.id = ed.source_entity AND ed.valid_to IS NULL
+            JOIN entities e2 ON ed.target_entity = e2.id
+            WHERE e1.chunk_id IN ({0}) AND e2.chunk_id IS NOT NULL AND e2.chunk_id != e1.chunk_id
+            UNION
+            SELECT DISTINCT e1.chunk_id, 1
+            FROM entities e1
+            JOIN entity_dependencies ed ON e1.id = ed.target_entity AND ed.valid_to IS NULL
+            JOIN entities e2 ON ed.source_entity = e2.id
+            WHERE e1.chunk_id IN ({0}) AND e2.chunk_id IS NOT NULL AND e1.chunk_id != e2.chunk_id
+        ),
+        all_graph(id, depth) AS (
+            SELECT id, depth FROM rel_graph
+            UNION
+            SELECT id, depth FROM ent_graph WHERE depth <= {1}
         )
         SELECT DISTINCT c.id, c.file_path, c.name, c.chunk_type, c.line_start, c.line_end, c.content_raw, COALESCE(c.language, ''), COALESCE(c.source_type, '')
-        FROM rel_graph rg
-        JOIN chunks c ON rg.id = c.id
-        WHERE c.id NOT IN ({0})
+        FROM all_graph ag
+        JOIN chunks c ON ag.id = c.id
+        WHERE c.id NOT IN ({0}) AND c.is_deleted = 0
         ORDER BY c.importance DESC
         LIMIT 50",
-        placeholders.join(", "),
+        ph,
         depth
     );
 
