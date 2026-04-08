@@ -71,8 +71,13 @@ Every function, method, class, struct, enum, trait, interface, type alias, impor
 | CMake | `tree-sitter-cmake` | `find_package`, `add_subdirectory` | function, macro, target, dependency, config |
 | QML | `tree-sitter-qmljs` | `import QtQuick 2.15` | component, function, property, import |
 | Meson | regex-based (no grammar) | `dependency()`, `subdir()` | target, dependency, function |
+| Ruby | `tree-sitter-ruby` | `require '...'` | function, method, class, module, constant |
+| YAML | `tree-sitter-yaml` | — | mapping (keyed sections by nesting depth) |
+| JSON | `tree-sitter-json` | — | pair (keyed object entries by nesting depth) |
+| TOML | `tree-sitter-toml-ng` | — | table, table_array, pair (key-value) |
+| Markdown | regex-based (no grammar) | — | section (split by headings, h1–h6) |
 
-Other file types (Markdown, JSON, YAML, TOML, Ruby) fall back to line-based chunking.
+All file types are now handled with dedicated chunkers. No more line-based fallbacks.
 
 ## Search
 
@@ -112,7 +117,7 @@ Single-pass parsing: tree-sitter parses each file once; the AST is reused for bo
 
 | Build | Size | What's included |
 |-------|------|-----------------|
-| `cargo build --release` | ~10MB | Chunking, FTS5, relationships, daemon, 11 languages |
+| `cargo build --release` | ~10MB | Chunking, FTS5, relationships, daemon, 16 languages |
 | `cargo build --release --features embed` | ~27MB | + ONNX Runtime, vector search, hybrid scoring |
 
 ## Commands

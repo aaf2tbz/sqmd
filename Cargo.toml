@@ -2,5 +2,6 @@
 members = [
     "crates/sqmd-core",
     "crates/sqmd-cli",
+    "crates/sqmd-bench",
 ]
 resolver = "3"
