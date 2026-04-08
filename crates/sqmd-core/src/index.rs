@@ -157,6 +157,26 @@ fn chunk_file_content(
                 .unwrap_or_default();
             (chunks, imports)
         }
+        Language::Json => {
+            let c = crate::languages::json::JsonChunker::new();
+            let (chunks, tree) = c.chunk(content, relative);
+            let imports = tree
+                .map(|t| c.extract_imports(&t, content))
+                .unwrap_or_default();
+            (chunks, imports)
+        }
+        Language::Toml => {
+            let c = crate::languages::toml::TomlChunker::new();
+            let (chunks, tree) = c.chunk(content, relative);
+            let imports = tree
+                .map(|t| c.extract_imports(&t, content))
+                .unwrap_or_default();
+            (chunks, imports)
+        }
+        Language::Markdown => {
+            let chunks = crate::languages::markdown::MarkdownChunker::chunk(content, relative);
+            (chunks, Vec::new())
+        }
         _ => (
             crate::chunker::FileChunker::chunk_file(content, relative, language.as_str()),
             Vec::new(),
