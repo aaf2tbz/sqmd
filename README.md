@@ -22,6 +22,8 @@ cargo build --release --features embed    # ~27MB: + vector embeddings + hybrid 
 cd /path/to/your/project
 sqmd init     # creates .sqmd/index.db
 sqmd index    # tree-sitter parse → chunk → store (incremental on re-runs)
+Note about Embing an entire codebase: This may take a while, Especially
+on lower end systems. This uses nomic-embed-textv1.5 and runs locally on hardware. 
 ```
 
 Then point your agent at the Unix socket (`sqmd serve`) or use the CLI directly:
