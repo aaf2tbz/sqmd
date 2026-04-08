@@ -817,17 +817,145 @@ pub fn insert_hints(
     Ok(count)
 }
 
+pub fn insert_hints_typed(
+    db: &rusqlite::Connection,
+    chunk_id: i64,
+    hints: &[(String, &str)],
+) -> Result<usize, Box<dyn std::error::Error>> {
+    let mut count = 0;
+    let mut stmt =
+        db.prepare("INSERT INTO hints (chunk_id, hint_text, hint_type) VALUES (?1, ?2, ?3)")?;
+    for (hint, hint_type) in hints {
+        stmt.execute(params![chunk_id, hint, hint_type])?;
+        count += 1;
+    }
+    Ok(count)
+}
+
+pub fn generate_relational_hints(
+    db: &rusqlite::Connection,
+) -> Result<usize, Box<dyn std::error::Error>> {
+    let entities: Vec<(i64, String)> = {
+        let mut stmt = db.prepare(
+            "SELECT id, name FROM entities WHERE chunk_id IS NOT NULL AND entity_type IN ('function', 'method', 'class', 'struct', 'interface', 'trait', 'enum')",
+        )?;
+        let rows = stmt
+            .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?
+            .collect::<Result<Vec<_>, _>>()?;
+        rows
+    };
+
+    let mut total = 0;
+    for (entity_id, name) in &entities {
+        let mut hints: Vec<(String, &str)> = Vec::new();
+
+        let targets: Vec<(String, String)> = {
+            let mut stmt = db.prepare(
+                "SELECT e2.name, ed.dep_type FROM entity_dependencies ed
+                 JOIN entities e2 ON ed.target_entity = e2.id
+                 WHERE ed.source_entity = ?1 AND ed.valid_to IS NULL",
+            )?;
+            let rows = stmt
+                .query_map(params![entity_id], |r| {
+                    Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            rows
+        };
+
+        let sources: Vec<(String, String)> = {
+            let mut stmt = db.prepare(
+                "SELECT e2.name, ed.dep_type FROM entity_dependencies ed
+                 JOIN entities e2 ON ed.source_entity = e2.id
+                 WHERE ed.target_entity = ?1 AND ed.valid_to IS NULL",
+            )?;
+            let rows = stmt
+                .query_map(params![entity_id], |r| {
+                    Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            rows
+        };
+
+        for (target_name, dep_type) in &targets {
+            match dep_type.as_str() {
+                "implements" => {
+                    hints.push((format!("{} implements {}", name, target_name), "heir"));
+                }
+                "extends" => {
+                    hints.push((format!("{} extends {}", name, target_name), "heir"));
+                }
+                "contains" => {
+                    hints.push((format!("{} contains {}", name, target_name), "member"));
+                }
+                "calls" => {
+                    hints.push((format!("{} calls {}", name, target_name), "callee"));
+                }
+                "imports" => {
+                    hints.push((format!("{} imports {}", name, target_name), "importer"));
+                }
+                _ => {}
+            }
+        }
+
+        for (_source_name, dep_type) in &sources {
+            match dep_type.as_str() {
+                "implements" => {
+                    hints.push((format!("implementations of {}", name), "heir"));
+                }
+                "extends" => {
+                    hints.push((format!("subclasses of {}", name), "heir"));
+                }
+                "contains" => {
+                    hints.push((format!("{} members", name), "member"));
+                }
+                "calls" => {
+                    hints.push((format!("callers of {}", name), "caller"));
+                }
+                "imports" => {
+                    hints.push((format!("files that import {}", name), "importer"));
+                }
+                _ => {}
+            }
+        }
+
+        if hints.is_empty() {
+            continue;
+        }
+
+        hints.truncate(6);
+        hints.dedup_by(|a, b| a.0 == b.0);
+
+        let chunk_id: Option<i64> = db
+            .query_row(
+                "SELECT chunk_id FROM entities WHERE id = ?1",
+                params![entity_id],
+                |r| r.get(0),
+            )
+            .ok();
+
+        if let Some(cid) = chunk_id {
+            total += insert_hints_typed(db, cid, &hints)?;
+        }
+    }
+
+    Ok(total)
+}
+
 pub fn search_hints(
     db: &rusqlite::Connection,
     query: &str,
     top_k: usize,
 ) -> Result<Vec<(i64, f64)>, Box<dyn std::error::Error>> {
-    let sql = "SELECT h.chunk_id, f.rank FROM hints_fts f JOIN hints h ON f.rowid = h.id
+    let sql =
+        "SELECT h.chunk_id, f.rank, h.hint_type FROM hints_fts f JOIN hints h ON f.rowid = h.id
                JOIN chunks c ON h.chunk_id = c.id WHERE c.is_deleted = 0
                AND hints_fts MATCH ?1 ORDER BY f.rank LIMIT ?2";
     let mut stmt = db.prepare(sql)?;
-    let rows: Vec<(i64, f64)> = stmt
-        .query_map(params![query, top_k as i64], |r| Ok((r.get(0)?, r.get(1)?)))?
+    let rows: Vec<(i64, f64, String)> = stmt
+        .query_map(params![query, top_k as i64], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get::<_, String>(2)?))
+        })?
         .collect::<Result<_, _>>()?;
 
     if rows.is_empty() {
@@ -840,7 +968,14 @@ pub fn search_hints(
 
     let scored: Vec<(i64, f64)> = rows
         .into_iter()
-        .map(|(id, rank)| (id, 1.0 - ((rank - min_rank) / range)))
+        .map(|(id, rank, hint_type)| {
+            let base = 1.0 - ((rank - min_rank) / range);
+            let boost = match hint_type.as_str() {
+                "caller" | "callee" | "heir" | "member" | "importer" => 0.15,
+                _ => 0.0,
+            };
+            (id, (base + boost).min(1.0))
+        })
         .collect();
 
     Ok(scored)

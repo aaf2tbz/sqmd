@@ -2,7 +2,7 @@ use rusqlite::{Connection, Result as SqlResult};
 use sqlite_vec::sqlite3_vec_init;
 use std::path::Path;
 
-const CURRENT_VERSION: i64 = 9;
+const CURRENT_VERSION: i64 = 10;
 
 pub fn init(db: &mut Connection) -> SqlResult<()> {
     #[allow(clippy::missing_transmute_annotations)]
@@ -63,6 +63,9 @@ pub fn init(db: &mut Connection) -> SqlResult<()> {
             if sql_version < 9 {
                 migrate_v9(db)?;
             }
+            if sql_version < 10 {
+                migrate_v10(db)?;
+            }
         }
         return Ok(());
     }
@@ -93,6 +96,14 @@ pub fn init(db: &mut Connection) -> SqlResult<()> {
 
     if version < 8 {
         migrate_v8(db)?;
+    }
+
+    if version < 9 {
+        migrate_v9(db)?;
+    }
+
+    if version < 10 {
+        migrate_v10(db)?;
     }
 
     Ok(())
@@ -692,6 +703,22 @@ fn migrate_v9(db: &mut Connection) -> SqlResult<()> {
     }
 
     db.execute_batch("INSERT OR IGNORE INTO schema_version (version) VALUES (9);")?;
+    Ok(())
+}
+
+fn migrate_v10(db: &mut Connection) -> SqlResult<()> {
+    let has_hint_type: bool = db
+        .prepare("SELECT COUNT(*) FROM pragma_table_info('hints') WHERE name='hint_type'")?
+        .query_row([], |r| r.get::<_, i64>(0))
+        .map(|c| c > 0)
+        .unwrap_or(false);
+
+    if !has_hint_type {
+        db.execute_batch("ALTER TABLE hints ADD COLUMN hint_type TEXT NOT NULL DEFAULT 'symbol';")?;
+        db.execute_batch("CREATE INDEX IF NOT EXISTS idx_hints_type ON hints(hint_type);")?;
+    }
+
+    db.execute_batch("INSERT OR IGNORE INTO schema_version (version) VALUES (10);")?;
     Ok(())
 }
 
