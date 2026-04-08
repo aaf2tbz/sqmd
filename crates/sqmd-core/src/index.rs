@@ -105,6 +105,42 @@ fn chunk_file_content(
                 .unwrap_or_default();
             (chunks, imports)
         }
+        Language::C => {
+            let c = crate::languages::c::CChunker::new();
+            let (chunks, tree) = c.chunk(content, relative);
+            let imports = tree
+                .map(|t| c.extract_imports(&t, content))
+                .unwrap_or_default();
+            (chunks, imports)
+        }
+        Language::Cpp => {
+            let c = crate::languages::cpp::CppChunker::new();
+            let (chunks, tree) = c.chunk(content, relative);
+            let imports = tree
+                .map(|t| c.extract_imports(&t, content))
+                .unwrap_or_default();
+            (chunks, imports)
+        }
+        Language::CMake => {
+            let c = crate::languages::cmake::CMakeChunker::new();
+            let (chunks, tree) = c.chunk(content, relative);
+            let imports = tree
+                .map(|t| c.extract_imports(&t, content))
+                .unwrap_or_default();
+            (chunks, imports)
+        }
+        Language::Qml => {
+            let c = crate::languages::qml::QmlChunker::new();
+            let (chunks, tree) = c.chunk(content, relative);
+            let imports = tree
+                .map(|t| c.extract_imports(&t, content))
+                .unwrap_or_default();
+            (chunks, imports)
+        }
+        Language::Meson => {
+            let chunks = crate::languages::meson::MesonChunker::chunk(content, relative);
+            (chunks, Vec::new())
+        }
         _ => (
             crate::chunker::FileChunker::chunk_file(content, relative, language.as_str()),
             Vec::new(),
