@@ -35,6 +35,9 @@ struct QueryResult {
     results_returned: usize,
     layers_hit: Vec<String>,
     entity_found: bool,
+    top_result_name: Option<String>,
+    top_result_file: Option<String>,
+    returned_names: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -458,6 +461,14 @@ fn main() {
             vec!["fts".to_string()]
         };
 
+        let top_result_name = search_results.first().and_then(|r| r.name.clone());
+        let top_result_file = search_results.first().map(|r| r.file_path.clone());
+        let returned_names: Vec<String> = search_results
+            .iter()
+            .take(5)
+            .filter_map(|r| r.name.as_ref().map(|n| format!("{}:{}", n, r.file_path)))
+            .collect();
+
         results.push(QueryResult {
             id: gt.id.to_string(),
             query: gt.query.to_string(),
@@ -472,6 +483,9 @@ fn main() {
             results_returned: search_results.len(),
             layers_hit,
             entity_found,
+            top_result_name,
+            top_result_file,
+            returned_names,
         });
     }
 
