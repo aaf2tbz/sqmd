@@ -378,7 +378,13 @@ fn main() {
 
     if !db_path.exists() {
         eprintln!("Database not found at {:?}", db_path);
-        eprintln!("Usage: sqmd-bench [path/to/index.db] [fts|layered]");
+        eprintln!("Usage: sqmd-bench [path/to/index.db] [fts|layered|hybrid]");
+        std::process::exit(1);
+    }
+
+    if mode == "hybrid" && cfg!(not(feature = "embed")) {
+        eprintln!("Error: 'hybrid' mode requires the 'embed' feature.");
+        eprintln!("Build with: cargo build --features embed");
         std::process::exit(1);
     }
 
@@ -404,8 +410,17 @@ fn main() {
             "layered" => sqmd_core::search::layered_search(&db, &search_query)
                 .map(|lr| lr.results)
                 .unwrap_or_default(),
+            #[cfg(feature = "embed")]
+            "hybrid" => {
+                let mut embedder = sqmd_core::embed::Embedder::new().unwrap();
+                sqmd_core::search::hybrid_search(&db, &search_query, &mut embedder)
+                    .unwrap_or_default()
+            }
             _ => {
-                eprintln!("Unknown mode '{}'. Use 'fts' or 'layered'.", mode);
+                eprintln!(
+                    "Unknown mode '{}'. Use 'fts', 'layered', or 'hybrid'.",
+                    mode
+                );
                 std::process::exit(1);
             }
         };
