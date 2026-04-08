@@ -404,6 +404,7 @@ impl<'a> Indexer<'a> {
 
         crate::relationships::materialize_entity_deps_to_relationships(self.db)?;
         entities::generate_relational_hints(self.db)?;
+        crate::communities::ensure_graph_communities(self.db)?;
 
         self.db.execute_batch("COMMIT")?;
         Ok(stats)

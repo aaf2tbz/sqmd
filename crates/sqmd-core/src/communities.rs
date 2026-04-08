@@ -12,6 +12,8 @@ pub struct Community {
     pub entity_count: i64,
     pub summary: Option<String>,
     pub generated_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub community_type: Option<String>,
 }
 
 pub fn ensure_communities(db: &Connection) -> Result<usize, Box<dyn std::error::Error>> {
@@ -78,21 +80,149 @@ pub fn ensure_communities(db: &Connection) -> Result<usize, Box<dyn std::error::
     Ok(total as usize)
 }
 
-pub fn regenerate_summaries(db: &Connection) -> Result<usize, Box<dyn std::error::Error>> {
-    let communities: Vec<(i64, String, i64)> = {
+pub fn ensure_graph_communities(db: &Connection) -> Result<usize, Box<dyn std::error::Error>> {
+    let mut count = 0;
+
+    let module_rows: Vec<(String, i64)> = {
         let mut stmt = db.prepare(
-            "SELECT id, path, depth FROM communities WHERE depth >= 1 ORDER BY depth ASC, path ASC",
+            "SELECT c.file_path, t.file_path
+             FROM relationships r
+             JOIN chunks c ON r.source_id = c.id
+             JOIN chunks t ON r.target_id = t.id
+             WHERE r.rel_type = 'imports' AND c.is_deleted = 0 AND t.is_deleted = 0
+               AND c.file_path != t.file_path
+             GROUP BY c.file_path, t.file_path",
         )?;
         let rows = stmt
-            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?
+            .collect::<Result<Vec<_>, _>>()?;
+        rows
+    };
+
+    if !module_rows.is_empty() {
+        let mut parent: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
+        let mut rank: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+
+        for (src, _tgt) in &module_rows {
+            let parent_dir = if let Some(pos) = src.rfind('/') {
+                &src[..pos]
+            } else {
+                src.as_str()
+            };
+            parent.insert(src.clone(), parent_dir.to_string());
+            *rank.entry(parent_dir.to_string()).or_insert(0) += 1;
+        }
+
+        let mut ranked: Vec<_> = rank.into_iter().collect();
+        ranked.sort_by(|a, b| b.1.cmp(&a.1));
+
+        for (module_path, _conn_count) in ranked.iter().take(20) {
+            let name = module_path.rsplit('/').next().unwrap_or(module_path);
+
+            let chunk_count: i64 = db
+                .prepare(
+                    "SELECT COUNT(*) FROM chunks WHERE file_path LIKE ?1 || '%' AND is_deleted = 0",
+                )?
+                .query_row(params![module_path], |r| r.get(0))
+                .unwrap_or(0);
+
+            let entity_count: i64 = db
+                .prepare(
+                    "SELECT COUNT(*) FROM entities WHERE file_path LIKE ?1 || '%' AND entity_type != 'file'",
+                )?
+                .query_row(params![module_path], |r| r.get(0))
+                .unwrap_or(0);
+
+            if chunk_count == 0 {
+                continue;
+            }
+
+            db.execute(
+                "INSERT OR IGNORE INTO communities (path, depth, name, chunk_count, entity_count, generated_at, community_type)
+                 VALUES (?1, 1, ?2, ?3, ?4, datetime('now'), 'module')",
+                params![module_path, name, chunk_count, entity_count],
+            )?;
+            count += 1;
+        }
+    }
+
+    let hierarchy_rows: Vec<(String, String, String)> = {
+        let mut stmt = db.prepare(
+            "SELECT e1.name, e2.name, ed.dep_type
+             FROM entity_dependencies ed
+             JOIN entities e1 ON ed.source_entity = e1.id
+             JOIN entities e2 ON ed.target_entity = e2.id
+             WHERE ed.valid_to IS NULL
+               AND ed.dep_type IN ('extends', 'implements')
+             GROUP BY e1.name, e2.name, ed.dep_type",
+        )?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        rows
+    };
+
+    if !hierarchy_rows.is_empty() {
+        let mut parent_map: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
+        let mut child_count: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::new();
+
+        for (child, parent, _dep_type) in &hierarchy_rows {
+            *child_count.entry(parent.clone()).or_insert(0) += 1;
+            parent_map.insert(child.clone(), parent.clone());
+        }
+
+        let mut sorted: Vec<_> = child_count.into_iter().collect();
+        sorted.sort_by(|a, b| b.1.cmp(&a.1));
+
+        for (base, member_count) in sorted.iter().take(10) {
+            if *member_count < 2 {
+                continue;
+            }
+
+            let name = format!("{} hierarchy", base);
+            let entity_count = *member_count as i64;
+
+            db.execute(
+                "INSERT OR IGNORE INTO communities (path, depth, name, chunk_count, entity_count, generated_at, community_type)
+                 VALUES (?1, 2, ?2, 0, ?3, datetime('now'), 'type_hierarchy')",
+                params![base, name, entity_count],
+            )?;
+            count += 1;
+        }
+    }
+
+    Ok(count)
+}
+
+pub fn regenerate_summaries(db: &Connection) -> Result<usize, Box<dyn std::error::Error>> {
+    let communities: Vec<(i64, String, i64, Option<String>)> = {
+        let mut stmt = db.prepare(
+            "SELECT id, path, depth, community_type FROM communities WHERE depth >= 1 ORDER BY depth ASC, path ASC",
+        )?;
+        let rows = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
             .collect::<Result<Vec<_>, _>>()?;
         rows
     };
 
     let mut updated = 0;
 
-    for (id, path, depth) in &communities {
-        let summary = generate_community_summary(db, path, *depth)?;
+    for (id, path, depth, community_type) in &communities {
+        let summary = generate_community_summary(
+            db,
+            path,
+            *depth,
+            community_type.as_deref().unwrap_or("directory"),
+        )?;
         if !summary.is_empty() {
             db.execute(
                 "UPDATE communities SET summary = ?1, generated_at = datetime('now') WHERE id = ?2",
@@ -109,6 +239,7 @@ fn generate_community_summary(
     db: &Connection,
     path: &str,
     _depth: i64,
+    community_type: &str,
 ) -> Result<String, Box<dyn std::error::Error>> {
     let like_pattern = format!("{}/%", path);
 
@@ -161,6 +292,52 @@ fn generate_community_summary(
         summary.push_str(&top_exports.join(", "));
     }
 
+    match community_type {
+        "module" => {
+            let conn_count: i64 = db
+                .prepare(
+                    "SELECT COUNT(*) FROM relationships r
+                     JOIN chunks c ON r.source_id = c.id AND c.is_deleted = 0
+                     WHERE (c.file_path = ?1 OR c.file_path LIKE ?2) AND r.rel_type = 'imports'",
+                )?
+                .query_row(params![path, like_pattern], |r| r.get(0))
+                .unwrap_or(0);
+
+            let ext_count: i64 = db
+                .prepare(
+                    "SELECT COUNT(DISTINCT CASE
+                        WHEN r.source_id IN (SELECT id FROM chunks WHERE file_path = ?1 OR file_path LIKE ?2)
+                        THEN r.target_id ELSE NULL
+                     END) FROM relationships r
+                     JOIN chunks t ON r.target_id = t.id
+                     WHERE r.rel_type = 'imports'",
+                )?
+                .query_row(params![path, like_pattern], |r| r.get(0))
+                .unwrap_or(0);
+
+            summary.push_str(&format!(
+                ". {} import connections ({} imported from {} distinct modules).",
+                conn_count, conn_count, ext_count
+            ));
+        }
+        "type_hierarchy" => {
+            let has_deps: bool = db
+                .prepare(
+                    "SELECT COUNT(*) FROM entity_dependencies ed
+                     JOIN entities e ON ed.source_entity = e.id
+                     WHERE e.name = ?1 AND ed.valid_to IS NULL",
+                )?
+                .query_row(params![name], |r| r.get::<_, i64>(0))
+                .unwrap_or(0)
+                > 0;
+
+            if has_deps {
+                summary.push_str(&format!(". {} structural relationships.", has_deps));
+            }
+        }
+        _ => {}
+    }
+
     Ok(summary)
 }
 
@@ -182,7 +359,7 @@ pub fn search_communities(
     let like_pattern = format!("%{}%", query);
 
     let mut stmt = db.prepare(
-        "SELECT id, path, depth, name, chunk_count, entity_count, summary, generated_at
+        "SELECT id, path, depth, name, chunk_count, entity_count, summary, generated_at, community_type
          FROM communities
          WHERE path LIKE ?1 OR name LIKE ?1 OR summary LIKE ?1
          ORDER BY chunk_count DESC
@@ -200,6 +377,7 @@ pub fn search_communities(
                 entity_count: r.get(5)?,
                 summary: r.get(6)?,
                 generated_at: r.get(7)?,
+                community_type: r.get(8)?,
             })
         })?
         .collect::<Result<Vec<_>, _>>()?;
