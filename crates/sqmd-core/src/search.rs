@@ -104,8 +104,9 @@ pub fn layered_search(
             layers_hit.push("graph".to_string());
             let existing_ids: std::collections::HashSet<i64> =
                 all_results.iter().map(|r| r.chunk_id).collect();
-            for gc in graph_chunks {
+            for mut gc in graph_chunks {
                 if !existing_ids.contains(&gc.chunk_id) {
+                    gc.score *= 0.7;
                     all_results.push(gc);
                 }
             }
@@ -118,8 +119,9 @@ pub fn layered_search(
             layers_hit.push("community".to_string());
             let existing_ids: std::collections::HashSet<i64> =
                 all_results.iter().map(|r| r.chunk_id).collect();
-            for ch in community_hits {
+            for mut ch in community_hits {
                 if !existing_ids.contains(&ch.chunk_id) {
+                    ch.score *= 0.5;
                     all_results.push(ch);
                 }
             }
@@ -428,8 +430,10 @@ fn fts_content_search(
 ) -> Result<Vec<SearchResult>, Box<dyn std::error::Error>> {
     let mut extra_clauses = Vec::new();
     let fts_safe = escape_fts_query(&query.text);
+    let fts_candidate_limit = (query.top_k * 5).max(50);
+
     let mut param_values: Vec<Box<dyn rusqlite::ToSql>> =
-        vec![Box::new(fts_safe), Box::new(query.top_k as i64)];
+        vec![Box::new(fts_safe), Box::new(fts_candidate_limit as i64)];
     let mut next_param = 3;
 
     if let Some(ref f) = query.file_filter {
@@ -472,7 +476,7 @@ fn fts_content_search(
          snippet(chunks_fts, 2, '>>>', '<<<', '...', 32), c.source_type, c.decay_rate, c.last_accessed, c.importance, c.updated_at \
          FROM chunks_fts f JOIN chunks c ON f.rowid = c.id \
          WHERE chunks_fts MATCH ?1 AND c.is_deleted = 0 {} \
-         ORDER BY f.rank LIMIT ?2",
+         ORDER BY bm25(chunks_fts, 10.0, 5.0, 1.0, 1.0) LIMIT ?2",
         filter_clause
     );
 
@@ -521,6 +525,13 @@ fn fts_content_search(
     let rank_range = (max_rank - min_rank).abs().max(0.001);
 
     let now = chrono_now();
+    let query_tokens: Vec<String> = query
+        .text
+        .split_whitespace()
+        .filter(|t| t.len() > 2)
+        .map(|t| t.to_lowercase())
+        .collect();
+
     let results: Vec<SearchResult> = rows
         .into_iter()
         .map(
@@ -541,8 +552,10 @@ fn fts_content_search(
                 updated_at,
             )| {
                 let normalized = 1.0 - ((rank - min_rank) / rank_range);
+                let name_bonus = name_match_bonus(&name, &sig, &query_tokens);
                 let recency = compute_recency(updated_at.as_deref(), &now);
-                let score = three_factor_score(normalized, recency, importance);
+                let score =
+                    three_factor_score((normalized + name_bonus).min(1.0), recency, importance);
                 SearchResult {
                     chunk_id: id,
                     file_path,
@@ -565,6 +578,56 @@ fn fts_content_search(
         .collect();
 
     Ok(results)
+}
+
+fn name_match_bonus(
+    name: &Option<String>,
+    signature: &Option<String>,
+    query_tokens: &[String],
+) -> f64 {
+    let name_str = match name {
+        Some(n) => n.to_lowercase(),
+        None => return 0.0,
+    };
+
+    let sig_str = signature
+        .as_ref()
+        .map(|s| s.to_lowercase())
+        .unwrap_or_default();
+
+    if query_tokens.is_empty() {
+        return 0.0;
+    }
+
+    let name_match_count: usize = query_tokens
+        .iter()
+        .filter(|t| name_str.contains(t.as_str()))
+        .count();
+
+    let sig_match_count: usize = query_tokens
+        .iter()
+        .filter(|t| sig_str.contains(t.as_str()) && !name_str.contains(t.as_str()))
+        .count();
+
+    let total_matching = name_match_count + sig_match_count;
+    let name_ratio = name_match_count as f64 / query_tokens.len() as f64;
+    let total_ratio = total_matching as f64 / query_tokens.len() as f64;
+
+    if name_ratio >= 0.8 {
+        0.4
+    } else if total_ratio >= 0.8 {
+        0.3
+    } else if name_ratio >= 0.5 {
+        0.25
+    } else if total_ratio >= 0.5 {
+        0.15
+    } else if name_match_count > 0 {
+        0.12
+    } else if total_matching > 0 {
+        0.06
+    } else {
+        0.0
+    }
 }
 
 pub fn vec_search(
