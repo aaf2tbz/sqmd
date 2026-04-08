@@ -264,6 +264,93 @@ impl LanguageChunker for TypeScriptChunker {
         imports
     }
 
+    fn extract_structural_rels(
+        &self,
+        tree: &Tree,
+        source: &str,
+    ) -> Vec<crate::relationships::StructuralRelation> {
+        let mut rels = Vec::new();
+        let root = tree.root_node();
+
+        for node in root.children(&mut root.walk()) {
+            if node.kind() == "class_declaration" {
+                let class_name = node
+                    .child_by_field_name("name")
+                    .and_then(|n| n.utf8_text(source.as_bytes()).ok())
+                    .unwrap_or("")
+                    .trim()
+                    .to_string();
+                if class_name.is_empty() {
+                    continue;
+                }
+
+                if let Some(extends_node) = node.child_by_field_name("extends") {
+                    let parent_name = extends_node
+                        .utf8_text(source.as_bytes())
+                        .unwrap_or("")
+                        .trim()
+                        .to_string();
+                    if !parent_name.is_empty() {
+                        rels.push(crate::relationships::StructuralRelation {
+                            source_name: class_name.clone(),
+                            target_name: parent_name,
+                            rel_type: "extends".to_string(),
+                        });
+                    }
+                }
+
+                if let Some(impls_node) = node.child_by_field_name("implements") {
+                    for child in impls_node.children(&mut impls_node.walk()) {
+                        if child.kind() == "type_identifier" {
+                            let iface_name = child
+                                .utf8_text(source.as_bytes())
+                                .unwrap_or("")
+                                .trim()
+                                .to_string();
+                            if !iface_name.is_empty() {
+                                rels.push(crate::relationships::StructuralRelation {
+                                    source_name: class_name.clone(),
+                                    target_name: iface_name,
+                                    rel_type: "implements".to_string(),
+                                });
+                            }
+                        }
+                    }
+                }
+            } else if node.kind() == "interface_declaration" {
+                let iface_name = node
+                    .child_by_field_name("name")
+                    .and_then(|n| n.utf8_text(source.as_bytes()).ok())
+                    .unwrap_or("")
+                    .trim()
+                    .to_string();
+                if iface_name.is_empty() {
+                    continue;
+                }
+                if let Some(extends_node) = node.child_by_field_name("extends") {
+                    for child in extends_node.children(&mut extends_node.walk()) {
+                        if child.kind() == "type_identifier" {
+                            let parent_name = child
+                                .utf8_text(source.as_bytes())
+                                .unwrap_or("")
+                                .trim()
+                                .to_string();
+                            if !parent_name.is_empty() {
+                                rels.push(crate::relationships::StructuralRelation {
+                                    source_name: iface_name.clone(),
+                                    target_name: parent_name,
+                                    rel_type: "extends".to_string(),
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        rels
+    }
+
     fn chunk_unclaimed(
         &self,
         _tree: &Tree,
@@ -281,40 +368,35 @@ impl LanguageChunker for TypeScriptChunker {
 
         let mut gap_start = 0;
         for (start, end) in &claimed_ranges {
-            let start = *start;
-            let end = *end;
-            if end > gap_start {
-                let gap_size = start.saturating_sub(gap_start);
-                if gap_size > 0 {
-                    let effective_start = gap_start;
-                    let effective_end = std::cmp::min(start, gap_start + max_gap);
-
-                    if effective_end > effective_start {
-                        let text: String = source_lines[effective_start..effective_end].join("\n");
-                        if !text.trim().is_empty() {
-                            chunks.push(Chunk {
-                                file_path: file_path.to_string(),
-                                language: "typescript".to_string(),
-                                chunk_type: ChunkType::Section,
-                                source_type: SourceType::Code,
-                                name: None,
-                                signature: None,
-                                line_start: effective_start,
-                                line_end: effective_end,
-                                content_raw: text.clone(),
-                                importance: ChunkType::Section.importance(),
-                                content_hash: crate::files::content_hash(text.as_bytes()),
-                                metadata: serde_json::Map::new(),
-                                agent_id: None,
-                                tags: None,
-                                decay_rate: 0.0,
-                                created_by: None,
-                            });
-                        }
+            let gap_size = start.saturating_sub(gap_start);
+            if gap_size > 0 && *end > gap_start {
+                let effective_start = gap_start;
+                let effective_end = std::cmp::min(*start, gap_start + max_gap);
+                if effective_end > effective_start {
+                    let text: String = source_lines[effective_start..effective_end].join("\n");
+                    if !text.trim().is_empty() {
+                        chunks.push(Chunk {
+                            file_path: file_path.to_string(),
+                            language: "typescript".to_string(),
+                            chunk_type: ChunkType::Section,
+                            source_type: SourceType::Code,
+                            name: None,
+                            signature: None,
+                            line_start: gap_start,
+                            line_end: effective_end,
+                            content_raw: text.clone(),
+                            importance: ChunkType::Section.importance(),
+                            content_hash: crate::files::content_hash(text.as_bytes()),
+                            metadata: serde_json::Map::new(),
+                            agent_id: None,
+                            tags: None,
+                            decay_rate: 0.0,
+                            created_by: None,
+                        });
                     }
                 }
-                gap_start = end + 1;
             }
+            gap_start = end + 1;
         }
 
         if gap_start < total_lines {

@@ -184,6 +184,48 @@ fn chunk_file_content(
     }
 }
 
+fn extract_structural_rels_for_file(
+    language: &Language,
+    content: &str,
+) -> Vec<crate::relationships::StructuralRelation> {
+    let (result, source_code) = match language.as_str() {
+        "rust" => {
+            let c = crate::languages::rust::RustChunker::new();
+            let (_, tree) = c.chunk(content, "");
+            let rels = tree
+                .as_ref()
+                .map(|t| c.extract_structural_rels(t, content))
+                .unwrap_or_default();
+            (rels, content.to_string())
+        }
+        "typescript" | "javascript" | "tsx" | "jsx" => {
+            let c = if *language == Language::TSX {
+                crate::languages::typescript::TypeScriptChunker::tsx()
+            } else {
+                crate::languages::typescript::TypeScriptChunker::new()
+            };
+            let (_, tree) = c.chunk(content, "");
+            let rels = tree
+                .as_ref()
+                .map(|t| c.extract_structural_rels(t, content))
+                .unwrap_or_default();
+            (rels, content.to_string())
+        }
+        "python" => {
+            let c = crate::languages::python::PythonChunker::new();
+            let (_, tree) = c.chunk(content, "");
+            let rels = tree
+                .as_ref()
+                .map(|t| c.extract_structural_rels(t, content))
+                .unwrap_or_default();
+            (rels, content.to_string())
+        }
+        _ => (Vec::new(), content.to_string()),
+    };
+    let _ = source_code;
+    result
+}
+
 fn get_mtime(path: &Path) -> f64 {
     std::fs::metadata(path)
         .ok()
@@ -335,6 +377,8 @@ impl<'a> Indexer<'a> {
             rel_count += self.decision_write_chunks(&work.relative, chunks, &mut file_decisions)?;
             rel_count += self.write_import_relationships(&work.relative, raw_imports)?;
             self.build_entity_graph(&work.relative, chunks)?;
+            let structural_rels = extract_structural_rels_for_file(&work.language, &work.content);
+            stats.relationships_total += self.write_structural_rels(&structural_rels)?;
 
             stats.files_indexed += 1;
             stats.relationships_total += rel_count;
@@ -772,6 +816,38 @@ impl<'a> Indexer<'a> {
         }
 
         Ok(())
+    }
+
+    fn write_structural_rels(
+        &self,
+        rels: &[crate::relationships::StructuralRelation],
+    ) -> Result<usize, Box<dyn std::error::Error>> {
+        if rels.is_empty() {
+            return Ok(0);
+        }
+
+        let mut count = 0;
+        let mut stmt = self.db.prepare(
+            "INSERT OR IGNORE INTO entity_dependencies (source_entity, target_entity, dep_type, valid_from)
+             VALUES (
+                 (SELECT id FROM entities WHERE canonical_name = ?1),
+                 (SELECT id FROM entities WHERE canonical_name = ?2),
+                 ?3,
+                 datetime('now')
+             )",
+        )?;
+
+        for rel in rels {
+            let src_canon = entities::canonicalize(&rel.source_name);
+            let tgt_canon = entities::canonicalize(&rel.target_name);
+            if src_canon.is_empty() || tgt_canon.is_empty() {
+                continue;
+            }
+            stmt.execute(params![src_canon, tgt_canon, &rel.rel_type])?;
+            count += 1;
+        }
+
+        Ok(count)
     }
 
     fn tombstone_file_chunks(&self, relative: &str) -> Result<(), Box<dyn std::error::Error>> {

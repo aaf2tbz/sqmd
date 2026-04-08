@@ -7,6 +7,13 @@ pub struct ImportInfo {
     pub names: Vec<String>,
 }
 
+#[derive(Debug, Clone)]
+pub struct StructuralRelation {
+    pub source_name: String,
+    pub target_name: String,
+    pub rel_type: String,
+}
+
 #[allow(clippy::type_complexity)]
 pub fn resolve_imports(
     db: &rusqlite::Connection,

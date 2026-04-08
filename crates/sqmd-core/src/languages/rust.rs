@@ -426,6 +426,78 @@ impl LanguageChunker for RustChunker {
             }
         }
     }
+
+    fn extract_structural_rels(
+        &self,
+        tree: &Tree,
+        source: &str,
+    ) -> Vec<crate::relationships::StructuralRelation> {
+        let mut rels = Vec::new();
+        let root = tree.root_node();
+
+        for node in root.children(&mut root.walk()) {
+            match node.kind() {
+                "impl_item" => {
+                    let trait_node = node.child_by_field_name("trait");
+                    let type_node = node.child_by_field_name("type");
+                    if let (Some(trait_n), Some(type_n)) = (trait_node, type_node) {
+                        let trait_name = trait_n
+                            .utf8_text(source.as_bytes())
+                            .unwrap_or("")
+                            .trim()
+                            .to_string();
+                        let type_name = type_n
+                            .utf8_text(source.as_bytes())
+                            .unwrap_or("")
+                            .trim()
+                            .to_string();
+                        if !trait_name.is_empty() && !type_name.is_empty() {
+                            rels.push(crate::relationships::StructuralRelation {
+                                source_name: type_name,
+                                target_name: trait_name,
+                                rel_type: "implements".to_string(),
+                            });
+                        }
+                    }
+                }
+                "struct_item" => {
+                    if let Some(field_list) = node.child_by_field_name("body") {
+                        for child in field_list.children(&mut field_list.walk()) {
+                            if child.kind() == "field_declaration" {
+                                if let Some(type_n) = child.child_by_field_name("type") {
+                                    let type_name = type_n
+                                        .utf8_text(source.as_bytes())
+                                        .unwrap_or("")
+                                        .trim()
+                                        .to_string();
+                                    if !type_name.is_empty()
+                                        && type_name.starts_with(|c: char| c.is_uppercase())
+                                    {
+                                        let struct_name = node
+                                            .child_by_field_name("name")
+                                            .and_then(|n| n.utf8_text(source.as_bytes()).ok())
+                                            .unwrap_or("")
+                                            .trim()
+                                            .to_string();
+                                        if !struct_name.is_empty() {
+                                            rels.push(crate::relationships::StructuralRelation {
+                                                source_name: struct_name,
+                                                target_name: type_name,
+                                                rel_type: "contains".to_string(),
+                                            });
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        rels
+    }
 }
 
 fn parse_use_path(text: &str, module_path: &mut String, names: &mut Vec<String>) {
