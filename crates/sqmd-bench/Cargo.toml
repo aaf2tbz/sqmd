@@ -3,6 +3,10 @@ name = "sqmd-bench"
 version = "0.2.0"
 edition = "2021"
 
+[features]
+default = []
+embed = ["sqmd-core/embed"]
+
 [dependencies]
 sqmd-core = { path = "../sqmd-core" }
 rusqlite = { version = "0.34", features = ["bundled"] }
