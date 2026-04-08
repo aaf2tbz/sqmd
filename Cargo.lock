@@ -1620,7 +1620,7 @@ dependencies = [
 
 [[package]]
 name = "sqmd-bench"
-version = "0.1.0"
+version = "2.0.0"
 dependencies = [
  "rusqlite",
  "serde",
@@ -1630,7 +1630,7 @@ dependencies = [
 
 [[package]]
 name = "sqmd-cli"
-version = "1.0.0"
+version = "2.0.0"
 dependencies = [
  "clap",
  "rusqlite",
@@ -1640,7 +1640,7 @@ dependencies = [
 
 [[package]]
 name = "sqmd-core"
-version = "1.0.0"
+version = "2.0.0"
 dependencies = [
  "chrono",
  "ignore",
