@@ -2,7 +2,7 @@ use rusqlite::{Connection, Result as SqlResult};
 use sqlite_vec::sqlite3_vec_init;
 use std::path::Path;
 
-const CURRENT_VERSION: i64 = 10;
+const CURRENT_VERSION: i64 = 11;
 
 pub fn init(db: &mut Connection) -> SqlResult<()> {
     #[allow(clippy::missing_transmute_annotations)]
@@ -66,6 +66,9 @@ pub fn init(db: &mut Connection) -> SqlResult<()> {
             if sql_version < 10 {
                 migrate_v10(db)?;
             }
+            if sql_version < 11 {
+                migrate_v11(db)?;
+            }
         }
         return Ok(());
     }
@@ -104,6 +107,10 @@ pub fn init(db: &mut Connection) -> SqlResult<()> {
 
     if version < 10 {
         migrate_v10(db)?;
+    }
+
+    if version < 11 {
+        migrate_v11(db)?;
     }
 
     Ok(())
@@ -719,6 +726,58 @@ fn migrate_v10(db: &mut Connection) -> SqlResult<()> {
     }
 
     db.execute_batch("INSERT OR IGNORE INTO schema_version (version) VALUES (10);")?;
+    Ok(())
+}
+
+fn migrate_v11(db: &mut Connection) -> SqlResult<()> {
+    let has_comm_type: bool = db
+        .prepare(
+            "SELECT COUNT(*) FROM pragma_table_info('communities') WHERE name='community_type'",
+        )?
+        .query_row([], |r| r.get::<_, i64>(0))
+        .map(|c| c > 0)
+        .unwrap_or(false);
+
+    if !has_comm_type {
+        db.execute_batch("PRAGMA foreign_keys = OFF;")?;
+
+        db.execute_batch(
+            "CREATE TABLE IF NOT EXISTS communities_v11 (
+                id INTEGER PRIMARY KEY,
+                path TEXT NOT NULL,
+                depth INTEGER NOT NULL DEFAULT 1,
+                name TEXT NOT NULL,
+                chunk_count INTEGER NOT NULL DEFAULT 0,
+                entity_count INTEGER NOT NULL DEFAULT 0,
+                summary TEXT,
+                generated_at TEXT,
+                created_at TEXT NOT NULL DEFAULT '',
+                community_type TEXT NOT NULL DEFAULT 'directory',
+                CONSTRAINT uq_comm_path_type UNIQUE(path, community_type)
+            );",
+        )?;
+
+        db.execute_batch(
+            "INSERT INTO communities_v11 (id, path, depth, name, chunk_count, entity_count, summary, generated_at, created_at)
+             SELECT id, path, depth, name, chunk_count, entity_count, summary, generated_at, created_at
+             FROM communities;",
+        )?;
+
+        db.execute_batch("DROP TABLE communities;")?;
+        db.execute_batch("ALTER TABLE communities_v11 RENAME TO communities;")?;
+
+        db.execute_batch("CREATE INDEX IF NOT EXISTS idx_communities_path ON communities(path);")?;
+        db.execute_batch(
+            "CREATE INDEX IF NOT EXISTS idx_communities_type ON communities(community_type);",
+        )?;
+        db.execute_batch(
+            "CREATE INDEX IF NOT EXISTS idx_communities_depth ON communities(depth);",
+        )?;
+
+        db.execute_batch("PRAGMA foreign_keys = ON;")?;
+    }
+
+    db.execute_batch("INSERT OR IGNORE INTO schema_version (version) VALUES (11);")?;
     Ok(())
 }
 
