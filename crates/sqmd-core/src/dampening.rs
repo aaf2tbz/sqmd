@@ -50,11 +50,11 @@ fn diversity(results: &mut [SearchResult]) {
 }
 
 /// Boost results with higher importance field.
-/// importance=0.0 → 0.7x, importance=1.0 → 1.0x
+/// importance=0.0 → 0.85x, importance=1.0 → 1.0x
 pub fn importance_boost(results: &mut [SearchResult]) {
     for r in results.iter_mut() {
         let importance = r.importance;
-        r.score *= 0.7 + 0.3 * importance;
+        r.score *= 0.85 + 0.15 * importance;
     }
 }
 

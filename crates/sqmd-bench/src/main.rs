@@ -9,6 +9,7 @@ struct GroundTruth {
     target_file: &'static str,
     target_function: &'static str,
     difficulty: Difficulty,
+    expected_layers: Vec<&'static str>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -32,6 +33,8 @@ struct QueryResult {
     top_file_match: Option<usize>,
     score: f64,
     results_returned: usize,
+    layers_hit: Vec<String>,
+    entity_found: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -43,7 +46,9 @@ struct BenchmarkReport {
     recall_at_10: f64,
     file_recall_at_10: f64,
     mrr: f64,
+    entity_hit_rate: f64,
     avg_results: f64,
+    layers_hit_distribution: serde_json::Map<String, serde_json::Value>,
     by_category: serde_json::Map<String, serde_json::Value>,
     by_difficulty: serde_json::Map<String, serde_json::Value>,
     results: Vec<QueryResult>,
@@ -51,7 +56,7 @@ struct BenchmarkReport {
 
 fn ground_truth() -> Vec<GroundTruth> {
     vec![
-        // === Core Data Structures (Easy) ===
+        // === Core Data Structures ===
         GroundTruth {
             id: "ds-1",
             query: "look up a key for a read operation",
@@ -59,6 +64,7 @@ fn ground_truth() -> Vec<GroundTruth> {
             target_file: "src/db.c",
             target_function: "lookupKeyReadWithFlags",
             difficulty: Difficulty::Easy,
+            expected_layers: vec!["fts"],
         },
         GroundTruth {
             id: "ds-2",
@@ -67,6 +73,7 @@ fn ground_truth() -> Vec<GroundTruth> {
             target_file: "src/db.c",
             target_function: "setKey",
             difficulty: Difficulty::Easy,
+            expected_layers: vec!["fts"],
         },
         GroundTruth {
             id: "ds-3",
@@ -75,6 +82,7 @@ fn ground_truth() -> Vec<GroundTruth> {
             target_file: "src/dict.c",
             target_function: "dictRehash",
             difficulty: Difficulty::Medium,
+            expected_layers: vec!["fts"],
         },
         GroundTruth {
             id: "ds-4",
@@ -83,6 +91,7 @@ fn ground_truth() -> Vec<GroundTruth> {
             target_file: "src/dict.c",
             target_function: "dictAdd",
             difficulty: Difficulty::Easy,
+            expected_layers: vec!["fts"],
         },
         GroundTruth {
             id: "ds-5",
@@ -91,6 +100,7 @@ fn ground_truth() -> Vec<GroundTruth> {
             target_file: "src/t_zset.c",
             target_function: "zsetAdd",
             difficulty: Difficulty::Easy,
+            expected_layers: vec!["fts"],
         },
         GroundTruth {
             id: "ds-6",
@@ -99,8 +109,36 @@ fn ground_truth() -> Vec<GroundTruth> {
             target_file: "src/t_list.c",
             target_function: "listTypePush",
             difficulty: Difficulty::Easy,
+            expected_layers: vec!["fts"],
         },
-        // === Replication / Persistence (Medium) ===
+        GroundTruth {
+            id: "ds-7",
+            query: "insert a node into the skip list",
+            category: "data_structures",
+            target_file: "src/t_zset.c",
+            target_function: "zslInsert",
+            difficulty: Difficulty::Hard,
+            expected_layers: vec!["fts", "graph"],
+        },
+        GroundTruth {
+            id: "ds-8",
+            query: "add a member to a set",
+            category: "data_structures",
+            target_file: "src/t_set.c",
+            target_function: "setTypeAdd",
+            difficulty: Difficulty::Easy,
+            expected_layers: vec!["fts"],
+        },
+        GroundTruth {
+            id: "ds-9",
+            query: "set a field in a hash",
+            category: "data_structures",
+            target_file: "src/t_hash.c",
+            target_function: "hashTypeSet",
+            difficulty: Difficulty::Easy,
+            expected_layers: vec!["fts"],
+        },
+        // === Persistence ===
         GroundTruth {
             id: "rp-1",
             query: "serialize objects to RDB format",
@@ -108,6 +146,7 @@ fn ground_truth() -> Vec<GroundTruth> {
             target_file: "src/rdb.c",
             target_function: "rdbSaveObject",
             difficulty: Difficulty::Medium,
+            expected_layers: vec!["fts"],
         },
         GroundTruth {
             id: "rp-2",
@@ -116,6 +155,7 @@ fn ground_truth() -> Vec<GroundTruth> {
             target_file: "src/rdb.c",
             target_function: "rdbLoadObject",
             difficulty: Difficulty::Medium,
+            expected_layers: vec!["fts"],
         },
         GroundTruth {
             id: "rp-3",
@@ -124,8 +164,9 @@ fn ground_truth() -> Vec<GroundTruth> {
             target_file: "src/aof.c",
             target_function: "flushAppendOnlyFile",
             difficulty: Difficulty::Medium,
+            expected_layers: vec!["fts"],
         },
-        // === Networking (Medium) ===
+        // === Networking ===
         GroundTruth {
             id: "net-1",
             query: "create a new client connection",
@@ -133,6 +174,7 @@ fn ground_truth() -> Vec<GroundTruth> {
             target_file: "src/networking.c",
             target_function: "createClient",
             difficulty: Difficulty::Easy,
+            expected_layers: vec!["fts"],
         },
         GroundTruth {
             id: "net-2",
@@ -141,6 +183,7 @@ fn ground_truth() -> Vec<GroundTruth> {
             target_file: "src/networking.c",
             target_function: "readQueryFromClient",
             difficulty: Difficulty::Medium,
+            expected_layers: vec!["fts"],
         },
         GroundTruth {
             id: "net-3",
@@ -149,8 +192,9 @@ fn ground_truth() -> Vec<GroundTruth> {
             target_file: "src/networking.c",
             target_function: "processInputBuffer",
             difficulty: Difficulty::Medium,
+            expected_layers: vec!["fts"],
         },
-        // === Pub/Sub & Clustering (Hard) ===
+        // === Pub/Sub ===
         GroundTruth {
             id: "ps-1",
             query: "publish a message to channel subscribers",
@@ -158,6 +202,7 @@ fn ground_truth() -> Vec<GroundTruth> {
             target_file: "src/pubsub.c",
             target_function: "pubsubPublishMessage",
             difficulty: Difficulty::Easy,
+            expected_layers: vec!["fts"],
         },
         GroundTruth {
             id: "ps-2",
@@ -166,16 +211,28 @@ fn ground_truth() -> Vec<GroundTruth> {
             target_file: "src/pubsub.c",
             target_function: "pubsubSubscribeChannel",
             difficulty: Difficulty::Easy,
+            expected_layers: vec!["fts"],
         },
+        // === Clustering ===
         GroundTruth {
-            id: "ps-3",
+            id: "cl-1",
             query: "determine which cluster node should handle a command",
             category: "clustering",
             target_file: "src/cluster.c",
             target_function: "getNodeByQuery",
             difficulty: Difficulty::Hard,
+            expected_layers: vec!["fts", "graph"],
         },
-        // === Lua Scripting (Hard) ===
+        GroundTruth {
+            id: "cl-2",
+            query: "process cluster gossip and heartbeat messages",
+            category: "clustering",
+            target_file: "src/cluster_legacy.c",
+            target_function: "clusterProcessPacket",
+            difficulty: Difficulty::Hard,
+            expected_layers: vec!["fts", "graph"],
+        },
+        // === Scripting ===
         GroundTruth {
             id: "lua-1",
             query: "execute a Lua EVAL command",
@@ -183,6 +240,7 @@ fn ground_truth() -> Vec<GroundTruth> {
             target_file: "src/eval.c",
             target_function: "evalGenericCommand",
             difficulty: Difficulty::Medium,
+            expected_layers: vec!["fts"],
         },
         GroundTruth {
             id: "lua-2",
@@ -191,6 +249,7 @@ fn ground_truth() -> Vec<GroundTruth> {
             target_file: "src/script_lua.c",
             target_function: "luaRedisGenericCommand",
             difficulty: Difficulty::Hard,
+            expected_layers: vec!["fts", "graph"],
         },
         GroundTruth {
             id: "lua-3",
@@ -199,8 +258,9 @@ fn ground_truth() -> Vec<GroundTruth> {
             target_file: "src/script_lua.c",
             target_function: "luaRegisterRedisAPI",
             difficulty: Difficulty::Hard,
+            expected_layers: vec!["fts", "graph"],
         },
-        // === Bonus: Expiration (Hard) ===
+        // === Expiration ===
         GroundTruth {
             id: "exp-1",
             query: "proactively expire keys in the background",
@@ -208,6 +268,7 @@ fn ground_truth() -> Vec<GroundTruth> {
             target_file: "src/expire.c",
             target_function: "activeExpireCycle",
             difficulty: Difficulty::Medium,
+            expected_layers: vec!["fts"],
         },
         GroundTruth {
             id: "exp-2",
@@ -216,34 +277,9 @@ fn ground_truth() -> Vec<GroundTruth> {
             target_file: "src/db.c",
             target_function: "expireIfNeeded",
             difficulty: Difficulty::Medium,
+            expected_layers: vec!["fts", "graph"],
         },
-        // === Bonus: Skip List (Hard) ===
-        GroundTruth {
-            id: "sl-1",
-            query: "insert a node into the sorted set skip list",
-            category: "data_structures",
-            target_file: "src/t_zset.c",
-            target_function: "zslInsert",
-            difficulty: Difficulty::Hard,
-        },
-        // === Bonus: Set/Hash (Easy) ===
-        GroundTruth {
-            id: "set-1",
-            query: "add a member to a set",
-            category: "data_structures",
-            target_file: "src/t_set.c",
-            target_function: "setTypeAdd",
-            difficulty: Difficulty::Easy,
-        },
-        GroundTruth {
-            id: "hash-1",
-            query: "set a field in a hash",
-            category: "data_structures",
-            target_file: "src/t_hash.c",
-            target_function: "hashTypeSet",
-            difficulty: Difficulty::Easy,
-        },
-        // === Bonus: Replication (Medium) ===
+        // === Replication ===
         GroundTruth {
             id: "rep-1",
             query: "replicate write commands to slave nodes",
@@ -251,15 +287,81 @@ fn ground_truth() -> Vec<GroundTruth> {
             target_file: "src/replication.c",
             target_function: "replicationFeedSlaves",
             difficulty: Difficulty::Medium,
+            expected_layers: vec!["fts"],
         },
-        // === Bonus: Cluster internals (Hard) ===
+        // === Graph traversal tests (require entity graph + relationships) ===
         GroundTruth {
-            id: "cl-1",
-            query: "process cluster gossip and heartbeat messages",
-            category: "clustering",
-            target_file: "src/cluster_legacy.c",
-            target_function: "clusterProcessPacket",
+            id: "graph-1",
+            query: "what functions call lookupKeyReadWithFlags",
+            category: "graph_traversal",
+            target_file: "src/db.c",
+            target_function: "lookupKeyReadWithFlags",
+            difficulty: Difficulty::Medium,
+            expected_layers: vec!["fts"],
+        },
+        GroundTruth {
+            id: "graph-2",
+            query: "where is the main server event loop",
+            category: "graph_traversal",
+            target_file: "src/server.c",
+            target_function: "aeMain",
+            difficulty: Difficulty::Medium,
+            expected_layers: vec!["fts", "community"],
+        },
+        GroundTruth {
+            id: "graph-3",
+            query: "how are client connections managed during replication",
+            category: "graph_traversal",
+            target_file: "src/replication.c",
+            target_function: "replicationFeedSlaves",
             difficulty: Difficulty::Hard,
+            expected_layers: vec!["fts", "graph", "community"],
+        },
+        GroundTruth {
+            id: "graph-4",
+            query: "cluster slot migration between nodes",
+            category: "graph_traversal",
+            target_file: "src/cluster.c",
+            target_function: "migrateSlot",
+            difficulty: Difficulty::Hard,
+            expected_layers: vec!["fts", "graph"],
+        },
+        GroundTruth {
+            id: "graph-5",
+            query: "what data structures are used for command dispatch",
+            category: "graph_traversal",
+            target_file: "src/server.c",
+            target_function: "lookupCommand",
+            difficulty: Difficulty::Medium,
+            expected_layers: vec!["fts"],
+        },
+        // === Community detection tests ===
+        GroundTruth {
+            id: "comm-1",
+            query: "all networking and client handling code",
+            category: "community",
+            target_file: "src/networking.c",
+            target_function: "createClient",
+            difficulty: Difficulty::Medium,
+            expected_layers: vec!["fts", "community"],
+        },
+        GroundTruth {
+            id: "comm-2",
+            query: "persistence and snapshotting system",
+            category: "community",
+            target_file: "src/rdb.c",
+            target_function: "rdbSaveObject",
+            difficulty: Difficulty::Medium,
+            expected_layers: vec!["fts", "community"],
+        },
+        GroundTruth {
+            id: "comm-3",
+            query: "module loading and initialization",
+            category: "community",
+            target_file: "src/module.c",
+            target_function: "moduleLoad",
+            difficulty: Difficulty::Medium,
+            expected_layers: vec!["fts", "community"],
         },
     ]
 }
@@ -270,15 +372,21 @@ fn main() {
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(".sqmd/index.db"));
 
+    let mode = std::env::args()
+        .nth(2)
+        .unwrap_or_else(|| "layered".to_string());
+
     if !db_path.exists() {
         eprintln!("Database not found at {:?}", db_path);
-        eprintln!("Usage: sqmd-bench [path/to/index.db]");
+        eprintln!("Usage: sqmd-bench [path/to/index.db] [fts|layered]");
         std::process::exit(1);
     }
 
     let db = sqmd_core::schema::open(&db_path).expect("Failed to open database");
     let queries = ground_truth();
     let total = queries.len();
+
+    eprintln!("sqmd-bench v0.2.0 | {} queries | mode: {}", total, mode);
 
     let mut results: Vec<QueryResult> = Vec::with_capacity(total);
 
@@ -291,7 +399,16 @@ fn main() {
             ..Default::default()
         };
 
-        let search_results = sqmd_core::search::fts_search(&db, &search_query).unwrap_or_default();
+        let search_results = match mode.as_str() {
+            "fts" => sqmd_core::search::fts_search(&db, &search_query).unwrap_or_default(),
+            "layered" => sqmd_core::search::layered_search(&db, &search_query)
+                .map(|lr| lr.results)
+                .unwrap_or_default(),
+            _ => {
+                eprintln!("Unknown mode '{}'. Use 'fts' or 'layered'.", mode);
+                std::process::exit(1);
+            }
+        };
 
         let mut found = false;
         let mut rank = None;
@@ -316,6 +433,16 @@ fn main() {
 
         let top_score = search_results.first().map(|r| r.score).unwrap_or(0.0);
 
+        let entity_found = check_entity_exists(&db, gt.target_function, gt.target_file);
+
+        let layers_hit = if mode == "layered" {
+            sqmd_core::search::layered_search(&db, &search_query)
+                .map(|lr| lr.layers_hit)
+                .unwrap_or_default()
+        } else {
+            vec!["fts".to_string()]
+        };
+
         results.push(QueryResult {
             id: gt.id.to_string(),
             query: gt.query.to_string(),
@@ -328,6 +455,8 @@ fn main() {
             top_file_match,
             score: top_score,
             results_returned: search_results.len(),
+            layers_hit,
+            entity_found,
         });
     }
 
@@ -358,6 +487,21 @@ fn main() {
         / total as f64;
     let avg_results =
         results.iter().map(|r| r.results_returned).sum::<usize>() as f64 / total as f64;
+    let entity_hit_rate = results.iter().filter(|r| r.entity_found).count() as f64 / total as f64;
+
+    let mut layers_hit_dist: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
+    for r in &results {
+        for layer in &r.layers_hit {
+            let count = layers_hit_dist
+                .get(layer)
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0) as usize;
+            layers_hit_dist.insert(
+                layer.clone(),
+                serde_json::Value::Number(serde_json::Number::from(count + 1)),
+            );
+        }
+    }
 
     let mut by_category: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
     let mut by_difficulty: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
@@ -388,6 +532,7 @@ fn main() {
             })
             .sum::<f64>()
             / cat_total;
+        let cat_entity = cat_results.iter().filter(|r| r.entity_found).count() as f64 / cat_total;
         let mut m = serde_json::Map::new();
         m.insert(
             "total".into(),
@@ -395,6 +540,10 @@ fn main() {
         );
         m.insert("recall_at_10".into(), serde_json::Value::from(cat_recall));
         m.insert("mrr".into(), serde_json::Value::from(cat_mrr));
+        m.insert(
+            "entity_hit_rate".into(),
+            serde_json::Value::from(cat_entity),
+        );
         by_category.insert(cat.to_string(), serde_json::Value::Object(m));
     }
 
@@ -429,11 +578,22 @@ fn main() {
         recall_at_10,
         file_recall_at_10,
         mrr,
+        entity_hit_rate,
         avg_results,
+        layers_hit_distribution: layers_hit_dist,
         by_category,
         by_difficulty,
         results,
     };
 
     println!("{}", serde_json::to_string_pretty(&report).unwrap());
+}
+
+fn check_entity_exists(db: &rusqlite::Connection, function_name: &str, file_path: &str) -> bool {
+    let result = db.query_row(
+        "SELECT COUNT(*) FROM entities WHERE name = ?1 AND file_path = ?2",
+        rusqlite::params![function_name, file_path],
+        |r| r.get::<_, i64>(0),
+    );
+    result.unwrap_or(0) > 0
 }
