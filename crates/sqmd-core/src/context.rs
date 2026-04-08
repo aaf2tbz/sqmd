@@ -59,6 +59,7 @@ impl ContextAssembler {
             let search_query = crate::search::SearchQuery {
                 text: request.query.clone(),
                 top_k: request.top_k,
+                source_type_filter: request.source_types.clone(),
                 ..Default::default()
             };
             #[cfg(feature = "embed")]
@@ -466,5 +467,53 @@ mod tests {
             .iter()
             .any(|s| s.name.as_deref() == Some("login"));
         assert!(has_login);
+    }
+
+    #[test]
+    fn test_context_source_type_filter() {
+        let mut db = Connection::open_in_memory().unwrap();
+        crate::schema::init(&mut db).unwrap();
+        db.execute(
+            "INSERT INTO files (path, language, size, mtime, hash) VALUES ('src/app.ts', 'typescript', 200, 0.0, 'a')",
+            [],
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO chunks (id, file_path, language, chunk_type, name, signature, line_start, line_end, content_raw, content_hash, source_type, importance)
+             VALUES (1, 'src/app.ts', 'typescript', 'function', 'login', 'login(u: string)', 0, 5, 'async function login(u) { return db.find(u); }', 'x', 'code', 0.9)",
+            [],
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO chunks (id, file_path, language, chunk_type, name, signature, line_start, line_end, content_raw, content_hash, source_type, importance)
+             VALUES (2, 'src/app.ts', 'typescript', 'fact', 'note', '()', 7, 10, 'Users prefer dark mode', 'y', 'memory', 0.8)",
+            [],
+        )
+        .unwrap();
+
+        let req = ContextRequest {
+            query: "login user".to_string(),
+            files: vec![],
+            max_tokens: 10000,
+            include_deps: false,
+            dep_depth: 0,
+            top_k: 10,
+            source_types: Some(vec!["code".to_string()]),
+        };
+        let resp = ContextAssembler::build(&db, &req).unwrap();
+        assert!(
+            resp.sources.iter().all(|s| s.source_type == "code"),
+            "should only contain code chunks, got: {:?}",
+            resp.sources
+                .iter()
+                .map(|s| &s.source_type)
+                .collect::<Vec<_>>()
+        );
+        assert!(resp.chunk_count >= 1);
+        let has_login = resp
+            .sources
+            .iter()
+            .any(|s| s.name.as_deref() == Some("login"));
+        assert!(has_login, "should include login function");
     }
 }
