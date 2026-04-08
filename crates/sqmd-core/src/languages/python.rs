@@ -362,6 +362,52 @@ impl LanguageChunker for PythonChunker {
 
         imports
     }
+
+    fn extract_structural_rels(
+        &self,
+        tree: &Tree,
+        source: &str,
+    ) -> Vec<crate::relationships::StructuralRelation> {
+        let mut rels = Vec::new();
+        let root = tree.root_node();
+
+        for node in root.children(&mut root.walk()) {
+            if node.kind() == "class_definition" {
+                let class_name = node
+                    .child_by_field_name("name")
+                    .and_then(|n| n.utf8_text(source.as_bytes()).ok())
+                    .unwrap_or("")
+                    .trim()
+                    .to_string();
+                if class_name.is_empty() {
+                    continue;
+                }
+
+                if let Some(superclasses) = node.child_by_field_name("superclasses") {
+                    for arg in
+                        superclasses.children_by_field_name("argument", &mut superclasses.walk())
+                    {
+                        let parent_name = arg
+                            .child_by_field_name("argument")
+                            .or_else(|| arg.child_by_field_name("identifier"))
+                            .and_then(|n| n.utf8_text(source.as_bytes()).ok())
+                            .unwrap_or("")
+                            .trim()
+                            .to_string();
+                        if !parent_name.is_empty() {
+                            rels.push(crate::relationships::StructuralRelation {
+                                source_name: class_name.clone(),
+                                target_name: parent_name,
+                                rel_type: "extends".to_string(),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        rels
+    }
 }
 
 #[cfg(test)]

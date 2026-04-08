@@ -60,6 +60,14 @@ pub trait LanguageChunker: Send + Sync {
         let _ = (source, file_path);
         Vec::new()
     }
+
+    fn extract_structural_rels(
+        &self,
+        _tree: &Tree,
+        _source: &str,
+    ) -> Vec<crate::relationships::StructuralRelation> {
+        Vec::new()
+    }
 }
 
 fn lines_before(node: Node, source: &str, count: usize) -> String {
