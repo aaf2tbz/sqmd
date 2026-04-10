@@ -830,9 +830,8 @@ fn cmd_compare(db_path: &PathBuf, ground_truth_path: &str) {
                 }
             }
 
-            match rank {
-                Some(1) => hit_at_1 += 1,
-                _ => {}
+            if let Some(1) = rank {
+                hit_at_1 += 1;
             }
             if rank.is_some_and(|r| r <= 3) {
                 hit_at_3 += 1;
