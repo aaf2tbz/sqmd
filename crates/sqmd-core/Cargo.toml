@@ -5,7 +5,7 @@ edition = "2021"
 
 [features]
 default = []
-embed = ["dep:ort", "dep:ndarray", "dep:ureq", "dep:tokenizers"]
+embed = ["dep:ureq"]
 ollama = ["dep:ureq"]
 
 [dependencies]
@@ -15,10 +15,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
 thiserror = "2"
-ort = { version = "2.0.0-rc.12", optional = true }
-ndarray = { version = "0.17", optional = true }
 ureq = { version = "3", optional = true, features = ["json"] }
-tokenizers = { version = "0.21", optional = true }
 ignore = "0.4"
 walkdir = "2"
 tree-sitter = "0.24"
