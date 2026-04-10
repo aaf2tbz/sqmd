@@ -5,6 +5,12 @@ pub struct OllamaClient {
     model: String,
 }
 
+impl Default for OllamaClient {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl OllamaClient {
     pub fn new() -> Self {
         let base_url =

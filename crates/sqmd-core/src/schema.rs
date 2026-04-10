@@ -26,6 +26,12 @@ pub fn init(db: &mut Connection) -> SqlResult<()> {
         eprintln!("[schema] chunks_vec creation failed: {e}");
     }
 
+    if let Err(e) = db.execute_batch(
+        "CREATE VIRTUAL TABLE IF NOT EXISTS hints_vec USING vec0(embedding float[768]);",
+    ) {
+        eprintln!("[schema] hints_vec creation failed: {e}");
+    }
+
     let version: i64 = db
         .query_row(
             "SELECT COALESCE(MAX(version), 0) FROM schema_version",

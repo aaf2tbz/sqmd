@@ -697,9 +697,9 @@ fn cmd_generate(db_path: &PathBuf, limit: usize, output: &str) {
     let db = sqmd_core::schema::open(db_path).expect("Failed to open database");
 
     let mut stmt = db.prepare(
-        "SELECT c.id, c.file_path, c.name, c.content_raw, c.chunk_type, c.language, c.importance \
-         FROM chunks c WHERE c.is_deleted = 0 AND c.name IS NOT NULL AND c.importance >= 0.5 \
-         ORDER BY c.importance DESC LIMIT ?1",
+         "SELECT c.id, c.file_path, c.name, c.content_raw, c.chunk_type, c.language, c.importance \
+          FROM chunks c WHERE c.is_deleted = 0 AND c.name IS NOT NULL AND c.importance >= 0.2 \
+          ORDER BY c.importance DESC LIMIT ?1",
     ).unwrap();
 
     let rows: Vec<(i64, String, String, String, String, String, f64)> = stmt
@@ -750,7 +750,7 @@ fn cmd_generate(db_path: &PathBuf, limit: usize, output: &str) {
 fn generate_eval_query(name: &str, content: &str) -> String {
     #[cfg(feature = "ollama")]
     {
-        if let Ok(client) = std::panic::catch_unwind(|| sqmd_core::ollama::OllamaClient::new()) {
+        if let Ok(client) = std::panic::catch_unwind(sqmd_core::ollama::OllamaClient::new) {
             if let Ok(hints) = client.generate_prospective_hints(content) {
                 if let Some(first) = hints.into_iter().next() {
                     return first;
@@ -792,6 +792,13 @@ fn cmd_compare(db_path: &PathBuf, ground_truth_path: &str) {
         lanes: serde_json::Map::new(),
     };
 
+    #[cfg(feature = "embed")]
+    let lanes = {
+        let mut l = vec![("fts", "fts"), ("layered", "layered")];
+        l.push(("hybrid", "hybrid"));
+        l
+    };
+    #[cfg(not(feature = "embed"))]
     let lanes = vec![("fts", "fts"), ("layered", "layered")];
 
     for (lane_name, lane_mode) in &lanes {

@@ -83,7 +83,7 @@ pub fn ensure_communities(db: &Connection) -> Result<usize, Box<dyn std::error::
 pub fn ensure_graph_communities(db: &Connection) -> Result<usize, Box<dyn std::error::Error>> {
     let mut count = 0;
 
-    let module_rows: Vec<(String, i64)> = {
+    let module_rows: Vec<(String, String)> = {
         let mut stmt = db.prepare(
             "SELECT c.file_path, t.file_path
              FROM relationships r
@@ -94,7 +94,7 @@ pub fn ensure_graph_communities(db: &Connection) -> Result<usize, Box<dyn std::e
              GROUP BY c.file_path, t.file_path",
         )?;
         let rows = stmt
-            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
             .collect::<Result<Vec<_>, _>>()?;
         rows
     };
