@@ -173,6 +173,22 @@ fn chunk_file_content(
                 .unwrap_or_default();
             (chunks, imports)
         }
+        Language::Html => {
+            let c = crate::languages::html::HtmlChunker::new();
+            let (chunks, tree) = c.chunk(content, relative);
+            let imports = tree
+                .map(|t| c.extract_imports(&t, content))
+                .unwrap_or_default();
+            (chunks, imports)
+        }
+        Language::Css => {
+            let c = crate::languages::css::CssChunker::new();
+            let (chunks, tree) = c.chunk(content, relative);
+            let imports = tree
+                .map(|t| c.extract_imports(&t, content))
+                .unwrap_or_default();
+            (chunks, imports)
+        }
         Language::Markdown => {
             let chunks = crate::languages::markdown::MarkdownChunker::chunk(content, relative);
             (chunks, Vec::new())
