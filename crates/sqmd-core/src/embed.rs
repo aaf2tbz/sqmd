@@ -1,10 +1,7 @@
 use std::io::Read;
 
-const DEFAULT_MODEL: &str = "nomic-embed-text:latest";
-const DIMS: usize = 768;
-
-const QUERY_PREFIX: &str = "search_query: ";
-const DOCUMENT_PREFIX: &str = "search_document: ";
+const DEFAULT_MODEL: &str = "mxbai-embed-large";
+const DIMS: usize = 1024;
 
 pub struct Embedder {
     base_url: String,
@@ -43,79 +40,30 @@ impl Embedder {
     }
 
     pub fn embed_one(&mut self, text: &str) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
-        self.embed_with_prefix(text, "")
-    }
-
-    pub fn embed_query(&mut self, text: &str) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
-        self.embed_with_prefix(text, QUERY_PREFIX)
-    }
-
-    pub fn embed_document(&mut self, text: &str) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
-        self.embed_with_prefix(text, DOCUMENT_PREFIX)
-    }
-
-    fn embed_with_prefix(
-        &mut self,
-        text: &str,
-        prefix: &str,
-    ) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
-        let full_text = if prefix.is_empty() {
-            text.to_string()
-        } else {
-            format!("{}{}", prefix, text)
-        };
-        let results = self.call_ollama_embed(&[full_text])?;
+        let results = self.call_ollama_embed(&[text.to_string()])?;
         results
             .into_iter()
             .next()
             .ok_or_else(|| "No embedding returned".into())
     }
 
-    pub fn embed_batch_documents(
-        &mut self,
-        texts: &[&str],
-    ) -> Result<Vec<Vec<f32>>, Box<dyn std::error::Error>> {
-        self.embed_batch_with_prefix(texts, DOCUMENT_PREFIX)
-    }
-
-    pub fn embed_batch_queries(
-        &mut self,
-        texts: &[&str],
-    ) -> Result<Vec<Vec<f32>>, Box<dyn std::error::Error>> {
-        self.embed_batch_with_prefix(texts, QUERY_PREFIX)
+    pub fn embed_query(&mut self, text: &str) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
+        self.embed_one(text)
     }
 
     pub fn embed_batch(
         &mut self,
         texts: &[&str],
     ) -> Result<Vec<Vec<f32>>, Box<dyn std::error::Error>> {
-        self.embed_batch_with_prefix(texts, "")
-    }
-
-    fn embed_batch_with_prefix(
-        &mut self,
-        texts: &[&str],
-        prefix: &str,
-    ) -> Result<Vec<Vec<f32>>, Box<dyn std::error::Error>> {
         if texts.is_empty() {
             return Ok(Vec::new());
         }
 
-        let prefixed: Vec<String> = texts
-            .iter()
-            .map(|t| {
-                if prefix.is_empty() {
-                    t.to_string()
-                } else {
-                    format!("{}{}", prefix, t)
-                }
-            })
-            .collect();
-
+        let owned: Vec<String> = texts.iter().map(|t| t.to_string()).collect();
         let batch_size = 64;
         let mut all_results = Vec::with_capacity(texts.len());
 
-        for chunk in prefixed.chunks(batch_size) {
+        for chunk in owned.chunks(batch_size) {
             match self.call_ollama_embed(chunk) {
                 Ok(results) => all_results.extend(results),
                 Err(e) => {
@@ -216,7 +164,7 @@ mod tests {
     #[test]
     fn test_embedder_create() {
         let embedder = Embedder::new().unwrap();
-        assert_eq!(embedder.model, "nomic-embed-text:latest");
+        assert_eq!(embedder.model, "mxbai-embed-large");
     }
 
     #[test]

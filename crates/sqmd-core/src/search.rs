@@ -67,14 +67,31 @@ pub fn fts_search(
 const SHORT_CIRCUIT_THRESHOLD: f64 = 0.7;
 const MIN_SHORT_CIRCUIT_HITS: usize = 3;
 
+#[cfg(feature = "embed")]
+pub fn layered_search(
+    db: &Connection,
+    query: &SearchQuery,
+    embedder: Option<&mut Embedder>,
+) -> Result<LayeredResult, Box<dyn std::error::Error>> {
+    layered_search_inner(db, query, embedder)
+}
+
+#[cfg(not(feature = "embed"))]
 pub fn layered_search(
     db: &Connection,
     query: &SearchQuery,
 ) -> Result<LayeredResult, Box<dyn std::error::Error>> {
+    layered_search_inner(db, query)
+}
+
+fn layered_search_inner(
+    db: &Connection,
+    query: &SearchQuery,
+    #[cfg(feature = "embed")] mut embedder_opt: Option<&mut Embedder>,
+) -> Result<LayeredResult, Box<dyn std::error::Error>> {
     let mut all_results: Vec<SearchResult> = Vec::new();
     let mut layers_hit: Vec<String> = Vec::new();
 
-    // Layer 1: FTS
     let fts_results = fts_search(db, query).unwrap_or_default();
     let fts_top_score = fts_results.first().map(|r| r.score).unwrap_or(0.0);
 
@@ -100,7 +117,6 @@ pub fn layered_search(
         }
     }
 
-    // Layer 2: Graph traversal expansion
     if let Ok(graph_chunks) = graph_expansion_search(db, &query.text, query.top_k) {
         if !graph_chunks.is_empty() {
             layers_hit.push("graph".to_string());
@@ -115,7 +131,6 @@ pub fn layered_search(
         }
     }
 
-    // Layer 3: Community summaries
     if let Ok(community_hits) = community_summary_search(db, &query.text) {
         if !community_hits.is_empty() {
             layers_hit.push("community".to_string());
@@ -125,6 +140,160 @@ pub fn layered_search(
                 if !existing_ids.contains(&ch.chunk_id) {
                     ch.score *= 0.5;
                     all_results.push(ch);
+                }
+            }
+        }
+    }
+
+    #[cfg(feature = "embed")]
+    if let Some(ref mut embedder) = embedder_opt {
+        if embedder.is_available() {
+            if let Ok(query_vec) = embedder.embed_query(&query.text) {
+                if let Ok(vec_results) = vec_search(
+                    db,
+                    &query_vec,
+                    query.top_k * 2,
+                    query.file_filter.as_deref(),
+                    query.type_filter.as_deref(),
+                    query.source_type_filter.as_deref(),
+                    query.agent_id_filter.as_deref(),
+                    &query.exclude_path_prefixes,
+                ) {
+                    if !vec_results.is_empty() {
+                        layers_hit.push("vector".to_string());
+                        let existing_ids: std::collections::HashSet<i64> =
+                            all_results.iter().map(|r| r.chunk_id).collect();
+                        let max_existing = all_results
+                            .iter()
+                            .map(|r| r.score)
+                            .fold(0.0_f64, f64::max)
+                            .max(0.1);
+                        for mut vr in vec_results {
+                            if existing_ids.contains(&vr.chunk_id) {
+                                if let Some(dist) = vr.vec_distance {
+                                    let boost = (1.0 - dist.min(1.0)) * 0.3 * max_existing;
+                                    if let Some(existing) =
+                                        all_results.iter_mut().find(|r| r.chunk_id == vr.chunk_id)
+                                    {
+                                        existing.score += boost;
+                                    }
+                                }
+                            } else {
+                                vr.score *= 0.6;
+                                all_results.push(vr);
+                            }
+                        }
+                    }
+                }
+
+                if let Ok(hint_vec_pairs) = hint_vec_search(db, &query_vec, query.top_k * 2) {
+                    if !hint_vec_pairs.is_empty() {
+                        layers_hit.push("hint_vec".to_string());
+                        let existing_ids: std::collections::HashSet<i64> =
+                            all_results.iter().map(|r| r.chunk_id).collect();
+                        let max_existing = all_results
+                            .iter()
+                            .map(|r| r.score)
+                            .fold(0.0_f64, f64::max)
+                            .max(0.1);
+
+                        for r in &mut all_results {
+                            if let Some(&dist) = hint_vec_pairs
+                                .iter()
+                                .find(|(id, _)| *id == r.chunk_id)
+                                .map(|(_, d)| d)
+                            {
+                                let boost = (1.0 - dist.min(1.0)) * 0.2 * max_existing;
+                                r.score += boost;
+                            }
+                        }
+
+                        let missing: Vec<(i64, f64)> = hint_vec_pairs
+                            .into_iter()
+                            .filter(|(id, _)| !existing_ids.contains(id))
+                            .collect();
+
+                        if !missing.is_empty() {
+                            let placeholders: Vec<String> =
+                                (0..missing.len()).map(|i| format!("?{}", i + 1)).collect();
+                            let sql = format!(
+                                "SELECT id, file_path, name, signature, line_start, line_end, chunk_type, source_type, importance \
+                                 FROM chunks WHERE id IN ({}) AND is_deleted = 0",
+                                placeholders.join(", ")
+                            );
+                            let mut stmt = db.prepare(&sql)?;
+                            let param_vals: Vec<Box<dyn rusqlite::ToSql>> = missing
+                                .iter()
+                                .map(|(id, _)| Box::new(*id) as Box<dyn rusqlite::ToSql>)
+                                .collect();
+                            let param_refs: Vec<&dyn rusqlite::ToSql> =
+                                param_vals.iter().map(|p| p.as_ref()).collect();
+
+                            type HVecRow = (
+                                i64,
+                                String,
+                                Option<String>,
+                                Option<String>,
+                                i64,
+                                i64,
+                                String,
+                                String,
+                                f64,
+                            );
+                            let rows: Vec<HVecRow> = stmt
+                                .query_map(param_refs.as_slice(), |r| {
+                                    Ok((
+                                        r.get(0)?,
+                                        r.get(1)?,
+                                        r.get(2)?,
+                                        r.get(3)?,
+                                        r.get(4)?,
+                                        r.get(5)?,
+                                        r.get(6)?,
+                                        r.get(7)?,
+                                        r.get(8)?,
+                                    ))
+                                })?
+                                .collect::<Result<_, _>>()?;
+
+                            let row_map: std::collections::HashMap<i64, HVecRow> =
+                                rows.into_iter().map(|r| (r.0, r)).collect();
+
+                            for (id, dist) in &missing {
+                                if let Some((
+                                    cid,
+                                    file_path,
+                                    name,
+                                    sig,
+                                    start,
+                                    end,
+                                    ct,
+                                    st,
+                                    importance,
+                                )) = row_map.get(id)
+                                {
+                                    let score = (1.0 - dist.min(1.0)) * 0.4 * max_existing;
+                                    all_results.push(SearchResult {
+                                        chunk_id: *cid,
+                                        file_path: file_path.clone(),
+                                        name: name.clone(),
+                                        signature: sig.clone(),
+                                        line_start: *start,
+                                        line_end: *end,
+                                        chunk_type: ct.clone(),
+                                        source_type: st.clone(),
+                                        score,
+                                        vec_distance: Some(*dist),
+                                        fts_rank: None,
+                                        snippet: Some("[hint vec match]".to_string()),
+                                        decay_rate: 0.0,
+                                        last_accessed: None,
+                                        importance: *importance,
+                                    });
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -866,221 +1035,6 @@ pub fn vec_search(
     Ok(results)
 }
 
-#[cfg(feature = "embed")]
-pub fn hybrid_search(
-    db: &Connection,
-    query: &SearchQuery,
-    embedder: &mut Embedder,
-) -> Result<Vec<SearchResult>, Box<dyn std::error::Error>> {
-    let fts_results = fts_search(db, query)?;
-
-    let (vec_results, hint_vec_pairs) = if embedder.is_available() {
-        let query_vec = embedder.embed_query(&query.text)?;
-        let vr = vec_search(
-            db,
-            &query_vec,
-            query.top_k * 2,
-            query.file_filter.as_deref(),
-            query.type_filter.as_deref(),
-            query.source_type_filter.as_deref(),
-            query.agent_id_filter.as_deref(),
-            &query.exclude_path_prefixes,
-        )?;
-        let hv = hint_vec_search(db, &query_vec, query.top_k * 2).unwrap_or_default();
-        (vr, hv)
-    } else {
-        (Vec::new(), Vec::new())
-    };
-
-    let merged = merge_results(fts_results, vec_results, query.alpha);
-
-    let merged = merge_hint_vec_results(db, merged, hint_vec_pairs)?;
-
-    let filtered: Vec<SearchResult> = merged
-        .into_iter()
-        .filter(|r| r.score >= query.min_score)
-        .take(query.top_k)
-        .collect();
-
-    let mut filtered = filtered;
-    dampening::importance_boost(&mut filtered);
-    dampening::dampen(&mut filtered, 0.8);
-
-    Ok(filtered)
-}
-
-#[cfg(feature = "embed")]
-fn merge_results(
-    mut fts: Vec<SearchResult>,
-    mut vec: Vec<SearchResult>,
-    alpha: f64,
-) -> Vec<SearchResult> {
-    let mut by_id: std::collections::HashMap<i64, SearchResult> = std::collections::HashMap::new();
-
-    for r in fts.drain(..) {
-        by_id.entry(r.chunk_id).or_insert(r);
-    }
-
-    for r in vec.drain(..) {
-        let entry = by_id.entry(r.chunk_id).or_insert(r.clone());
-        if entry.vec_distance.is_none() && r.vec_distance.is_some() {
-            entry.vec_distance = r.vec_distance;
-        }
-    }
-
-    let mut results: Vec<SearchResult> = by_id.into_values().collect();
-
-    let fts_scores: Vec<f64> = results.iter().filter_map(|r| r.fts_rank).collect();
-    let fts_max = fts_scores.iter().cloned().fold(0.0_f64, f64::max);
-    let fts_scale = if fts_max > 0.0 { 1.0 / fts_max } else { 1.0 };
-
-    let vec_dists: Vec<f64> = results.iter().filter_map(|r| r.vec_distance).collect();
-    let vec_min = vec_dists.iter().cloned().fold(1.0_f64, f64::min);
-    let vec_max = vec_dists.iter().cloned().fold(0.0_f64, f64::max);
-    let vec_range = vec_max - vec_min;
-    let vec_scale = if vec_range > 0.0 {
-        1.0 / vec_range
-    } else {
-        1.0
-    };
-
-    for r in &mut results {
-        let fts_score = r.fts_rank.unwrap_or(0.0) * fts_scale;
-        let raw_vec = r.vec_distance.unwrap_or(1.0);
-        let vec_score = if vec_range > 0.0 {
-            (raw_vec - vec_min) * vec_scale
-        } else {
-            1.0 - raw_vec
-        };
-
-        let has_fts = r.fts_rank.is_some();
-        let has_vec = r.vec_distance.is_some();
-
-        if has_fts && has_vec {
-            r.score = alpha * (1.0 - vec_score) + (1.0 - alpha) * fts_score;
-        } else if has_fts {
-            r.score = fts_score * (1.0 - alpha + alpha * 0.3);
-        } else if has_vec {
-            r.score = (1.0 - vec_score) * (alpha + (1.0 - alpha) * 0.3);
-        }
-    }
-
-    results.sort_by(|a, b| {
-        b.score
-            .partial_cmp(&a.score)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-    results
-}
-
-#[cfg(feature = "embed")]
-fn merge_hint_vec_results(
-    db: &Connection,
-    mut results: Vec<SearchResult>,
-    hint_pairs: Vec<(i64, f64)>,
-) -> Result<Vec<SearchResult>, Box<dyn std::error::Error>> {
-    if hint_pairs.is_empty() {
-        return Ok(results);
-    }
-
-    let existing_ids: std::collections::HashSet<i64> = results.iter().map(|r| r.chunk_id).collect();
-
-    let hint_score_map: std::collections::HashMap<i64, f64> = hint_pairs.into_iter().collect();
-
-    let max_existing_score = results.iter().map(|r| r.score).fold(0.0_f64, f64::max);
-
-    for r in &mut results {
-        if let Some(&dist) = hint_score_map.get(&r.chunk_id) {
-            let hint_relevance = 1.0 - dist.min(1.0);
-            let hint_boost = hint_relevance * 0.25 * max_existing_score.max(0.1);
-            r.score += hint_boost;
-        }
-    }
-
-    let missing: Vec<(i64, f64)> = hint_score_map
-        .iter()
-        .filter(|(id, _)| !existing_ids.contains(id))
-        .map(|(&id, &s)| (id, s))
-        .collect();
-
-    if !missing.is_empty() {
-        let placeholders: Vec<String> = (0..missing.len()).map(|i| format!("?{}", i + 1)).collect();
-        let sql = format!(
-            "SELECT id, file_path, name, signature, line_start, line_end, chunk_type, source_type, importance \
-             FROM chunks WHERE id IN ({}) AND is_deleted = 0",
-            placeholders.join(", ")
-        );
-        let mut stmt = db.prepare(&sql)?;
-        let param_vals: Vec<Box<dyn rusqlite::ToSql>> = missing
-            .iter()
-            .map(|(id, _)| Box::new(*id) as Box<dyn rusqlite::ToSql>)
-            .collect();
-        let param_refs: Vec<&dyn rusqlite::ToSql> = param_vals.iter().map(|p| p.as_ref()).collect();
-
-        type HVecRow = (
-            i64,
-            String,
-            Option<String>,
-            Option<String>,
-            i64,
-            i64,
-            String,
-            String,
-            f64,
-        );
-        let rows: Vec<HVecRow> = stmt
-            .query_map(param_refs.as_slice(), |r| {
-                Ok((
-                    r.get(0)?,
-                    r.get(1)?,
-                    r.get(2)?,
-                    r.get(3)?,
-                    r.get(4)?,
-                    r.get(5)?,
-                    r.get(6)?,
-                    r.get(7)?,
-                    r.get(8)?,
-                ))
-            })?
-            .collect::<Result<_, _>>()?;
-
-        let row_map: std::collections::HashMap<i64, HVecRow> =
-            rows.into_iter().map(|r| (r.0, r)).collect();
-
-        for (id, dist) in &missing {
-            if let Some((cid, file_path, name, sig, start, end, ct, st, importance)) =
-                row_map.get(id)
-            {
-                let score = (1.0 - dist.min(1.0)) * 0.5 * max_existing_score.max(0.1);
-                results.push(SearchResult {
-                    chunk_id: *cid,
-                    file_path: file_path.clone(),
-                    name: name.clone(),
-                    signature: sig.clone(),
-                    line_start: *start,
-                    line_end: *end,
-                    chunk_type: ct.clone(),
-                    source_type: st.clone(),
-                    score,
-                    vec_distance: Some(*dist),
-                    fts_rank: None,
-                    snippet: Some("[hint vec match]".to_string()),
-                    decay_rate: 0.0,
-                    last_accessed: None,
-                    importance: *importance,
-                });
-            }
-        }
-    }
-
-    results.sort_by(|a, b| {
-        b.score
-            .partial_cmp(&a.score)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-    Ok(results)
-}
-
 fn chrono_now() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1232,7 +1186,7 @@ pub fn embed_unembedded(
     }
 
     let text_refs: Vec<&str> = truncated.iter().map(|(_, t)| t.as_str()).collect();
-    let vectors = match embedder.embed_batch_documents(&text_refs) {
+    let vectors = match embedder.embed_batch(&text_refs) {
         Ok(v) => v,
         Err(e) => {
             eprintln!("[embed] batch failed: {e}");
@@ -1258,7 +1212,7 @@ pub fn embed_unembedded(
 
     if !hint_texts.is_empty() {
         let hint_refs: Vec<&str> = hint_texts.iter().map(|(_, t)| t.as_str()).collect();
-        let hint_vectors = embedder.embed_batch_documents(&hint_refs)?;
+        let hint_vectors = embedder.embed_batch(&hint_refs)?;
         for ((chunk_id, _), vector) in hint_texts.iter().zip(hint_vectors.iter()) {
             store_hint_embedding(db, *chunk_id, vector)?;
         }
@@ -1467,27 +1421,22 @@ mod tests {
     #[test]
     fn test_vec_search_with_fallback() {
         let db = make_test_db();
-        let query_vec = vec![0.1f32; 768];
+        let query_vec = vec![0.1f32; 1024];
         let results = vec_search(&db, &query_vec, 5, None, None, None, None, &[]).unwrap();
-        // chunks_vec exists but is empty — should return empty, not error
         assert!(results.is_empty());
     }
 
     #[cfg(feature = "embed")]
     #[test]
-    fn test_hybrid_search_fts_only() {
+    fn test_layered_search_fts_only() {
         let db = make_test_db();
-        let mut embedder = Embedder::new().unwrap();
-        // Don't load model — test FTS-only fallback path
         let query = SearchQuery {
             text: "login".to_string(),
             top_k: 5,
-            alpha: 0.7,
             ..Default::default()
         };
-        let results = hybrid_search(&db, &query, &mut embedder).unwrap();
-        // With no model, we get FTS results only (penalized by 0.8)
-        assert!(!results.is_empty());
+        let result = layered_search(&db, &query, None as Option<&mut Embedder>).unwrap();
+        assert!(!result.results.is_empty());
     }
 
     #[cfg(feature = "embed")]
@@ -1498,7 +1447,7 @@ mod tests {
         assert_eq!(ids.len(), 3);
 
         // Embed one
-        let vec = vec![0.5f32; 768];
+        let vec = vec![0.5f32; 1024];
         store_embedding(&db, 1, &vec, "test-model").unwrap();
 
         let ids = get_unembedded_chunk_ids(&db, 10).unwrap();

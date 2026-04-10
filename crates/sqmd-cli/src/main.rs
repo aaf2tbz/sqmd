@@ -30,17 +30,13 @@ enum Commands {
         #[arg(long)]
         embed: bool,
     },
-    /// Search the index (hybrid: FTS5 + vector by default)
+    /// Search the index
     Search {
         /// Search query
         query: String,
         /// Maximum results
         #[arg(short, long, default_value = "10")]
         top_k: usize,
-        #[cfg(feature = "embed")]
-        /// Vector search weight (0.0 = keyword only, 1.0 = vector only)
-        #[arg(long, default_value = "0.7")]
-        alpha: f64,
         /// Filter by file path
         #[arg(long)]
         file: Option<String>,
@@ -50,8 +46,7 @@ enum Commands {
         /// Filter by source type (code, memory, transcript, document, entity)
         #[arg(long)]
         source: Option<String>,
-        /// Keyword-only search (skip vector)
-        #[cfg(feature = "embed")]
+        /// Keyword-only search (skip vector layers)
         #[arg(long)]
         keyword: bool,
     },
@@ -192,33 +187,14 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         }
         #[cfg(not(feature = "embed"))]
         Commands::Index { path } => cmd_index(&path),
-        #[cfg(feature = "embed")]
         Commands::Search {
             query,
             top_k,
-            alpha,
             file,
             r#type,
             source,
             keyword,
-        } => cmd_search(
-            &query,
-            top_k,
-            Some(alpha),
-            file,
-            r#type,
-            source,
-            Some(keyword),
-            cli.json,
-        ),
-        #[cfg(not(feature = "embed"))]
-        Commands::Search {
-            query,
-            top_k,
-            file,
-            r#type,
-            source,
-        } => cmd_search(&query, top_k, None, file, r#type, source, None, cli.json),
+        } => cmd_search(&query, top_k, file, r#type, source, keyword, cli.json),
         #[cfg(feature = "embed")]
         Commands::Embed => cmd_embed(),
         Commands::Stats => cmd_stats(cli.json),
@@ -398,11 +374,10 @@ fn cmd_embed_with_db(db: &mut rusqlite::Connection) -> Result<(), Box<dyn std::e
 fn cmd_search(
     query: &str,
     top_k: usize,
-    alpha: Option<f64>,
     file_filter: Option<String>,
     type_filter: Option<String>,
     source_filter: Option<String>,
-    #[cfg_attr(not(feature = "embed"), allow(unused_variables))] keyword_only: Option<bool>,
+    keyword_only: bool,
     json: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let db = ensure_db()?;
@@ -410,23 +385,26 @@ fn cmd_search(
     let search_query = sqmd_core::search::SearchQuery {
         text: query.to_string(),
         top_k,
-        alpha: alpha.unwrap_or(0.7),
         file_filter,
         type_filter,
         source_type_filter: source_filter.map(|s| vec![s]),
         ..Default::default()
     };
 
-    #[cfg(feature = "embed")]
-    let results = if keyword_only.unwrap_or(false) {
+    let results = if keyword_only {
         sqmd_core::search::fts_search(&db, &search_query)?
     } else {
-        let mut embedder = sqmd_core::embed::Embedder::new()?;
-        sqmd_core::search::hybrid_search(&db, &search_query, &mut embedder)?
+        #[cfg(feature = "embed")]
+        {
+            let mut embedder = sqmd_core::embed::Embedder::new()?;
+            sqmd_core::search::layered_search(&db, &search_query, Some(&mut embedder))
+                .map(|lr| lr.results)?
+        }
+        #[cfg(not(feature = "embed"))]
+        {
+            sqmd_core::search::layered_search(&db, &search_query).map(|lr| lr.results)?
+        }
     };
-
-    #[cfg(not(feature = "embed"))]
-    let results = sqmd_core::search::fts_search(&db, &search_query)?;
 
     if results.is_empty() {
         if json {
