@@ -639,23 +639,6 @@ impl<'a> Indexer<'a> {
                     entities::insert_hints(self.db, chunk_id, &hints)?;
                 }
 
-                #[cfg(feature = "ollama")]
-                {
-                    if chunk.importance >= 0.5 {
-                        if let Ok(prospective) =
-                            generate_prospective_hints_ollama(&chunk.content_raw)
-                        {
-                            if !prospective.is_empty() {
-                                let typed: Vec<(String, &str)> = prospective
-                                    .into_iter()
-                                    .map(|h| (h, "prospective"))
-                                    .collect();
-                                let _ = entities::insert_hints_typed(self.db, chunk_id, &typed);
-                            }
-                        }
-                    }
-                }
-
                 let importance =
                     entities::compute_structural_importance(self.db, chunk_id, chunk.importance)?;
                 if importance != chunk.importance {
@@ -1357,14 +1340,6 @@ impl<'a> KnowledgeIngestor<'a> {
         }
         Ok(true)
     }
-}
-
-#[cfg(feature = "ollama")]
-fn generate_prospective_hints_ollama(
-    content: &str,
-) -> Result<Vec<String>, Box<dyn std::error::Error>> {
-    let client = crate::ollama::OllamaClient::new();
-    client.generate_prospective_hints(content)
 }
 
 #[cfg(test)]
