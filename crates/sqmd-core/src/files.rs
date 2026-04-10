@@ -21,6 +21,8 @@ pub enum Language {
     Json,
     Yaml,
     Toml,
+    Html,
+    Css,
     Unknown,
 }
 
@@ -43,6 +45,8 @@ impl Language {
             "json" | "jsonc" => Language::Json,
             "yml" | "yaml" => Language::Yaml,
             "toml" => Language::Toml,
+            "html" | "htm" => Language::Html,
+            "css" | "scss" | "sass" | "less" => Language::Css,
             _ => Language::Unknown,
         }
     }
@@ -67,6 +71,8 @@ impl Language {
             Language::Json => "json",
             Language::Yaml => "yaml",
             Language::Toml => "toml",
+            Language::Html => "html",
+            Language::Css => "css",
             Language::Unknown => "unknown",
         }
     }

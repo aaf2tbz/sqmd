@@ -1,7 +1,9 @@
 pub mod c;
 pub mod cmake;
 pub mod cpp;
+pub mod css;
 pub mod go;
+pub mod html;
 pub mod java;
 pub mod json;
 pub mod markdown;
