@@ -1216,6 +1216,7 @@ pub fn embed_unembedded(
 
     let truncated: Vec<(i64, String)> = texts
         .into_iter()
+        .filter(|(_, text)| !text.trim().is_empty())
         .map(|(id, text)| {
             if text.len() > EMBED_MAX_CHARS {
                 (id, text[..EMBED_MAX_CHARS].to_string())
@@ -1225,8 +1226,20 @@ pub fn embed_unembedded(
         })
         .collect();
 
+    if truncated.is_empty() {
+        db.execute_batch("COMMIT")?;
+        return Ok(0);
+    }
+
     let text_refs: Vec<&str> = truncated.iter().map(|(_, t)| t.as_str()).collect();
-    let vectors = embedder.embed_batch_documents(&text_refs)?;
+    let vectors = match embedder.embed_batch_documents(&text_refs) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("[embed] batch failed: {e}");
+            db.execute_batch("COMMIT")?;
+            return Ok(0);
+        }
+    };
 
     db.execute_batch("BEGIN")?;
     for ((chunk_id, _), vector) in truncated.iter().zip(vectors.iter()) {

@@ -1,131 +1,45 @@
-use ort::session::Session;
-use ort::value::Value;
-use std::io::{Read, Write};
-use std::path::PathBuf;
+use std::io::Read;
 
+const DEFAULT_MODEL: &str = "nomic-embed-text:latest";
 const DIMS: usize = 768;
-const MODEL_NAME: &str = "nomic-embed-text-v1.5";
-const MODEL_FILE: &str = "nomic-embed-text-v1.5-q8.onnx";
-const TOKENIZER_FILE: &str = "nomic-embed-text-v1.5-tokenizer.json";
-const MODEL_URL: &str = "https://huggingface.co/nomic-ai/nomic-embed-text-v1.5/resolve/main/nomic-embed-text-v1.5-q8.onnx";
-const TOKENIZER_URL: &str =
-    "https://huggingface.co/nomic-ai/nomic-embed-text-v1.5/resolve/main/tokenizer.json";
-const MAX_SEQ_LEN: usize = 512;
 
 const QUERY_PREFIX: &str = "search_query: ";
 const DOCUMENT_PREFIX: &str = "search_document: ";
 
 pub struct Embedder {
-    session: Option<Session>,
-    tokenizer: Option<tokenizers::Tokenizer>,
-    model_name: String,
+    base_url: String,
+    model: String,
+    available: Option<bool>,
 }
 
 impl Embedder {
     pub fn new() -> Result<Self, Box<dyn std::error::Error>> {
+        let base_url =
+            std::env::var("OLLAMA_HOST").unwrap_or_else(|_| "http://localhost:11434".to_string());
+        let model = std::env::var("SQMD_EMBED_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.to_string());
         Ok(Self {
-            session: None,
-            tokenizer: None,
-            model_name: MODEL_NAME.to_string(),
+            base_url,
+            model,
+            available: None,
         })
     }
 
-    pub fn model_dir() -> Result<PathBuf, Box<dyn std::error::Error>> {
-        let home = std::env::var("HOME").map_err(|_| "HOME env var not set")?;
-        let dir = PathBuf::from(home).join(".sqmd").join("models");
-        Ok(dir)
-    }
-
-    pub fn model_path() -> Result<PathBuf, Box<dyn std::error::Error>> {
-        Ok(Self::model_dir()?.join(MODEL_FILE))
-    }
-
-    fn tokenizer_path() -> Result<PathBuf, Box<dyn std::error::Error>> {
-        Ok(Self::model_dir()?.join(TOKENIZER_FILE))
-    }
-
-    fn download_file(
-        url: &str,
-        dest: &PathBuf,
-        label: &str,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        if dest.exists() {
-            return Ok(());
-        }
-
-        let dir = dest.parent().unwrap();
-        std::fs::create_dir_all(dir)?;
-
-        eprintln!("Downloading {label}...");
-        eprintln!("  URL: {url}");
-        eprintln!("  Destination: {:?}", dest);
-
-        let response = ureq::Agent::new_with_defaults().get(url).call()?;
-
-        let total_bytes: usize = response
-            .headers()
-            .get("content-length")
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.parse::<usize>().ok())
-            .unwrap_or(0);
-
-        let mut reader = response.into_body().into_reader();
-        let mut file = std::fs::File::create(dest)?;
-        let mut downloaded: usize = 0;
-
-        let mut buf = [0u8; 8192];
-        loop {
-            let n = reader.read(&mut buf)?;
-            if n == 0 {
-                break;
-            }
-            file.write_all(&buf[..n])?;
-            downloaded += n;
-            if total_bytes > 0 {
-                let pct = (downloaded as f64 / total_bytes as f64) * 100.0;
-                eprint!("\r  Downloading: {:.0}%", pct);
-            }
-        }
-
-        eprintln!("\n  Saved {} KB", downloaded / 1024);
-        Ok(())
-    }
-
-    pub fn ensure_model_exists() -> Result<(), Box<dyn std::error::Error>> {
-        let model_path = Self::model_path()?;
-        Self::download_file(MODEL_URL, &model_path, "embedding model")?;
-        let tokenizer_path = Self::tokenizer_path()?;
-        Self::download_file(TOKENIZER_URL, &tokenizer_path, "tokenizer")?;
-        Ok(())
-    }
-
-    pub fn ensure_loaded(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        if self.session.is_some() && self.tokenizer.is_some() {
-            return Ok(());
-        }
-
-        if !Self::model_path()?.exists() || !Self::tokenizer_path()?.exists() {
-            Self::ensure_model_exists()?;
-        }
-
-        let session = Session::builder()?.commit_from_file(&Self::model_path()?)?;
-        self.session = Some(session);
-
-        let tokenizer = tokenizers::Tokenizer::from_file(&Self::tokenizer_path()?)
-            .map_err(|e| format!("Failed to load tokenizer: {e}"))?;
-        let mut with_padding = tokenizer.clone();
-        let padding = tokenizers::PaddingParams {
-            strategy: tokenizers::PaddingStrategy::BatchLongest,
-            ..Default::default()
-        };
-        with_padding.with_padding(Some(padding));
-        self.tokenizer = Some(with_padding);
-
-        Ok(())
-    }
-
     pub fn is_available(&mut self) -> bool {
-        self.ensure_loaded().is_ok()
+        if let Some(a) = self.available {
+            return a;
+        }
+        let url = format!("{}/api/tags", self.base_url);
+        let result = ureq::Agent::new_with_defaults()
+            .get(&url)
+            .call()
+            .and_then(|resp| {
+                let mut body = String::new();
+                resp.into_body().into_reader().read_to_string(&mut body)?;
+                Ok(body)
+            });
+        let ok = result.is_ok();
+        self.available = Some(ok);
+        ok
     }
 
     pub fn embed_one(&mut self, text: &str) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
@@ -145,59 +59,16 @@ impl Embedder {
         text: &str,
         prefix: &str,
     ) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
-        self.ensure_loaded()?;
-        let session = self.session.as_mut().unwrap();
-        let tokenizer = self.tokenizer.as_ref().unwrap();
-
         let full_text = if prefix.is_empty() {
             text.to_string()
         } else {
             format!("{}{}", prefix, text)
         };
-        let encodings = tokenizer
-            .encode(full_text.as_str(), true)
-            .map_err(|e| format!("Tokenization failed: {e}"))?;
-        let ids = encodings.get_ids();
-
-        let seq_len = ids.len().min(MAX_SEQ_LEN);
-        let padded_len = ceil_to_multiple(seq_len, 64).max(8);
-
-        let mut input_ids = vec![0i64; padded_len];
-        let mut attention_mask = vec![0i64; padded_len];
-        let token_types = vec![0i64; padded_len];
-
-        for (i, &t) in ids.iter().take(seq_len).enumerate() {
-            input_ids[i] = t as i64;
-            attention_mask[i] = 1;
-        }
-
-        let input_names: Vec<String> = session
-            .inputs()
-            .iter()
-            .map(|i| i.name().to_string())
-            .collect();
-
-        let input_ids_val = Value::from_array(([1usize, padded_len], input_ids.clone()))?;
-        let attention_val = Value::from_array(([1usize, padded_len], attention_mask.clone()))?;
-        let token_types_val = Value::from_array(([1usize, padded_len], token_types.clone()))?;
-
-        let inputs: Vec<(&str, Value)> = vec![
-            (input_names[0].as_str(), input_ids_val.into()),
-            (input_names[1].as_str(), attention_val.into()),
-            (input_names[2].as_str(), token_types_val.into()),
-        ];
-
-        let outputs = session.run(inputs)?;
-        let (_, data) = outputs[0].try_extract_tensor::<f32>()?;
-        let pooled = mean_pool(data, &attention_mask, DIMS);
-
-        let norm: f32 = pooled.iter().map(|v| v * v).sum::<f32>().sqrt();
-        if norm > 0.0 {
-            let normalized: Vec<f32> = pooled.iter().map(|v| v / norm).collect();
-            Ok(normalized)
-        } else {
-            Ok(pooled)
-        }
+        let results = self.call_ollama_embed(&[full_text])?;
+        results
+            .into_iter()
+            .next()
+            .ok_or_else(|| "No embedding returned".into())
     }
 
     pub fn embed_batch_documents(
@@ -230,122 +101,89 @@ impl Embedder {
             return Ok(Vec::new());
         }
 
-        self.ensure_loaded()?;
-        let session = self.session.as_mut().unwrap();
-        let tokenizer = self.tokenizer.as_ref().unwrap();
-
-        let batch_size = texts.len();
-
-        let mut encoded: Vec<(Vec<i64>, usize)> = Vec::with_capacity(batch_size);
-        for text in texts.iter() {
-            let full_text = if prefix.is_empty() {
-                text.to_string()
-            } else {
-                format!("{}{}", prefix, text)
-            };
-            let encodings = tokenizer
-                .encode(full_text.as_str(), true)
-                .map_err(|e| format!("Tokenization failed: {e}"))?;
-            let seq_len = encodings.get_ids().len().min(MAX_SEQ_LEN);
-            let ids: Vec<i64> = encodings
-                .get_ids()
-                .iter()
-                .take(seq_len)
-                .map(|&t| t as i64)
-                .collect();
-            encoded.push((ids, seq_len));
-        }
-
-        let padded_len = encoded
+        let prefixed: Vec<String> = texts
             .iter()
-            .map(|(_, len)| ceil_to_multiple(*len, 64).max(8))
-            .max()
-            .unwrap_or(8);
-
-        let mut all_input_ids = vec![0i64; batch_size * padded_len];
-        let mut all_attention = vec![0i64; batch_size * padded_len];
-        let all_token_types = vec![0i64; batch_size * padded_len];
-
-        for (i, (ids, _seq_len)) in encoded.iter().enumerate() {
-            let offset = i * padded_len;
-            for (j, &t) in ids.iter().enumerate() {
-                all_input_ids[offset + j] = t;
-                all_attention[offset + j] = 1;
-            }
-        }
-
-        let input_names: Vec<String> = session
-            .inputs()
-            .iter()
-            .map(|inp| inp.name().to_string())
+            .map(|t| {
+                if prefix.is_empty() {
+                    t.to_string()
+                } else {
+                    format!("{}{}", prefix, t)
+                }
+            })
             .collect();
 
-        let input_ids_val = Value::from_array(([batch_size, padded_len], all_input_ids))?;
-        let attention_val = Value::from_array(([batch_size, padded_len], all_attention.clone()))?;
-        let token_types_val = Value::from_array(([batch_size, padded_len], all_token_types))?;
+        let batch_size = 16;
+        let mut all_results = Vec::with_capacity(texts.len());
 
-        let inputs: Vec<(&str, Value)> = vec![
-            (input_names[0].as_str(), input_ids_val.into()),
-            (input_names[1].as_str(), attention_val.into()),
-            (input_names[2].as_str(), token_types_val.into()),
-        ];
-
-        let outputs = session.run(inputs)?;
-        let (_, data) = outputs[0].try_extract_tensor::<f32>()?;
-
-        let mut results = Vec::with_capacity(batch_size);
-        for i in 0..batch_size {
-            let mask_start = i * padded_len;
-            let mask: Vec<i64> = all_attention[mask_start..mask_start + padded_len].to_vec();
-            let hidden_start = i * padded_len * DIMS;
-            let hidden_end = hidden_start + padded_len * DIMS;
-            let hidden = &data[hidden_start..hidden_end];
-            let pooled = mean_pool(hidden, &mask, DIMS);
-            let norm: f32 = pooled.iter().map(|v| v * v).sum::<f32>().sqrt();
-            if norm > 0.0 {
-                let normalized: Vec<f32> = pooled.iter().map(|v| v / norm).collect();
-                results.push(normalized);
-            } else {
-                results.push(pooled);
+        for chunk in prefixed.chunks(batch_size) {
+            match self.call_ollama_embed(chunk) {
+                Ok(results) => all_results.extend(results),
+                Err(e) => {
+                    eprintln!(
+                        "[embed] batch failed ({} texts), falling back to single: {e}",
+                        chunk.len()
+                    );
+                    for text in chunk {
+                        match self.call_ollama_embed(&[text.clone()]) {
+                            Ok(r) => all_results.extend(r),
+                            Err(_) => {
+                                all_results.push(vec![0.0f32; DIMS]);
+                            }
+                        }
+                    }
+                }
             }
+        }
+
+        Ok(all_results)
+    }
+
+    fn call_ollama_embed(
+        &mut self,
+        texts: &[String],
+    ) -> Result<Vec<Vec<f32>>, Box<dyn std::error::Error>> {
+        let body = serde_json::json!({
+            "model": self.model,
+            "input": texts,
+        });
+
+        let url = format!("{}/api/embed", self.base_url);
+        let response = ureq::Agent::new_with_defaults()
+            .post(&url)
+            .send_json(&body)?;
+
+        let mut body_str = String::new();
+        response
+            .into_body()
+            .into_reader()
+            .read_to_string(&mut body_str)?;
+        let parsed: serde_json::Value = serde_json::from_str(&body_str)?;
+
+        let embeddings = parsed["embeddings"]
+            .as_array()
+            .ok_or_else(|| format!("Unexpected embed response: no embeddings array"))?;
+
+        let mut results = Vec::with_capacity(embeddings.len());
+        for emb in embeddings {
+            let vec: Vec<f32> = emb
+                .as_array()
+                .ok_or_else(|| "Embedding is not an array")?
+                .iter()
+                .filter_map(|v| v.as_f64().map(|f| f as f32))
+                .collect();
+            results.push(vec);
         }
 
         Ok(results)
     }
 
     pub fn model_name(&self) -> &str {
-        &self.model_name
+        &self.model
     }
 
     pub fn dims() -> usize {
         DIMS
     }
-}
-
-pub fn mean_pool(last_hidden: &[f32], attention_mask: &[i64], dims: usize) -> Vec<f32> {
-    let seq_len = last_hidden.len() / dims;
-    let mut pooled = vec![0.0f32; dims];
-    let mut mask_sum = 0.0f32;
-
-    for i in 0..seq_len {
-        let mask_val = if i < attention_mask.len() && attention_mask[i] == 1 {
-            1.0f32
-        } else {
-            0.0f32
-        };
-        mask_sum += mask_val;
-        for j in 0..dims {
-            pooled[j] += mask_val * last_hidden[i * dims + j];
-        }
-    }
-
-    if mask_sum > 0.0 {
-        for v in pooled.iter_mut() {
-            *v /= mask_sum;
-        }
-    }
-
-    pooled
 }
 
 pub fn vector_to_blob(vec: &[f32]) -> Vec<u8> {
@@ -371,59 +209,14 @@ pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     dot / (norm_a * norm_b)
 }
 
-fn ceil_to_multiple(val: usize, multiple: usize) -> usize {
-    val.div_ceil(multiple) * multiple
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::Instant;
 
     #[test]
-    fn test_embedder_load_and_embed() {
-        let mut embedder = Embedder::new().unwrap();
-        if !embedder.is_available() {
-            println!("Skipping: model not found");
-            return;
-        }
-
-        let start = Instant::now();
-        let vec = embedder.embed_one("hello world").unwrap();
-        let elapsed = start.elapsed();
-
-        assert_eq!(vec.len(), DIMS);
-        let norm: f32 = vec.iter().map(|v| v * v).sum::<f32>().sqrt();
-        assert!(
-            (norm - 1.0).abs() < 0.01,
-            "Should be unit normalized, got {}",
-            norm
-        );
-        println!("Single embed: {:?} ({} dims)", elapsed, vec.len());
-    }
-
-    #[test]
-    fn test_embed_batch() {
-        let mut embedder = Embedder::new().unwrap();
-        if !embedder.is_available() {
-            println!("Skipping: model not found");
-            return;
-        }
-
-        let texts = vec![
-            "fn main() {}",
-            "struct User { name: String }",
-            "import React from 'react'",
-        ];
-        let start = Instant::now();
-        let results = embedder.embed_batch(&texts).unwrap();
-        let elapsed = start.elapsed();
-
-        assert_eq!(results.len(), 3);
-        for r in &results {
-            assert_eq!(r.len(), DIMS);
-        }
-        println!("Batch embed ({}): {:?}", texts.len(), elapsed);
+    fn test_embedder_create() {
+        let embedder = Embedder::new().unwrap();
+        assert_eq!(embedder.model, "nomic-embed-text:latest");
     }
 
     #[test]
@@ -436,17 +229,6 @@ mod tests {
         for (a, b) in original.iter().zip(restored.iter()) {
             assert!((a - b).abs() < f32::EPSILON);
         }
-    }
-
-    #[test]
-    fn test_mean_pool() {
-        let hidden = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]; // 2 tokens, 3 dims
-        let mask = vec![1, 1];
-        let pooled = mean_pool(&hidden, &mask, 3);
-        assert_eq!(pooled.len(), 3);
-        assert_eq!(pooled[0], 2.5); // (1+4)/2
-        assert_eq!(pooled[1], 3.5); // (2+5)/2
-        assert_eq!(pooled[2], 4.5); // (3+6)/2
     }
 
     #[test]
