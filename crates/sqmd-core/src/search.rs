@@ -930,14 +930,39 @@ fn merge_results(
 
     let mut results: Vec<SearchResult> = by_id.into_values().collect();
 
+    let fts_scores: Vec<f64> = results.iter().filter_map(|r| r.fts_rank).collect();
+    let fts_max = fts_scores.iter().cloned().fold(0.0_f64, f64::max);
+    let fts_scale = if fts_max > 0.0 { 1.0 / fts_max } else { 1.0 };
+
+    let vec_dists: Vec<f64> = results.iter().filter_map(|r| r.vec_distance).collect();
+    let vec_min = vec_dists.iter().cloned().fold(1.0_f64, f64::min);
+    let vec_max = vec_dists.iter().cloned().fold(0.0_f64, f64::max);
+    let vec_range = vec_max - vec_min;
+    let vec_scale = if vec_range > 0.0 {
+        1.0 / vec_range
+    } else {
+        1.0
+    };
+
     for r in &mut results {
-        let fts_score = r.fts_rank.unwrap_or(0.0);
-        let vec_score = 1.0 - r.vec_distance.unwrap_or(1.0);
+        let fts_score = r.fts_rank.unwrap_or(0.0) * fts_scale;
+        let raw_vec = r.vec_distance.unwrap_or(1.0);
+        let vec_score = if vec_range > 0.0 {
+            (raw_vec - vec_min) * vec_scale
+        } else {
+            1.0 - raw_vec
+        };
 
-        let has_both = r.fts_rank.is_some() && r.vec_distance.is_some();
-        let penalty = if has_both { 1.0 } else { 0.8 };
+        let has_fts = r.fts_rank.is_some();
+        let has_vec = r.vec_distance.is_some();
 
-        r.score = (alpha * vec_score + (1.0 - alpha) * fts_score) * penalty;
+        if has_fts && has_vec {
+            r.score = alpha * (1.0 - vec_score) + (1.0 - alpha) * fts_score;
+        } else if has_fts {
+            r.score = fts_score * (1.0 - alpha + alpha * 0.3);
+        } else if has_vec {
+            r.score = (1.0 - vec_score) * (alpha + (1.0 - alpha) * 0.3);
+        }
     }
 
     results.sort_by(|a, b| {
@@ -962,10 +987,13 @@ fn merge_hint_vec_results(
 
     let hint_score_map: std::collections::HashMap<i64, f64> = hint_pairs.into_iter().collect();
 
+    let max_existing_score = results.iter().map(|r| r.score).fold(0.0_f64, f64::max);
+
     for r in &mut results {
         if let Some(&dist) = hint_score_map.get(&r.chunk_id) {
             let hint_relevance = 1.0 - dist.min(1.0);
-            r.score = r.score.max(hint_relevance);
+            let hint_boost = hint_relevance * 0.25 * max_existing_score.max(0.1);
+            r.score += hint_boost;
         }
     }
 
@@ -1023,7 +1051,7 @@ fn merge_hint_vec_results(
             if let Some((cid, file_path, name, sig, start, end, ct, st, importance)) =
                 row_map.get(id)
             {
-                let score = 1.0 - dist.min(1.0);
+                let score = (1.0 - dist.min(1.0)) * 0.5 * max_existing_score.max(0.1);
                 results.push(SearchResult {
                     chunk_id: *cid,
                     file_path: file_path.clone(),
@@ -1297,6 +1325,64 @@ pub fn render_search_markdown(
         .collect();
 
     Ok(rendered)
+}
+
+#[cfg(feature = "ollama")]
+pub fn generate_ollama_hints_batch(
+    db: &mut Connection,
+    limit: usize,
+    min_importance: f64,
+) -> Result<usize, Box<dyn std::error::Error>> {
+    let client = crate::ollama::OllamaClient::new();
+
+    let ids: Vec<i64> = {
+        let mut stmt = db.prepare(
+            "SELECT c.id FROM chunks c
+             WHERE c.is_deleted = 0 AND c.importance >= ?1
+             AND c.id NOT IN (SELECT DISTINCT chunk_id FROM hints WHERE hint_type = 'prospective')
+             ORDER BY c.importance DESC LIMIT ?2",
+        )?;
+        let rows = stmt
+            .query_map(params![min_importance, limit as i64], |r| r.get(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        rows
+    };
+
+    if ids.is_empty() {
+        return Ok(0);
+    }
+
+    let mut processed = 0usize;
+    for chunk_id in &ids {
+        let content: String = db.query_row(
+            "SELECT COALESCE(name || ' ', '') || COALESCE(signature || ' ', '') || COALESCE(content_raw, '') FROM chunks WHERE id = ?1",
+            params![chunk_id],
+            |r| r.get(0),
+        )?;
+
+        let truncated = if content.len() > 3000 {
+            &content[..3000]
+        } else {
+            &content
+        };
+
+        match client.generate_prospective_hints(truncated) {
+            Ok(hints) if !hints.is_empty() => {
+                let typed: Vec<(String, &str)> =
+                    hints.into_iter().map(|h| (h, "prospective")).collect();
+                if let Err(e) = crate::entities::insert_hints_typed(db, *chunk_id, &typed) {
+                    eprintln!("[hints] failed to insert for chunk {}: {e}", chunk_id);
+                }
+                processed += 1;
+            }
+            Ok(_) => {}
+            Err(e) => {
+                eprintln!("[hints] ollama failed for chunk {}: {e}", chunk_id);
+            }
+        }
+    }
+
+    Ok(processed)
 }
 
 #[cfg(test)]
