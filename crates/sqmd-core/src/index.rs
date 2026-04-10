@@ -639,6 +639,23 @@ impl<'a> Indexer<'a> {
                     entities::insert_hints(self.db, chunk_id, &hints)?;
                 }
 
+                #[cfg(feature = "ollama")]
+                {
+                    if chunk.importance >= 0.5 {
+                        if let Ok(prospective) =
+                            generate_prospective_hints_ollama(&chunk.content_raw)
+                        {
+                            if !prospective.is_empty() {
+                                let typed: Vec<(String, &str)> = prospective
+                                    .into_iter()
+                                    .map(|h| (h, "prospective"))
+                                    .collect();
+                                let _ = entities::insert_hints_typed(self.db, chunk_id, &typed);
+                            }
+                        }
+                    }
+                }
+
                 let importance =
                     entities::compute_structural_importance(self.db, chunk_id, chunk.importance)?;
                 if importance != chunk.importance {
@@ -1190,12 +1207,124 @@ impl<'a> KnowledgeIngestor<'a> {
             }
         }
 
+        if results.len() > 1 {
+            let _ = self.generate_session_summary(&results, inputs);
+        }
+
         self.db.execute_batch("COMMIT")?;
         Ok(IngestBatchResult {
             ingested,
             duplicates,
             results,
         })
+    }
+
+    fn generate_session_summary(
+        &self,
+        ingest_results: &[IngestResult],
+        inputs: &[KnowledgeChunk],
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let first_source_type = inputs
+            .first()
+            .and_then(|i| crate::chunk::SourceType::from_str_name(&i.source_type))
+            .unwrap_or(crate::chunk::SourceType::Memory);
+
+        let first_name = inputs
+            .first()
+            .and_then(|i| i.name.as_deref())
+            .unwrap_or("Session");
+
+        let max_importance = inputs
+            .iter()
+            .filter_map(|i| i.importance)
+            .fold(0.8f64, f64::max);
+
+        let _common_prefix = {
+            let paths: Vec<String> = ingest_results
+                .iter()
+                .map(|r| {
+                    let fp = self
+                        .db
+                        .query_row(
+                            "SELECT file_path FROM chunks WHERE id = ?1",
+                            rusqlite::params![r.chunk_id],
+                            |row| row.get::<_, String>(0),
+                        )
+                        .unwrap_or_default();
+                    fp
+                })
+                .collect();
+            if paths.is_empty() {
+                String::from("signet://summary")
+            } else if paths.len() == 1 {
+                format!("{}/summary", paths[0])
+            } else {
+                let first = &paths[0];
+                let mut prefix_len = 0;
+                for (i, c) in first.chars().enumerate() {
+                    if paths.iter().all(|p| p.chars().nth(i) == Some(c)) {
+                        prefix_len = i + 1;
+                    } else {
+                        break;
+                    }
+                }
+                let prefix = &first[..prefix_len];
+                if prefix.is_empty() {
+                    format!("{}/summary", paths[0])
+                } else {
+                    format!("{}summary", prefix)
+                }
+            };
+        };
+
+        let mut content_parts: Vec<String> = Vec::new();
+        for (input, result) in inputs.iter().zip(ingest_results.iter()) {
+            if result.was_duplicate {
+                continue;
+            }
+            let name_part = input.name.as_deref().unwrap_or("(unnamed)");
+            let preview: String = if input.content.len() > 200 {
+                input.content[..200].to_string()
+            } else {
+                input.content.clone()
+            };
+            content_parts.push(format!("{}: {}", name_part, preview));
+        }
+
+        let summary_content: String = content_parts.join("\n");
+        let summary_content = if summary_content.len() > 4000 {
+            summary_content[..4000].to_string()
+        } else {
+            summary_content
+        };
+
+        let summary_input = KnowledgeChunk {
+            content: summary_content,
+            chunk_type: "summary".to_string(),
+            source_type: first_source_type.as_str().to_string(),
+            name: Some(format!("{} Summary", first_name)),
+            importance: Some(max_importance),
+            agent_id: inputs.iter().filter_map(|i| i.agent_id.clone()).next(),
+            tags: None,
+            decay_rate: None,
+            created_by: None,
+            metadata: None,
+            relationships: None,
+        };
+
+        let summary_result = self.ingest(&summary_input)?;
+        if !summary_result.was_duplicate {
+            for ingest_result in ingest_results {
+                if !ingest_result.was_duplicate {
+                    self.db.execute(
+                        "INSERT OR IGNORE INTO relationships (source_id, target_id, rel_type) VALUES (?1, ?2, 'contains')",
+                        rusqlite::params![summary_result.chunk_id, ingest_result.chunk_id],
+                    )?;
+                }
+            }
+        }
+
+        Ok(())
     }
 
     /// Soft-delete a knowledge chunk by ID
@@ -1229,6 +1358,14 @@ impl<'a> KnowledgeIngestor<'a> {
         }
         Ok(true)
     }
+}
+
+#[cfg(feature = "ollama")]
+fn generate_prospective_hints_ollama(
+    content: &str,
+) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+    let client = crate::ollama::OllamaClient::new();
+    client.generate_prospective_hints(content)
 }
 
 #[cfg(test)]

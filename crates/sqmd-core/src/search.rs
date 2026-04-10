@@ -874,9 +874,9 @@ pub fn hybrid_search(
 ) -> Result<Vec<SearchResult>, Box<dyn std::error::Error>> {
     let fts_results = fts_search(db, query)?;
 
-    let vec_results = if embedder.is_available() {
+    let (vec_results, hint_vec_pairs) = if embedder.is_available() {
         let query_vec = embedder.embed_query(&query.text)?;
-        vec_search(
+        let vr = vec_search(
             db,
             &query_vec,
             query.top_k * 2,
@@ -885,12 +885,17 @@ pub fn hybrid_search(
             query.source_type_filter.as_deref(),
             query.agent_id_filter.as_deref(),
             &query.exclude_path_prefixes,
-        )?
+        )?;
+        let hv = hint_vec_search(db, &query_vec, query.top_k * 2).unwrap_or_default();
+        (vr, hv)
     } else {
-        Vec::new()
+        (Vec::new(), Vec::new())
     };
 
     let merged = merge_results(fts_results, vec_results, query.alpha);
+
+    let merged = merge_hint_vec_results(db, merged, hint_vec_pairs)?;
+
     let filtered: Vec<SearchResult> = merged
         .into_iter()
         .filter(|r| r.score >= query.min_score)
@@ -943,6 +948,111 @@ fn merge_results(
     results
 }
 
+#[cfg(feature = "embed")]
+fn merge_hint_vec_results(
+    db: &Connection,
+    mut results: Vec<SearchResult>,
+    hint_pairs: Vec<(i64, f64)>,
+) -> Result<Vec<SearchResult>, Box<dyn std::error::Error>> {
+    if hint_pairs.is_empty() {
+        return Ok(results);
+    }
+
+    let existing_ids: std::collections::HashSet<i64> = results.iter().map(|r| r.chunk_id).collect();
+
+    let hint_score_map: std::collections::HashMap<i64, f64> = hint_pairs.into_iter().collect();
+
+    for r in &mut results {
+        if let Some(&dist) = hint_score_map.get(&r.chunk_id) {
+            let hint_relevance = 1.0 - dist.min(1.0);
+            r.score = r.score.max(hint_relevance);
+        }
+    }
+
+    let missing: Vec<(i64, f64)> = hint_score_map
+        .iter()
+        .filter(|(id, _)| !existing_ids.contains(id))
+        .map(|(&id, &s)| (id, s))
+        .collect();
+
+    if !missing.is_empty() {
+        let placeholders: Vec<String> = (0..missing.len()).map(|i| format!("?{}", i + 1)).collect();
+        let sql = format!(
+            "SELECT id, file_path, name, signature, line_start, line_end, chunk_type, source_type, importance \
+             FROM chunks WHERE id IN ({}) AND is_deleted = 0",
+            placeholders.join(", ")
+        );
+        let mut stmt = db.prepare(&sql)?;
+        let param_vals: Vec<Box<dyn rusqlite::ToSql>> = missing
+            .iter()
+            .map(|(id, _)| Box::new(*id) as Box<dyn rusqlite::ToSql>)
+            .collect();
+        let param_refs: Vec<&dyn rusqlite::ToSql> = param_vals.iter().map(|p| p.as_ref()).collect();
+
+        type HVecRow = (
+            i64,
+            String,
+            Option<String>,
+            Option<String>,
+            i64,
+            i64,
+            String,
+            String,
+            f64,
+        );
+        let rows: Vec<HVecRow> = stmt
+            .query_map(param_refs.as_slice(), |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                    r.get(6)?,
+                    r.get(7)?,
+                    r.get(8)?,
+                ))
+            })?
+            .collect::<Result<_, _>>()?;
+
+        let row_map: std::collections::HashMap<i64, HVecRow> =
+            rows.into_iter().map(|r| (r.0, r)).collect();
+
+        for (id, dist) in &missing {
+            if let Some((cid, file_path, name, sig, start, end, ct, st, importance)) =
+                row_map.get(id)
+            {
+                let score = 1.0 - dist.min(1.0);
+                results.push(SearchResult {
+                    chunk_id: *cid,
+                    file_path: file_path.clone(),
+                    name: name.clone(),
+                    signature: sig.clone(),
+                    line_start: *start,
+                    line_end: *end,
+                    chunk_type: ct.clone(),
+                    source_type: st.clone(),
+                    score,
+                    vec_distance: Some(*dist),
+                    fts_rank: None,
+                    snippet: Some("[hint vec match]".to_string()),
+                    decay_rate: 0.0,
+                    last_accessed: None,
+                    importance: *importance,
+                });
+            }
+        }
+    }
+
+    results.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    Ok(results)
+}
+
 fn chrono_now() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -988,6 +1098,47 @@ pub fn store_embedding(
     )?;
 
     Ok(())
+}
+
+#[cfg(feature = "embed")]
+pub fn store_hint_embedding(
+    db: &Connection,
+    chunk_id: i64,
+    vector: &[f32],
+) -> Result<(), Box<dyn std::error::Error>> {
+    db.execute(
+        "INSERT OR REPLACE INTO hints_vec(rowid, embedding) VALUES (?1, ?2)",
+        params![chunk_id, format_vector(vector)],
+    )?;
+    Ok(())
+}
+
+#[cfg(feature = "embed")]
+fn hint_vec_search(
+    db: &Connection,
+    query_vec: &[f32],
+    top_k: usize,
+) -> Result<Vec<(i64, f64)>, Box<dyn std::error::Error>> {
+    let count: i64 = db
+        .query_row("SELECT COUNT(*) FROM hints_vec", [], |r| r.get(0))
+        .unwrap_or(0);
+    if count == 0 {
+        return Ok(Vec::new());
+    }
+
+    let vec_str = format_vector(query_vec);
+    let sql = format!(
+        "SELECT rowid, distance FROM hints_vec WHERE embedding MATCH ?1 AND k = {}",
+        top_k
+    );
+    let mut stmt = db.prepare(&sql)?;
+    let rows: Vec<(i64, f64)> = stmt
+        .query_map(params![vec_str], |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, f64>(1)?))
+        })?
+        .collect::<Result<_, _>>()?;
+
+    Ok(rows)
 }
 
 pub fn get_unembedded_chunk_ids(
@@ -1053,6 +1204,25 @@ pub fn embed_unembedded(
     for ((chunk_id, _), vector) in truncated.iter().zip(vectors.iter()) {
         store_embedding(db, *chunk_id, vector, embedder.model_name())?;
     }
+
+    let hint_texts: Vec<(i64, String)> = truncated
+        .iter()
+        .filter_map(|(chunk_id, _)| {
+            crate::entities::get_concatenated_hints_for_chunk(db, *chunk_id)
+                .ok()
+                .flatten()
+                .map(|h| (*chunk_id, h))
+        })
+        .collect();
+
+    if !hint_texts.is_empty() {
+        let hint_refs: Vec<&str> = hint_texts.iter().map(|(_, t)| t.as_str()).collect();
+        let hint_vectors = embedder.embed_batch_documents(&hint_refs)?;
+        for ((chunk_id, _), vector) in hint_texts.iter().zip(hint_vectors.iter()) {
+            store_hint_embedding(db, *chunk_id, vector)?;
+        }
+    }
+
     db.execute_batch("COMMIT")?;
 
     Ok(truncated.len())

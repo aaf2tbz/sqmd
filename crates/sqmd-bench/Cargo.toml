@@ -6,9 +6,11 @@ edition = "2021"
 [features]
 default = []
 embed = ["sqmd-core/embed"]
+ollama = ["sqmd-core/ollama"]
 
 [dependencies]
 sqmd-core = { path = "../sqmd-core" }
 rusqlite = { version = "0.34", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+clap = { version = "4", features = ["derive"] }

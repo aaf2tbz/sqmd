@@ -11,6 +11,8 @@ pub mod episodes;
 pub mod files;
 pub mod index;
 pub mod languages;
+#[cfg(feature = "ollama")]
+pub mod ollama;
 pub mod query_cache;
 pub mod relationships;
 pub mod schema;

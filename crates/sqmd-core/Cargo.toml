@@ -6,6 +6,7 @@ edition = "2021"
 [features]
 default = []
 embed = ["dep:ort", "dep:ndarray", "dep:ureq", "dep:tokenizers"]
+ollama = ["dep:ureq"]
 
 [dependencies]
 rusqlite = { version = "0.34", features = ["bundled"] }
@@ -16,7 +17,7 @@ sha2 = "0.10"
 thiserror = "2"
 ort = { version = "2.0.0-rc.12", optional = true }
 ndarray = { version = "0.17", optional = true }
-ureq = { version = "3", optional = true }
+ureq = { version = "3", optional = true, features = ["json"] }
 tokenizers = { version = "0.21", optional = true }
 ignore = "0.4"
 walkdir = "2"
