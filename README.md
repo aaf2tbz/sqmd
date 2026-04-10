@@ -14,8 +14,9 @@ LLMs are bad at reading large codebases. They lose context, hallucinate file pat
 - **Entity graph.** Every named symbol — functions, structs, traits, classes, interfaces — becomes a first-class entity with metadata (kind, signature, parent scope). Entities are linked by structural relationships (extends, implements, contains) and import dependencies, forming a multi-layer graph the agent can traverse.
 - **Dependency-aware recall.** Import and call graphs plus entity dependencies let an agent trace "who calls this" and "what does this depend on" across files, traversing both relationship layers bidirectionally.
 - **Relational hints.** Prospective search hints are generated from the entity graph (e.g., "items that implement Trait" or "functions in this module"), giving search a +15% relevance boost for structurally connected results.
-- **LLM-generated prospective hints.** Optional integration with Ollama (gemma3:4b) generates natural-language retrieval cues per chunk — bridging the semantic gap between how developers search and what code actually says. Validated by recall research showing measurable improvement over template-only hints.
-- **Semantic hint retrieval.** Hint text is embedded alongside chunk content, enabling vector KNN search over hints. The recall eval showed this was the single strongest retrieval improvement (Hit@1: 78.2% → 80.8%).
+- **Hybrid search.** FTS5 keyword and 768-dim vector search (nomic-embed-text-v1.5) are alpha-blended with normalized scoring so neither signal dominates. Results that match both signals rank highest; single-signal results get proportional credit.
+- **LLM-generated prospective hints.** Optional integration with Ollama (gemma3:4b) generates natural-language retrieval cues per chunk — bridging the semantic gap between how developers search and what code actually says. Run as a separate post-indexing step via `sqmd hints`.
+- **Semantic hint retrieval.** Hint text is embedded alongside chunk content, enabling vector KNN search over hints. Hint matches boost existing hybrid scores without overriding them.
 - **Typed communities.** Beyond directory-based summaries, sqmd detects **module communities** (files connected by imports) and **type-hierarchy communities** (entities connected by extends/implements), providing agent-ready summaries of architectural boundaries.
 - **Session summaries.** Knowledge batches automatically produce summary chunks with `contains` relationships to children, providing document-level retrieval surface for fragmented knowledge.
 - **Ranked retrieval.** Three-factor scoring (relevance × recency × importance) with diversity dampening means the agent sees the most useful code first, not just the highest keyword match.
@@ -31,9 +32,11 @@ cargo build --release --features embed,ollama # ~27MB: + LLM prospective hints (
 cd /path/to/your/project
 sqmd init     # creates .sqmd/index.db
 sqmd index    # tree-sitter parse → chunk → store (incremental on re-runs)
+sqmd embed    # generate vector embeddings (nomic-embed-text-v1.5, local ONNX)
+sqmd hints    # generate LLM prospective hints (requires --features ollama + running Ollama)
 ```
 
-Note: `sqmd index --embed` generates vector embeddings for hybrid search. This uses nomic-embed-text-v1.5 locally via ONNX and may take a while on large codebases.
+Note: `sqmd index --embed` combines indexing and embedding in one step. After generating hints with `sqmd hints`, re-run `sqmd embed` to embed the new hint text into `hints_vec`.
 
 Then point your agent at the Unix socket (`sqmd serve`) or use the CLI directly:
 
@@ -119,8 +122,8 @@ sqmd provides three search modes, with a fourth optional lane when hint embeddin
 
 - **FTS5 keyword** — Porter-stemmed full-text search across chunk names, signatures, and content. ~20ms.
 - **Vector semantic** — 768-dim embeddings via nomic-embed-text-v1.5 (ONNX, quantized, cached locally). Requires `--features embed`.
-- **Hybrid** — Alpha-blended merge of both. Default 70% vector / 30% keyword with single-source penalty. ~40ms.
-- **Hint vector** (optional) — When hint embeddings exist, an additional KNN search over hint text runs in parallel with content vector search. Results are merged into the hybrid scorer with the same alpha-blend logic.
+- **Hybrid** — Normalized alpha-blended merge of FTS and vector scores. Both signals are scaled to [0,1] before blending so neither dominates due to raw score magnitude. Default 70% vector / 30% keyword. Results with both signals rank highest; single-signal results get proportional credit. ~40ms.
+- **Hint vector** (optional) — When hint embeddings exist, an additional KNN search over hint text runs in parallel with content vector search. Hint matches additively boost existing hybrid scores (25% of max score × hint relevance) rather than overriding them.
 
 Results are scored with a three-factor formula: `relevance × recency × importance`, then importance-boosted and diversity-dampened (same-file clustering penalty) so the agent sees diverse, high-value results.
 
@@ -147,9 +150,10 @@ source files
     ↓ extract structural relations → entity_dependencies (extends, implements, contains)
     ↓ promote symbols → entities (first-class knowledge graph nodes)
     ↓ generate template hints → hints (prospective search anchors)
-    ↓ [optional] generate LLM hints → hints with type='prospective' (Ollama / gemma3:4b)
     ↓ detect communities → module + type-hierarchy groupings
     ↓ content-hash decision pipeline (skip / update / tombstone)
+    ↓
+    ↓ [optional, separate step] sqmd hints → LLM prospective hints (Ollama / gemma3:4b)
     ↓
 SQLite database (schema v12)
     ├── chunks         (raw code + metadata)
@@ -175,7 +179,7 @@ Single-pass parsing: tree-sitter parses each file once; the AST is reused for ch
 
 These are intentionally separate:
 - **`embed`** runs nomic-embed-text-v1.5 locally via ONNX for vector search
-- **`ollama`** calls a local Ollama server (default: gemma3:4b) for generating natural-language retrieval cues at index time
+- **`ollama`** calls a local Ollama server (default: gemma3:4b) for generating natural-language retrieval cues via the `sqmd hints` command (decoupled from indexing for performance)
 
 Configuration:
 - `OLLAMA_HOST` — Ollama server URL (default: `http://localhost:11434`)
@@ -187,7 +191,7 @@ Configuration:
 |-------|------|-----------------|
 | `cargo build --release` | ~10MB | Chunking, FTS5, relationships, daemon, 18 languages |
 | `cargo build --release --features embed` | ~27MB | + ONNX Runtime, vector search, hybrid scoring |
-| `cargo build --release --features embed,ollama` | ~27MB | + LLM hint generation at index time |
+| `cargo build --release --features embed,ollama` | ~27MB | + LLM hint generation via `sqmd hints` |
 
 ## Commands
 
@@ -195,6 +199,10 @@ Configuration:
 sqmd init                            # create index at .sqmd/index.db
 sqmd index                           # full or incremental index
 sqmd index --embed                   # index + generate embeddings
+sqmd embed                           # generate embeddings for unembedded chunks
+sqmd hints                           # generate LLM prospective hints (requires ollama feature)
+sqmd hints --min-importance 0.7      # only high-importance chunks
+sqmd hints --limit 100               # process at most 100 chunks
 
 sqmd search "auth"                   # keyword search
 sqmd search "config" --file src/lib  # file-filtered search
