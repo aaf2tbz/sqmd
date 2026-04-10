@@ -1239,19 +1239,17 @@ impl<'a> KnowledgeIngestor<'a> {
             .filter_map(|i| i.importance)
             .fold(0.8f64, f64::max);
 
-        let _common_prefix = {
+        let summary_path = {
             let paths: Vec<String> = ingest_results
                 .iter()
                 .map(|r| {
-                    let fp = self
-                        .db
+                    self.db
                         .query_row(
                             "SELECT file_path FROM chunks WHERE id = ?1",
                             rusqlite::params![r.chunk_id],
                             |row| row.get::<_, String>(0),
                         )
-                        .unwrap_or_default();
-                    fp
+                        .unwrap_or_default()
                 })
                 .collect();
             if paths.is_empty() {
@@ -1274,7 +1272,7 @@ impl<'a> KnowledgeIngestor<'a> {
                 } else {
                     format!("{}summary", prefix)
                 }
-            };
+            }
         };
 
         let mut content_parts: Vec<String> = Vec::new();
@@ -1298,7 +1296,7 @@ impl<'a> KnowledgeIngestor<'a> {
             summary_content
         };
 
-        let summary_input = KnowledgeChunk {
+        let mut summary_input = KnowledgeChunk {
             content: summary_content,
             chunk_type: "summary".to_string(),
             source_type: first_source_type.as_str().to_string(),
@@ -1311,6 +1309,7 @@ impl<'a> KnowledgeIngestor<'a> {
             metadata: None,
             relationships: None,
         };
+        summary_input.content = format!("{}\n\n{}", summary_path, summary_input.content);
 
         let summary_result = self.ingest(&summary_input)?;
         if !summary_result.was_duplicate {
