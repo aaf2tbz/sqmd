@@ -981,6 +981,21 @@ pub fn search_hints(
     Ok(scored)
 }
 
+pub fn get_concatenated_hints_for_chunk(
+    db: &rusqlite::Connection,
+    chunk_id: i64,
+) -> Result<Option<String>, Box<dyn std::error::Error>> {
+    let mut stmt = db.prepare("SELECT hint_text FROM hints WHERE chunk_id = ?1")?;
+    let hints: Vec<String> = stmt
+        .query_map(params![chunk_id], |r| r.get::<_, String>(0))?
+        .collect::<Result<_, _>>()?;
+    if hints.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(hints.join(" ")))
+    }
+}
+
 pub fn tombstone_chunks(
     db: &rusqlite::Connection,
     file_path: &str,

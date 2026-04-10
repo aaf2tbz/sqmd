@@ -2,7 +2,7 @@ use rusqlite::{Connection, Result as SqlResult};
 use sqlite_vec::sqlite3_vec_init;
 use std::path::Path;
 
-const CURRENT_VERSION: i64 = 11;
+const CURRENT_VERSION: i64 = 12;
 
 pub fn init(db: &mut Connection) -> SqlResult<()> {
     #[allow(clippy::missing_transmute_annotations)]
@@ -69,6 +69,9 @@ pub fn init(db: &mut Connection) -> SqlResult<()> {
             if sql_version < 11 {
                 migrate_v11(db)?;
             }
+            if sql_version < 12 {
+                migrate_v12(db)?;
+            }
         }
         return Ok(());
     }
@@ -111,6 +114,10 @@ pub fn init(db: &mut Connection) -> SqlResult<()> {
 
     if version < 11 {
         migrate_v11(db)?;
+    }
+
+    if version < 12 {
+        migrate_v12(db)?;
     }
 
     Ok(())
@@ -524,6 +531,16 @@ fn migrate_v4(db: &mut Connection) -> SqlResult<()> {
     db.execute_batch("PRAGMA foreign_keys = ON;")?;
     db.execute_batch("INSERT OR IGNORE INTO schema_version (version) VALUES (4);")?;
 
+    Ok(())
+}
+
+fn migrate_v12(db: &mut Connection) -> SqlResult<()> {
+    if let Err(e) = db.execute_batch(
+        "CREATE VIRTUAL TABLE IF NOT EXISTS hints_vec USING vec0(embedding float[768]);",
+    ) {
+        eprintln!("[schema] hints_vec creation failed: {e}");
+    }
+    db.execute_batch("INSERT OR IGNORE INTO schema_version (version) VALUES (12);")?;
     Ok(())
 }
 

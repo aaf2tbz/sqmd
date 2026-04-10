@@ -1,5 +1,37 @@
+use clap::{Parser, Subcommand};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+
+#[derive(Parser)]
+#[command(name = "sqmd-bench", version = "0.2.0")]
+struct Cli {
+    #[command(subcommand)]
+    command: Option<Commands>,
+}
+
+#[derive(Subcommand)]
+enum Commands {
+    Run {
+        #[arg(default_value = ".sqmd/index.db")]
+        db_path: PathBuf,
+        #[arg(default_value = "layered")]
+        mode: String,
+    },
+    Generate {
+        #[arg(default_value = ".sqmd/index.db")]
+        db_path: PathBuf,
+        #[arg(long, default_value = "100")]
+        limit: usize,
+        #[arg(long, default_value = "eval_queries.json")]
+        output: String,
+    },
+    Compare {
+        #[arg(default_value = ".sqmd/index.db")]
+        db_path: PathBuf,
+        #[arg(long)]
+        ground_truth: String,
+    },
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct GroundTruth {
@@ -57,9 +89,33 @@ struct BenchmarkReport {
     results: Vec<QueryResult>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct EvalQuery {
+    chunk_id: i64,
+    file_path: String,
+    name: Option<String>,
+    content_preview: String,
+    eval_query: String,
+    chunk_type: String,
+    language: String,
+}
+
+#[derive(Debug, Serialize)]
+struct CompareResult {
+    total_queries: usize,
+    lanes: serde_json::Map<String, serde_json::Value>,
+}
+
+#[derive(Debug, Serialize)]
+struct LaneMetrics {
+    hit_at_1: f64,
+    hit_at_3: f64,
+    hit_at_5: f64,
+    mrr: f64,
+}
+
 fn ground_truth() -> Vec<GroundTruth> {
     vec![
-        // === Core Data Structures ===
         GroundTruth {
             id: "ds-1",
             query: "look up a key for a read operation",
@@ -141,7 +197,6 @@ fn ground_truth() -> Vec<GroundTruth> {
             difficulty: Difficulty::Easy,
             expected_layers: vec!["fts"],
         },
-        // === Persistence ===
         GroundTruth {
             id: "rp-1",
             query: "serialize objects to RDB format",
@@ -169,7 +224,6 @@ fn ground_truth() -> Vec<GroundTruth> {
             difficulty: Difficulty::Medium,
             expected_layers: vec!["fts"],
         },
-        // === Networking ===
         GroundTruth {
             id: "net-1",
             query: "create a new client connection",
@@ -197,7 +251,6 @@ fn ground_truth() -> Vec<GroundTruth> {
             difficulty: Difficulty::Medium,
             expected_layers: vec!["fts"],
         },
-        // === Pub/Sub ===
         GroundTruth {
             id: "ps-1",
             query: "publish a message to channel subscribers",
@@ -216,7 +269,6 @@ fn ground_truth() -> Vec<GroundTruth> {
             difficulty: Difficulty::Easy,
             expected_layers: vec!["fts"],
         },
-        // === Clustering ===
         GroundTruth {
             id: "cl-1",
             query: "determine which cluster node should handle a command",
@@ -235,7 +287,6 @@ fn ground_truth() -> Vec<GroundTruth> {
             difficulty: Difficulty::Hard,
             expected_layers: vec!["fts", "graph"],
         },
-        // === Scripting ===
         GroundTruth {
             id: "lua-1",
             query: "execute a Lua EVAL command",
@@ -263,7 +314,6 @@ fn ground_truth() -> Vec<GroundTruth> {
             difficulty: Difficulty::Hard,
             expected_layers: vec!["fts", "graph"],
         },
-        // === Expiration ===
         GroundTruth {
             id: "exp-1",
             query: "proactively expire keys in the background",
@@ -282,7 +332,6 @@ fn ground_truth() -> Vec<GroundTruth> {
             difficulty: Difficulty::Medium,
             expected_layers: vec!["fts", "graph"],
         },
-        // === Replication ===
         GroundTruth {
             id: "rep-1",
             query: "replicate write commands to slave nodes",
@@ -292,7 +341,6 @@ fn ground_truth() -> Vec<GroundTruth> {
             difficulty: Difficulty::Medium,
             expected_layers: vec!["fts"],
         },
-        // === Graph traversal tests (require entity graph + relationships) ===
         GroundTruth {
             id: "graph-1",
             query: "what functions call lookupKeyReadWithFlags",
@@ -338,7 +386,6 @@ fn ground_truth() -> Vec<GroundTruth> {
             difficulty: Difficulty::Medium,
             expected_layers: vec!["fts"],
         },
-        // === Community detection tests ===
         GroundTruth {
             id: "comm-1",
             query: "all networking and client handling code",
@@ -370,18 +417,36 @@ fn ground_truth() -> Vec<GroundTruth> {
 }
 
 fn main() {
-    let db_path = std::env::args()
-        .nth(1)
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(".sqmd/index.db"));
+    let cli = Cli::parse();
 
-    let mode = std::env::args()
-        .nth(2)
-        .unwrap_or_else(|| "layered".to_string());
+    match cli.command {
+        Some(Commands::Run { db_path, mode }) => cmd_run(&db_path, &mode),
+        Some(Commands::Generate {
+            db_path,
+            limit,
+            output,
+        }) => cmd_generate(&db_path, limit, &output),
+        Some(Commands::Compare {
+            db_path,
+            ground_truth,
+        }) => cmd_compare(&db_path, &ground_truth),
+        None => {
+            let db_path = std::env::args()
+                .nth(1)
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from(".sqmd/index.db"));
+            let mode = std::env::args()
+                .nth(2)
+                .unwrap_or_else(|| "layered".to_string());
+            cmd_run(&db_path, &mode);
+        }
+    }
+}
 
+fn cmd_run(db_path: &PathBuf, mode: &str) {
     if !db_path.exists() {
         eprintln!("Database not found at {:?}", db_path);
-        eprintln!("Usage: sqmd-bench [path/to/index.db] [fts|layered|hybrid]");
+        eprintln!("Usage: sqmd-bench run [path/to/index.db] [fts|layered|hybrid]");
         std::process::exit(1);
     }
 
@@ -391,7 +456,7 @@ fn main() {
         std::process::exit(1);
     }
 
-    let db = sqmd_core::schema::open(&db_path).expect("Failed to open database");
+    let db = sqmd_core::schema::open(db_path).expect("Failed to open database");
     let queries = ground_truth();
     let total = queries.len();
 
@@ -413,7 +478,7 @@ fn main() {
             ..Default::default()
         };
 
-        let search_results = match mode.as_str() {
+        let search_results = match mode {
             "fts" => sqmd_core::search::fts_search(&db, &search_query).unwrap_or_default(),
             "layered" => sqmd_core::search::layered_search(&db, &search_query)
                 .map(|lr| lr.results)
@@ -621,6 +686,177 @@ fn main() {
     };
 
     println!("{}", serde_json::to_string_pretty(&report).unwrap());
+}
+
+fn cmd_generate(db_path: &PathBuf, limit: usize, output: &str) {
+    if !db_path.exists() {
+        eprintln!("Database not found at {:?}", db_path);
+        std::process::exit(1);
+    }
+
+    let db = sqmd_core::schema::open(db_path).expect("Failed to open database");
+
+    let mut stmt = db.prepare(
+        "SELECT c.id, c.file_path, c.name, c.content_raw, c.chunk_type, c.language, c.importance \
+         FROM chunks c WHERE c.is_deleted = 0 AND c.name IS NOT NULL AND c.importance >= 0.5 \
+         ORDER BY c.importance DESC LIMIT ?1",
+    ).unwrap();
+
+    let rows: Vec<(i64, String, String, String, String, String, f64)> = stmt
+        .query_map(rusqlite::params![limit as i64], |r| {
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                r.get(2)?,
+                r.get(3)?,
+                r.get(4)?,
+                r.get(5)?,
+                r.get(6)?,
+            ))
+        })
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+
+    let mut eval_queries: Vec<EvalQuery> = Vec::new();
+
+    for (chunk_id, file_path, name, content_raw, chunk_type, language, _importance) in &rows {
+        let query = generate_eval_query(name, content_raw);
+        let preview = if content_raw.len() > 200 {
+            &content_raw[..200]
+        } else {
+            content_raw
+        };
+        eval_queries.push(EvalQuery {
+            chunk_id: *chunk_id,
+            file_path: file_path.clone(),
+            name: Some(name.clone()),
+            content_preview: preview.to_string(),
+            eval_query: query,
+            chunk_type: chunk_type.clone(),
+            language: language.clone(),
+        });
+    }
+
+    let json = serde_json::to_string_pretty(&eval_queries).unwrap();
+    std::fs::write(output, &json).expect("Failed to write output file");
+    eprintln!(
+        "Generated {} eval queries to {}",
+        eval_queries.len(),
+        output
+    );
+}
+
+fn generate_eval_query(name: &str, content: &str) -> String {
+    #[cfg(feature = "ollama")]
+    {
+        if let Ok(client) = std::panic::catch_unwind(|| sqmd_core::ollama::OllamaClient::new()) {
+            if let Ok(hints) = client.generate_prospective_hints(content) {
+                if let Some(first) = hints.into_iter().next() {
+                    return first;
+                }
+            }
+        }
+    }
+
+    let _ = name;
+    template_eval_query(name, content)
+}
+
+fn template_eval_query(name: &str, content: &str) -> String {
+    let first_line = content.lines().next().unwrap_or("");
+    let words: Vec<&str> = first_line.split_whitespace().take(6).collect();
+    if !words.is_empty() {
+        format!("how does {} work", words.join(" "))
+    } else {
+        format!("find {}", name)
+    }
+}
+
+fn cmd_compare(db_path: &PathBuf, ground_truth_path: &str) {
+    if !db_path.exists() {
+        eprintln!("Database not found at {:?}", db_path);
+        std::process::exit(1);
+    }
+
+    let gt_content =
+        std::fs::read_to_string(ground_truth_path).expect("Failed to read ground truth file");
+    let eval_queries: Vec<EvalQuery> =
+        serde_json::from_str(&gt_content).expect("Failed to parse ground truth JSON");
+
+    let db = sqmd_core::schema::open(db_path).expect("Failed to open database");
+    let total = eval_queries.len();
+
+    let mut compare_result = CompareResult {
+        total_queries: total,
+        lanes: serde_json::Map::new(),
+    };
+
+    let lanes = vec![("fts", "fts"), ("layered", "layered")];
+
+    for (lane_name, lane_mode) in &lanes {
+        let mut hit_at_1 = 0usize;
+        let mut hit_at_3 = 0usize;
+        let mut hit_at_5 = 0usize;
+        let mut mrr_sum = 0.0f64;
+
+        for eq in &eval_queries {
+            let search_query = sqmd_core::search::SearchQuery {
+                text: eq.eval_query.clone(),
+                top_k: 10,
+                alpha: 0.7,
+                ..Default::default()
+            };
+
+            let search_results = match *lane_mode {
+                "fts" => sqmd_core::search::fts_search(&db, &search_query).unwrap_or_default(),
+                "layered" => sqmd_core::search::layered_search(&db, &search_query)
+                    .map(|lr| lr.results)
+                    .unwrap_or_default(),
+                #[cfg(feature = "embed")]
+                "hybrid" => {
+                    let mut embedder = sqmd_core::embed::Embedder::new().unwrap();
+                    sqmd_core::search::hybrid_search(&db, &search_query, &mut embedder)
+                        .unwrap_or_default()
+                }
+                _ => Vec::new(),
+            };
+
+            let mut rank = None;
+            for (i, r) in search_results.iter().enumerate() {
+                if r.chunk_id == eq.chunk_id {
+                    rank = Some(i + 1);
+                    break;
+                }
+            }
+
+            match rank {
+                Some(1) => hit_at_1 += 1,
+                _ => {}
+            }
+            if rank.is_some_and(|r| r <= 3) {
+                hit_at_3 += 1;
+            }
+            if rank.is_some_and(|r| r <= 5) {
+                hit_at_5 += 1;
+            }
+            mrr_sum += rank.map(|r| 1.0 / r as f64).unwrap_or(0.0);
+        }
+
+        let metrics = LaneMetrics {
+            hit_at_1: hit_at_1 as f64 / total as f64,
+            hit_at_3: hit_at_3 as f64 / total as f64,
+            hit_at_5: hit_at_5 as f64 / total as f64,
+            mrr: mrr_sum / total as f64,
+        };
+
+        compare_result.lanes.insert(
+            lane_name.to_string(),
+            serde_json::to_value(&metrics).unwrap(),
+        );
+    }
+
+    println!("{}", serde_json::to_string_pretty(&compare_result).unwrap());
 }
 
 fn check_entity_exists(db: &rusqlite::Connection, function_name: &str, file_path: &str) -> bool {
