@@ -2,7 +2,7 @@ use rusqlite::{Connection, Result as SqlResult};
 use sqlite_vec::sqlite3_vec_init;
 use std::path::Path;
 
-const CURRENT_VERSION: i64 = 12;
+const CURRENT_VERSION: i64 = 13;
 
 pub fn init(db: &mut Connection) -> SqlResult<()> {
     #[allow(clippy::missing_transmute_annotations)]
@@ -21,13 +21,13 @@ pub fn init(db: &mut Connection) -> SqlResult<()> {
 
     // Always ensure chunks_vec exists — handles dbs created before embed feature
     if let Err(e) = db.execute_batch(
-        "CREATE VIRTUAL TABLE IF NOT EXISTS chunks_vec USING vec0(embedding float[768]);",
+        "CREATE VIRTUAL TABLE IF NOT EXISTS chunks_vec USING vec0(embedding float[1024]);",
     ) {
         eprintln!("[schema] chunks_vec creation failed: {e}");
     }
 
     if let Err(e) = db.execute_batch(
-        "CREATE VIRTUAL TABLE IF NOT EXISTS hints_vec USING vec0(embedding float[768]);",
+        "CREATE VIRTUAL TABLE IF NOT EXISTS hints_vec USING vec0(embedding float[1024]);",
     ) {
         eprintln!("[schema] hints_vec creation failed: {e}");
     }
@@ -43,7 +43,7 @@ pub fn init(db: &mut Connection) -> SqlResult<()> {
     if version == 0 {
         db.execute_batch(include_str!("../../../docs/schema.sql"))?;
         db.execute_batch(
-            "CREATE VIRTUAL TABLE IF NOT EXISTS chunks_vec USING vec0(embedding float[768]);",
+            "CREATE VIRTUAL TABLE IF NOT EXISTS chunks_vec USING vec0(embedding float[1024]);",
         )
         .ok();
         // schema.sql covers through v5 — only run migrations beyond that
@@ -77,6 +77,9 @@ pub fn init(db: &mut Connection) -> SqlResult<()> {
             }
             if sql_version < 12 {
                 migrate_v12(db)?;
+            }
+            if sql_version < 13 {
+                migrate_v13(db)?;
             }
         }
         return Ok(());
@@ -124,6 +127,10 @@ pub fn init(db: &mut Connection) -> SqlResult<()> {
 
     if version < 12 {
         migrate_v12(db)?;
+    }
+
+    if version < 13 {
+        migrate_v13(db)?;
     }
 
     Ok(())
@@ -547,6 +554,26 @@ fn migrate_v12(db: &mut Connection) -> SqlResult<()> {
         eprintln!("[schema] hints_vec creation failed: {e}");
     }
     db.execute_batch("INSERT OR IGNORE INTO schema_version (version) VALUES (12);")?;
+    Ok(())
+}
+
+fn migrate_v13(db: &mut Connection) -> SqlResult<()> {
+    eprintln!("[schema] migrating to v13: upgrading vector dimensions to 1024 (mxbai-embed-large)");
+    let _ = db.execute_batch("DROP TABLE IF EXISTS chunks_vec");
+    let _ = db.execute_batch("DROP TABLE IF EXISTS hints_vec");
+    let _ = db.execute_batch("DELETE FROM embeddings");
+    if let Err(e) =
+        db.execute_batch("CREATE VIRTUAL TABLE chunks_vec USING vec0(embedding float[1024]);")
+    {
+        eprintln!("[schema] chunks_vec recreation failed: {e}");
+    }
+    if let Err(e) =
+        db.execute_batch("CREATE VIRTUAL TABLE hints_vec USING vec0(embedding float[1024]);")
+    {
+        eprintln!("[schema] hints_vec recreation failed: {e}");
+    }
+    db.execute_batch("INSERT OR IGNORE INTO schema_version (version) VALUES (13);")?;
+    eprintln!("[schema] v13 complete — run `sqmd embed` to re-embed with new model");
     Ok(())
 }
 

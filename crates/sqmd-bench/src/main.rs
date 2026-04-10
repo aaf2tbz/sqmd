@@ -446,13 +446,7 @@ fn main() {
 fn cmd_run(db_path: &PathBuf, mode: &str) {
     if !db_path.exists() {
         eprintln!("Database not found at {:?}", db_path);
-        eprintln!("Usage: sqmd-bench run [path/to/index.db] [fts|layered|hybrid]");
-        std::process::exit(1);
-    }
-
-    if mode == "hybrid" && cfg!(not(feature = "embed")) {
-        eprintln!("Error: 'hybrid' mode requires the 'embed' feature.");
-        eprintln!("Build with: cargo build --features embed");
+        eprintln!("Usage: sqmd-bench run [path/to/index.db] [fts|layered]");
         std::process::exit(1);
     }
 
@@ -462,13 +456,15 @@ fn cmd_run(db_path: &PathBuf, mode: &str) {
 
     eprintln!("sqmd-bench v0.2.0 | {} queries | mode: {}", total, mode);
 
+    #[cfg(feature = "embed")]
+    let mut embedder = sqmd_core::embed::Embedder::new().unwrap();
+
     let mut results: Vec<QueryResult> = Vec::with_capacity(total);
 
     for gt in &queries {
         let search_query = sqmd_core::search::SearchQuery {
             text: gt.query.to_string(),
             top_k: 10,
-            alpha: 0.7,
             source_type_filter: Some(vec!["code".to_string()]),
             exclude_path_prefixes: vec![
                 "deps/".to_string(),
@@ -480,20 +476,22 @@ fn cmd_run(db_path: &PathBuf, mode: &str) {
 
         let search_results = match mode {
             "fts" => sqmd_core::search::fts_search(&db, &search_query).unwrap_or_default(),
-            "layered" => sqmd_core::search::layered_search(&db, &search_query)
-                .map(|lr| lr.results)
-                .unwrap_or_default(),
-            #[cfg(feature = "embed")]
-            "hybrid" => {
-                let mut embedder = sqmd_core::embed::Embedder::new().unwrap();
-                sqmd_core::search::hybrid_search(&db, &search_query, &mut embedder)
-                    .unwrap_or_default()
+            "layered" => {
+                #[cfg(feature = "embed")]
+                {
+                    sqmd_core::search::layered_search(&db, &search_query, Some(&mut embedder))
+                        .map(|lr| lr.results)
+                        .unwrap_or_default()
+                }
+                #[cfg(not(feature = "embed"))]
+                {
+                    sqmd_core::search::layered_search(&db, &search_query)
+                        .map(|lr| lr.results)
+                        .unwrap_or_default()
+                }
             }
             _ => {
-                eprintln!(
-                    "Unknown mode '{}'. Use 'fts', 'layered', or 'hybrid'.",
-                    mode
-                );
+                eprintln!("Unknown mode '{}'. Use 'fts' or 'layered'.", mode);
                 std::process::exit(1);
             }
         };
@@ -523,10 +521,19 @@ fn cmd_run(db_path: &PathBuf, mode: &str) {
 
         let entity_found = check_entity_exists(&db, gt.target_function, gt.target_file);
 
-        let layers_hit = if mode == "layered" {
-            sqmd_core::search::layered_search(&db, &search_query)
-                .map(|lr| lr.layers_hit)
-                .unwrap_or_default()
+        let layers_hit: Vec<String> = if mode == "layered" {
+            #[cfg(feature = "embed")]
+            {
+                sqmd_core::search::layered_search(&db, &search_query, Some(&mut embedder))
+                    .map(|lr| lr.layers_hit)
+                    .unwrap_or_default()
+            }
+            #[cfg(not(feature = "embed"))]
+            {
+                sqmd_core::search::layered_search(&db, &search_query)
+                    .map(|lr| lr.layers_hit)
+                    .unwrap_or_default()
+            }
         } else {
             vec!["fts".to_string()]
         };
@@ -793,38 +800,46 @@ fn cmd_compare(db_path: &PathBuf, ground_truth_path: &str) {
     };
 
     #[cfg(feature = "embed")]
-    let lanes = {
-        let mut l = vec![("fts", "fts"), ("layered", "layered")];
-        l.push(("hybrid", "hybrid"));
-        l
-    };
+    let lanes = vec![("fts", false), ("layered", true)];
     #[cfg(not(feature = "embed"))]
-    let lanes = vec![("fts", "fts"), ("layered", "layered")];
+    let lanes = vec![("fts", false), ("layered", true)];
 
-    for (lane_name, lane_mode) in &lanes {
+    for (lane_name, use_vectors) in &lanes {
         let mut hit_at_1 = 0usize;
         let mut hit_at_3 = 0usize;
         let mut hit_at_5 = 0usize;
         let mut mrr_sum = 0.0f64;
 
+        #[cfg(feature = "embed")]
+        let mut embedder = sqmd_core::embed::Embedder::new().unwrap();
+
         for eq in &eval_queries {
             let search_query = sqmd_core::search::SearchQuery {
                 text: eq.eval_query.clone(),
                 top_k: 10,
-                alpha: 0.7,
                 ..Default::default()
             };
 
-            let search_results = match *lane_mode {
+            let search_results = match *lane_name {
                 "fts" => sqmd_core::search::fts_search(&db, &search_query).unwrap_or_default(),
-                "layered" => sqmd_core::search::layered_search(&db, &search_query)
-                    .map(|lr| lr.results)
-                    .unwrap_or_default(),
-                #[cfg(feature = "embed")]
-                "hybrid" => {
-                    let mut embedder = sqmd_core::embed::Embedder::new().unwrap();
-                    sqmd_core::search::hybrid_search(&db, &search_query, &mut embedder)
-                        .unwrap_or_default()
+                "layered" => {
+                    #[cfg(feature = "embed")]
+                    {
+                        let e = if *use_vectors {
+                            Some(&mut embedder)
+                        } else {
+                            None
+                        };
+                        sqmd_core::search::layered_search(&db, &search_query, e)
+                            .map(|lr| lr.results)
+                            .unwrap_or_default()
+                    }
+                    #[cfg(not(feature = "embed"))]
+                    {
+                        sqmd_core::search::layered_search(&db, &search_query)
+                            .map(|lr| lr.results)
+                            .unwrap_or_default()
+                    }
                 }
                 _ => Vec::new(),
             };

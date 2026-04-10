@@ -252,8 +252,9 @@ fn handle_search(
             }
             e.take().unwrap()
         };
-        match crate::search::hybrid_search(db, &search_query, &mut embedder) {
-            Ok(results) => {
+        match crate::search::layered_search(db, &search_query, Some(&mut embedder)) {
+            Ok(layered_result) => {
+                let results = layered_result.results;
                 let results_clone = results.clone();
                 {
                     let mut c = state.cache.lock().unwrap_or_else(|e| e.into_inner());
@@ -301,8 +302,30 @@ fn handle_search(
     };
     #[cfg(not(feature = "embed"))]
     let result = {
-        match crate::search::fts_search(db, &search_query) {
-            Ok(results) => {
+        #[cfg(feature = "embed")]
+        let layered = {
+            let mut embedder_lock = state.embedder.lock().unwrap_or_else(|e| e.into_inner());
+            if embedder_lock.is_none() {
+                match crate::embed::Embedder::new() {
+                    Ok(emb) => *embedder_lock = Some(emb),
+                    Err(err) => {
+                        return Response {
+                            ok: false,
+                            result: None,
+                            error: Some(err.to_string()),
+                        }
+                    }
+                }
+            }
+            let embedder = embedder_lock.as_mut().unwrap();
+            crate::search::layered_search(db, &search_query, Some(embedder))
+        };
+        #[cfg(not(feature = "embed"))]
+        let layered = crate::search::layered_search(db, &search_query);
+
+        match layered {
+            Ok(layered_result) => {
+                let results = layered_result.results;
                 let results_clone = results.clone();
                 {
                     let mut c = state.cache.lock().unwrap_or_else(|e| e.into_inner());
@@ -1138,7 +1161,28 @@ fn handle_layered_search(
         ..Default::default()
     };
 
-    match crate::search::layered_search(db, &search_query) {
+    #[cfg(feature = "embed")]
+    let layered = {
+        let mut embedder_lock = state.embedder.lock().unwrap_or_else(|e| e.into_inner());
+        if embedder_lock.is_none() {
+            match crate::embed::Embedder::new() {
+                Ok(emb) => *embedder_lock = Some(emb),
+                Err(err) => {
+                    return Response {
+                        ok: false,
+                        result: None,
+                        error: Some(err.to_string()),
+                    }
+                }
+            }
+        }
+        let embedder = embedder_lock.as_mut().unwrap();
+        crate::search::layered_search(db, &search_query, Some(embedder))
+    };
+    #[cfg(not(feature = "embed"))]
+    let layered = crate::search::layered_search(db, &search_query);
+
+    match layered {
         Ok(layered) => {
             let markdown = crate::search::render_search_markdown(db, &layered.results).ok();
             let mut arr =
