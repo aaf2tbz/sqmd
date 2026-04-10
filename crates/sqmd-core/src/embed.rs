@@ -124,7 +124,7 @@ impl Embedder {
                         chunk.len()
                     );
                     for text in chunk {
-                        match self.call_ollama_embed(&[text.clone()]) {
+                        match self.call_ollama_embed(std::slice::from_ref(text)) {
                             Ok(r) => all_results.extend(r),
                             Err(_) => {
                                 all_results.push(vec![0.0f32; DIMS]);
@@ -161,13 +161,13 @@ impl Embedder {
 
         let embeddings = parsed["embeddings"]
             .as_array()
-            .ok_or_else(|| format!("Unexpected embed response: no embeddings array"))?;
+            .ok_or_else(|| "Unexpected embed response: no embeddings array".to_string())?;
 
         let mut results = Vec::with_capacity(embeddings.len());
         for emb in embeddings {
             let vec: Vec<f32> = emb
                 .as_array()
-                .ok_or_else(|| "Embedding is not an array")?
+                .ok_or("Embedding is not an array")?
                 .iter()
                 .filter_map(|v| v.as_f64().map(|f| f as f32))
                 .collect();
