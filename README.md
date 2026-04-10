@@ -1,3 +1,5 @@
+Note from developer: This system is currently undergoing massive structural changes, and does not include a visual interface to interact with yet. Please be careful when using sqmd for now. Thanks for trying it!
+
 # sqmd
 
 **Code intelligence for AI agents. Drop any project in, get instant semantic search, dependency graphs, and structured recall — no network, no API keys, one binary.**
