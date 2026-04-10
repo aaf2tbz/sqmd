@@ -41,7 +41,7 @@ Validated the two riskiest dependencies before committing to the stack.
 
 ### What shipped
 
-- Language chunkers for TypeScript, TSX, Rust, Python, Go, Java via tree-sitter
+- Language chunkers for TypeScript, TSX, Rust, Python, Go, Java, C, C++ via tree-sitter
 - `LanguageChunker` trait with graceful fallback to `FileChunker` on parse failure
 - Chunk types: Function, Method, Class, Struct, Enum, Interface, Type, Impl, Module, Section
 - Single-pass parsing: AST reused for both chunking and import extraction
@@ -160,6 +160,36 @@ Validated the two riskiest dependencies before committing to the stack.
 
 ---
 
+## Phase 10: Extended Language Support — COMPLETE
+
+**Goal:** Add HTML, CSS, and additional build-system language support.
+
+### What shipped
+
+- **HTML chunker** (`tree-sitter-html`): Semantic element classification (Module for html/body/head, Struct for header/nav/main/footer/section/form, Section for script/style/generic). Handles `.html` and `.htm` extensions. Recursive walk for nested elements.
+- **CSS chunker** (`tree-sitter-css`): Selector extraction (Struct for rule_set, Module for @media/@keyframes/@supports/@layer). Handles `.css`, `.scss`, `.sass`, `.less` extensions.
+- **C, C++, CMake, QML, Meson, Ruby** chunkers added in prior phases
+- Schema v11 (community_type)
+- 18 languages total, all with dedicated chunkers
+- 124 tests passing
+
+---
+
+## Phase 11: Recall Research Integration — COMPLETE
+
+**Goal:** Apply findings from the Obsidian Vault Recall Eval research to improve sqmd's retrieval quality.
+
+### What shipped
+
+- **Semantic hint retrieval** (Gap 1): `hints_vec` virtual table (schema v12) enables vector KNN search over hint text. `store_hint_embedding()` and `hint_vec_search()` integrate into `hybrid_search()` as a fourth scoring signal alongside content FTS, content vector, and hint FTS. `embed_unembedded()` now also embeds concatenated hint text per chunk.
+- **LLM prospective hints** (Gap 2): New `ollama` feature flag with `OllamaClient` calling Ollama's `/api/generate` endpoint. Uses gemma3:4b (configurable via `SQMD_HINT_MODEL`) to generate 3 natural-language retrieval cues per chunk at index time. Only generated for chunks with `importance >= 0.5`. Stored with `hint_type='prospective'`.
+- **Eval harness generalization** (Gap 3): `sqmd-bench` restructured with subcommands (`run`, `generate`, `compare`). `generate` walks chunks and produces held-out eval queries (Ollama if available, template fallback). `compare` runs queries through multiple lanes (fts, layered, hybrid) and computes Hit@1/3/5 + MRR per lane.
+- **Session summaries** (Gap 4): `ingest_batch()` generates a summary chunk for batches > 1, aggregating names and content previews. Creates `contains` relationships from summary to children. Provides document-level retrieval surface for fragmented knowledge.
+- **Feature separation**: `embed` (nomic-embed-text, ONNX) and `ollama` (gemma3:4b, Ollama API) are independent features. Embeddings run on the embedding model, hint generation runs on the language model.
+- 124 tests passing, 0 clippy warnings
+
+---
+
 ## Progress Summary
 
 | Phase | Status |
@@ -174,10 +204,13 @@ Validated the two riskiest dependencies before committing to the stack.
 | 7 — Knowledge Store | **COMPLETE** |
 | 8 — Production Hardening | **COMPLETE** |
 | 9 — Performance Overhaul | **COMPLETE** |
+| 10 — Extended Language Support | **COMPLETE** |
+| 11 — Recall Research Integration | **COMPLETE** |
 
 **v1.0.0** — all phases through 8 complete.
 **v1.1.0** — production hardening for signet-sqmd integration.
 **v1.2.0** — performance overhaul, markdown output, CI reliability.
+**v2.0.0** — HTML/CSS languages, semantic hint retrieval, LLM prospective hints, eval harness, session summaries, schema v12.
 
 ---
 
@@ -185,7 +218,7 @@ Validated the two riskiest dependencies before committing to the stack.
 
 | Dependency | Risk | Status |
 |-----------|------|--------|
-| `tree-sitter` + language grammars | Low | Shipped (Phase 2) |
+| `tree-sitter` + language grammars | Low | Shipped (Phase 2, 10) |
 | `rusqlite` (bundled) | Low | Shipped (Phase 1) |
 | `sqlite-vec` (static compile) | Medium | Shipped — compiled in, non-fatal |
 | `ort` v2 RC (ONNX Runtime) | Medium | Shipped — feature-gated |
@@ -193,3 +226,6 @@ Validated the two riskiest dependencies before committing to the stack.
 | `rayon` | Low | Shipped (Phase 3) |
 | `chrono` | Low | Shipped (Phase 8) |
 | `clap` (derive) | Low | Shipped (Phase 1) |
+| `ureq` (Ollama HTTP) | Low | Shipped — feature-gated (Phase 11) |
+| `tree-sitter-html` | Low | Shipped (Phase 10) |
+| `tree-sitter-css` | Low | Shipped (Phase 10) |

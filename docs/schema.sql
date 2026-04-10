@@ -1,10 +1,11 @@
 -- sqmd SQLite Schema
--- Version: 1.2.0 (schema v5)
+-- Version: 2.1.0 (schema v12)
 -- Source: https://github.com/aaf2tbz/sqmd
 --
 -- NOTE: This is a reference only. The actual schema lives in
 -- crates/sqmd-core/src/schema.rs and is managed by the migration system.
 -- Schema v5 adds Porter stemming to chunks_fts and hints_fts.
+-- Schema v12 adds hints_vec for semantic hint retrieval.
 
 -- ============================================================
 -- Source file metadata
@@ -100,10 +101,19 @@ CREATE TABLE IF NOT EXISTS entities (
     mentions       INTEGER NOT NULL DEFAULT 1,
     created_at     TEXT NOT NULL DEFAULT '',
     updated_at     TEXT NOT NULL DEFAULT '',
+    file_path      TEXT,
+    language       TEXT,
+    line_start     INTEGER,
+    line_end       INTEGER,
+    signature      TEXT,
+    chunk_id       INTEGER REFERENCES chunks(id),
     UNIQUE(canonical_name)
 );
 
 CREATE INDEX IF NOT EXISTS idx_entities_type ON entities(entity_type);
+CREATE INDEX IF NOT EXISTS idx_entities_file ON entities(file_path);
+CREATE INDEX IF NOT EXISTS idx_entities_chunk ON entities(chunk_id);
+CREATE INDEX IF NOT EXISTS idx_entities_type_file ON entities(entity_type, file_path);
 
 CREATE TABLE IF NOT EXISTS entity_aspects (
     id             INTEGER PRIMARY KEY,
@@ -139,24 +149,29 @@ CREATE TABLE IF NOT EXISTS entity_dependencies (
     strength       REAL NOT NULL DEFAULT 1.0,
     mentions       INTEGER NOT NULL DEFAULT 1,
     created_at     TEXT NOT NULL DEFAULT '',
+    valid_from     TEXT NOT NULL DEFAULT '',
+    valid_to       TEXT,
     UNIQUE(source_entity, target_entity, dep_type)
 );
 
 CREATE INDEX IF NOT EXISTS idx_ed_source ON entity_dependencies(source_entity, dep_type);
 CREATE INDEX IF NOT EXISTS idx_ed_target ON entity_dependencies(target_entity);
+CREATE INDEX IF NOT EXISTS idx_ed_temporal ON entity_dependencies(valid_from, valid_to);
 
 -- ============================================================
--- Prospective search hints
+-- Prospective search hints (template + LLM-generated)
 -- ============================================================
 
 CREATE TABLE IF NOT EXISTS hints (
     id         INTEGER PRIMARY KEY,
     chunk_id   INTEGER NOT NULL REFERENCES chunks(id) ON DELETE CASCADE,
     hint_text  TEXT NOT NULL,
+    hint_type  TEXT NOT NULL DEFAULT 'symbol',
     created_at TEXT NOT NULL DEFAULT ''
 );
 
 CREATE INDEX IF NOT EXISTS idx_hints_chunk ON hints(chunk_id);
+CREATE INDEX IF NOT EXISTS idx_hints_type ON hints(hint_type);
 
 -- ============================================================
 -- Vector embeddings (BLOB fallback storage)
@@ -171,7 +186,48 @@ CREATE TABLE IF NOT EXISTS embeddings (
 );
 
 -- ============================================================
--- FTS5 keyword search index
+-- Community detection
+-- ============================================================
+
+CREATE TABLE IF NOT EXISTS communities (
+    id INTEGER PRIMARY KEY,
+    path TEXT NOT NULL,
+    depth INTEGER NOT NULL DEFAULT 1,
+    name TEXT NOT NULL,
+    chunk_count INTEGER NOT NULL DEFAULT 0,
+    entity_count INTEGER NOT NULL DEFAULT 0,
+    summary TEXT,
+    generated_at TEXT,
+    created_at TEXT NOT NULL DEFAULT '',
+    community_type TEXT NOT NULL DEFAULT 'directory',
+    CONSTRAINT uq_comm_path_type UNIQUE(path, community_type)
+);
+
+CREATE INDEX IF NOT EXISTS idx_communities_path ON communities(path);
+CREATE INDEX IF NOT EXISTS idx_communities_type ON communities(community_type);
+CREATE INDEX IF NOT EXISTS idx_communities_depth ON communities(depth);
+
+-- ============================================================
+-- Change provenance
+-- ============================================================
+
+CREATE TABLE IF NOT EXISTS episodes (
+    id               INTEGER PRIMARY KEY,
+    file_path        TEXT NOT NULL,
+    change_type      TEXT NOT NULL CHECK(change_type IN ('added', 'modified', 'deleted')),
+    commit_hash      TEXT,
+    author           TEXT,
+    summary          TEXT,
+    chunks_affected  INTEGER NOT NULL DEFAULT 0,
+    created_at       TEXT NOT NULL DEFAULT ''
+);
+
+CREATE INDEX IF NOT EXISTS idx_episodes_file ON episodes(file_path);
+CREATE INDEX IF NOT EXISTS idx_episodes_type ON episodes(change_type);
+CREATE INDEX IF NOT EXISTS idx_episodes_time ON episodes(created_at);
+
+-- ============================================================
+-- FTS5 keyword search index (porter-stemmed)
 -- ============================================================
 
 CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
@@ -202,7 +258,7 @@ CREATE TRIGGER IF NOT EXISTS chunks_fts_update AFTER UPDATE ON chunks BEGIN
 END;
 
 -- ============================================================
--- FTS5 hints index
+-- FTS5 hints index (porter-stemmed)
 -- ============================================================
 
 CREATE VIRTUAL TABLE IF NOT EXISTS hints_fts USING fts5(
@@ -221,6 +277,17 @@ CREATE TRIGGER IF NOT EXISTS hints_fts_delete AFTER DELETE ON hints BEGIN
 END;
 
 -- ============================================================
+-- Vector indexes (sqlite-vec virtual tables)
+-- Created by schema.rs init() — shown here for reference
+-- ============================================================
+
+-- Content vector index: KNN search over chunk embeddings (768 dims)
+-- CREATE VIRTUAL TABLE IF NOT EXISTS chunks_vec USING vec0(embedding float[768]);
+
+-- Hint vector index: KNN search over hint text embeddings (768 dims, schema v12)
+-- CREATE VIRTUAL TABLE IF NOT EXISTS hints_vec USING vec0(embedding float[768]);
+
+-- ============================================================
 -- Schema versioning
 -- ============================================================
 
@@ -229,4 +296,4 @@ CREATE TABLE IF NOT EXISTS schema_version (
     applied_at TEXT NOT NULL DEFAULT ''
 );
 
-INSERT OR IGNORE INTO schema_version (version) VALUES (5);
+INSERT OR IGNORE INTO schema_version (version) VALUES (12);
