@@ -1190,7 +1190,7 @@ pub fn embed_unembedded(
     db: &mut Connection,
     embedder: &mut Embedder,
 ) -> Result<usize, Box<dyn std::error::Error>> {
-    let ids = get_unembedded_chunk_ids(db, 32)?;
+    let ids = get_unembedded_chunk_ids(db, 512)?;
     if ids.is_empty() {
         return Ok(0);
     }
@@ -1373,8 +1373,8 @@ pub fn generate_ollama_hints_batch(
             |r| r.get(0),
         )?;
 
-        let truncated = if content.len() > 3000 {
-            &content[..3000]
+        let truncated = if content.len() > 1500 {
+            &content[..1500]
         } else {
             &content
         };
