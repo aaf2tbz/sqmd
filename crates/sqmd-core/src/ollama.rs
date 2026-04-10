@@ -15,7 +15,8 @@ impl OllamaClient {
     pub fn new() -> Self {
         let base_url =
             std::env::var("OLLAMA_HOST").unwrap_or_else(|_| "http://localhost:11434".to_string());
-        let model = std::env::var("SQMD_HINT_MODEL").unwrap_or_else(|_| "gemma3:4b".to_string());
+        let model =
+            std::env::var("SQMD_HINT_MODEL").unwrap_or_else(|_| "phi4-mini:latest".to_string());
         Self { base_url, model }
     }
 
@@ -23,14 +24,14 @@ impl OllamaClient {
         &self,
         content: &str,
     ) -> Result<Vec<String>, Box<dyn std::error::Error>> {
-        let truncated = if content.len() > 3000 {
-            &content[..3000]
+        let truncated = if content.len() > 1500 {
+            &content[..1500]
         } else {
             content
         };
 
         let prompt = format!(
-            "You are a search query generator. Given the following code or text, generate exactly 3 short natural-language queries that someone might type into a search engine to find this content. Each query should be on its own line. Do not include numbering, bullets, or explanations. Just the queries.\n\nContent:\n{}",
+            "3 search queries for this code, one per line, no explanation:\n{}",
             truncated
         );
 

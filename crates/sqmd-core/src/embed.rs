@@ -112,7 +112,7 @@ impl Embedder {
             })
             .collect();
 
-        let batch_size = 16;
+        let batch_size = 64;
         let mut all_results = Vec::with_capacity(texts.len());
 
         for chunk in prefixed.chunks(batch_size) {
