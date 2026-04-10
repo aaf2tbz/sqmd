@@ -1834,7 +1834,7 @@ dependencies = [
 
 [[package]]
 name = "sqmd-cli"
-version = "2.1.0"
+version = "2.2.0"
 dependencies = [
  "clap",
  "rusqlite",
@@ -1844,7 +1844,7 @@ dependencies = [
 
 [[package]]
 name = "sqmd-core"
-version = "2.1.0"
+version = "2.2.0"
 dependencies = [
  "chrono",
  "ignore",
