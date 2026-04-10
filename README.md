@@ -12,15 +12,19 @@ LLMs are bad at reading large codebases. They lose context, hallucinate file pat
 - **Entity graph.** Every named symbol — functions, structs, traits, classes, interfaces — becomes a first-class entity with metadata (kind, signature, parent scope). Entities are linked by structural relationships (extends, implements, contains) and import dependencies, forming a multi-layer graph the agent can traverse.
 - **Dependency-aware recall.** Import and call graphs plus entity dependencies let an agent trace "who calls this" and "what does this depend on" across files, traversing both relationship layers bidirectionally.
 - **Relational hints.** Prospective search hints are generated from the entity graph (e.g., "items that implement Trait" or "functions in this module"), giving search a +15% relevance boost for structurally connected results.
+- **LLM-generated prospective hints.** Optional integration with Ollama (gemma3:4b) generates natural-language retrieval cues per chunk — bridging the semantic gap between how developers search and what code actually says. Validated by recall research showing measurable improvement over template-only hints.
+- **Semantic hint retrieval.** Hint text is embedded alongside chunk content, enabling vector KNN search over hints. The recall eval showed this was the single strongest retrieval improvement (Hit@1: 78.2% → 80.8%).
 - **Typed communities.** Beyond directory-based summaries, sqmd detects **module communities** (files connected by imports) and **type-hierarchy communities** (entities connected by extends/implements), providing agent-ready summaries of architectural boundaries.
+- **Session summaries.** Knowledge batches automatically produce summary chunks with `contains` relationships to children, providing document-level retrieval surface for fragmented knowledge.
 - **Ranked retrieval.** Three-factor scoring (relevance × recency × importance) with diversity dampening means the agent sees the most useful code first, not just the highest keyword match.
 - **Token-budgeted context.** `sqmd context` assembles a response within a token budget, expanding dependencies only when budget allows. No more dumping entire files into context windows.
 
 ## Quick Start
 
 ```bash
-cargo build --release                     # ~10MB: FTS5 + graph + chunking
-cargo build --release --features embed    # ~27MB: + vector embeddings + hybrid search
+cargo build --release                         # ~10MB: FTS5 + graph + chunking
+cargo build --release --features embed        # ~27MB: + vector embeddings + hybrid search
+cargo build --release --features embed,ollama # ~27MB: + LLM prospective hints (requires Ollama)
 
 cd /path/to/your/project
 sqmd init     # creates .sqmd/index.db
@@ -57,6 +61,7 @@ Every function, method, class, struct, enum, trait, interface, type alias, impor
 - Content hash (SHA-256) for incremental updates
 - Importance score (0.0–1.0) based on chunk type
 - Import relationships (cross-file) and contains relationships (intra-file)
+- Template-based hints and (optionally) LLM-generated prospective hints
 
 ## Languages
 
@@ -70,6 +75,8 @@ Every function, method, class, struct, enum, trait, interface, type alias, impor
 | Java | `tree-sitter-java` | `import com.example.Class` | method, constructor, class, interface, enum |
 | C | `tree-sitter-c` | `#include <...>` / `#include "..."` | function, struct, enum, typedef, macro, constant |
 | C++ | `tree-sitter-cpp` | `#include <...>` / `#include "..."` | function, class, struct, enum, namespace, template, type, macro |
+| HTML | `tree-sitter-html` | — | element (semantic: header, nav, main, footer, section, article, form) |
+| CSS | `tree-sitter-css` | — | rule_set (selectors), media/keyframes/supports (at-rules) |
 | CMake | `tree-sitter-cmake` | `find_package`, `add_subdirectory` | function, macro, target, dependency, config |
 | QML | `tree-sitter-qmljs` | `import QtQuick 2.15` | component, function, property, import |
 | Meson | regex-based (no grammar) | `dependency()`, `subdir()` | target, dependency, function |
@@ -81,17 +88,52 @@ Every function, method, class, struct, enum, trait, interface, type alias, impor
 
 All file types are now handled with dedicated chunkers. No more line-based fallbacks.
 
+### HTML Chunker Details
+
+HTML elements are classified by semantic role:
+
+| Element | Chunk type | Rationale |
+|---------|-----------|-----------|
+| `<html>`, `<body>`, `<head>` | Module | Structural containers |
+| `<header>`, `<nav>`, `<main>`, `<footer>`, `<section>`, `<article>`, `<aside>`, `<form>` | Struct | Semantic landmarks |
+| `<script>`, `<style>` | Section | Embedded code blocks |
+| All others | Section | Generic elements (name extracted, filtered for noise) |
+
+Recognized extensions: `.html`, `.htm`
+
+### CSS Chunker Details
+
+| Construct | Chunk type | Rationale |
+|-----------|-----------|-----------|
+| `rule_set` (e.g., `.container { ... }`) | Struct | Named selectors with declarations |
+| `@media`, `@keyframes`, `@supports`, `@layer` | Module | At-rule blocks with scope |
+| Comments | Section | Top-level annotations |
+
+Recognized extensions: `.css`, `.scss`, `.sass`, `.less`
+
 ## Search
 
-sqmd provides three search modes:
+sqmd provides three search modes, with a fourth optional lane when hint embeddings are available:
 
 - **FTS5 keyword** — Porter-stemmed full-text search across chunk names, signatures, and content. ~20ms.
 - **Vector semantic** — 768-dim embeddings via nomic-embed-text-v1.5 (ONNX, quantized, cached locally). Requires `--features embed`.
 - **Hybrid** — Alpha-blended merge of both. Default 70% vector / 30% keyword with single-source penalty. ~40ms.
+- **Hint vector** (optional) — When hint embeddings exist, an additional KNN search over hint text runs in parallel with content vector search. Results are merged into the hybrid scorer with the same alpha-blend logic.
 
 Results are scored with a three-factor formula: `relevance × recency × importance`, then importance-boosted and diversity-dampened (same-file clustering penalty) so the agent sees diverse, high-value results.
 
 Multi-layer retrieval short-circuits: if FTS produces 3+ high-confidence hits, it skips graph and community expansion.
+
+### Recall Evaluation
+
+Retrieval quality was validated against findings from the [Obsidian Vault Recall Eval](https://github.com/Signet-AI/signetai/blob/nicholaivogel/tune-prompt-submit-recall/docs/research/technical/RESEARCH-OBSIDIAN-VAULT-RECALL-EVAL.md), which tested 5 retrieval lanes on 385 real notes. The key findings that shaped sqmd's search architecture:
+
+| Finding | sqmd implementation |
+|---------|-------------------|
+| Hybrid retrieval beats lexical-only by +12.5% Hit@1 | `hybrid_search()` with alpha-blended FTS + vector |
+| Note-level retrieval beats chunked on knowledge | Session summaries in `ingest_batch()` |
+| Prospective hint FTS adds +0.8% Hit@1 | `hints_fts` merged in `fts_search_inner()` |
+| Semantic retrieval over hints adds +2.6% Hit@1 | `hints_vec` KNN merged in `hybrid_search()` |
 
 ## Architecture
 
@@ -102,30 +144,48 @@ source files
     ↓ extract imports → relationship edges
     ↓ extract structural relations → entity_dependencies (extends, implements, contains)
     ↓ promote symbols → entities (first-class knowledge graph nodes)
-    ↓ generate relational hints → hints (prospective search anchors)
+    ↓ generate template hints → hints (prospective search anchors)
+    ↓ [optional] generate LLM hints → hints with type='prospective' (Ollama / gemma3:4b)
     ↓ detect communities → module + type-hierarchy groupings
     ↓ content-hash decision pipeline (skip / update / tombstone)
     ↓
-SQLite database (schema v11)
+SQLite database (schema v12)
     ├── chunks         (raw code + metadata)
     ├── chunks_fts     (FTS5 full-text index)
     ├── chunks_vec     (768-dim vector index, optional)
     ├── relationships  (imports, contains, calls)
     ├── entity_dependencies (structural: extends, implements, contains)
     ├── entities       (symbol-level: files, structs, functions, traits)
-    ├── hints + hints_fts (typed relational search hints)
+    ├── hints + hints_fts (typed relational + prospective search hints)
+    ├── hints_vec      (768-dim vector index over hint text, optional)
     ├── communities    (directory, module, type-hierarchy summaries)
     └── episodes       (change provenance)
 ```
 
 Single-pass parsing: tree-sitter parses each file once; the AST is reused for chunking, import extraction, and structural relationship extraction. Incremental re-indexing uses content hashes — unchanged files produce zero writes.
 
+## Feature Flags
+
+| Feature | Dependencies | Purpose |
+|---------|-------------|---------|
+| `embed` | `ort`, `ndarray`, `ureq`, `tokenizers` | Vector embeddings (nomic-embed-text-v1.5, ONNX) |
+| `ollama` | `ureq` | LLM prospective hint generation via Ollama API |
+
+These are intentionally separate:
+- **`embed`** runs nomic-embed-text-v1.5 locally via ONNX for vector search
+- **`ollama`** calls a local Ollama server (default: gemma3:4b) for generating natural-language retrieval cues at index time
+
+Configuration:
+- `OLLAMA_HOST` — Ollama server URL (default: `http://localhost:11434`)
+- `SQMD_HINT_MODEL` — Model for prospective hint generation (default: `gemma3:4b`)
+
 ## Build & Size
 
 | Build | Size | What's included |
 |-------|------|-----------------|
-| `cargo build --release` | ~10MB | Chunking, FTS5, relationships, daemon, 16 languages |
+| `cargo build --release` | ~10MB | Chunking, FTS5, relationships, daemon, 18 languages |
 | `cargo build --release --features embed` | ~27MB | + ONNX Runtime, vector search, hybrid scoring |
+| `cargo build --release --features embed,ollama` | ~27MB | + LLM hint generation at index time |
 
 ## Commands
 
@@ -153,6 +213,23 @@ sqmd stats                           # index statistics
 sqmd serve                           # Unix socket daemon
 sqmd watch                           # live re-index on file changes
 ```
+
+## Benchmarking
+
+sqmd includes a benchmark harness (`sqmd-bench`) with multiple subcommands:
+
+```bash
+# Run existing ground-truth queries against an index
+cargo run -p sqmd-bench -- run /path/to/index.db layered
+
+# Generate eval queries from indexed chunks (uses Ollama if available)
+cargo run -p sqmd-bench -- generate /path/to/index.db --output queries.json
+
+# Compare retrieval lanes head-to-head
+cargo run -p sqmd-bench -- compare /path/to/index.db --ground-truth queries.json
+```
+
+The `compare` subcommand runs queries through multiple lanes (fts, layered, hybrid) and computes Hit@1, Hit@3, Hit@5, and MRR for each, producing a side-by-side comparison table.
 
 ## Daemon Protocol
 
