@@ -5,27 +5,83 @@ use std::path::Path;
 
 const SERVER_NAME: &str = "sqmd";
 const SERVER_VERSION: &str = "3.2.0";
-const PROTOCOL_VERSION: &str = "2025-03-26";
+const PROTOCOL_VERSION: &str = "2024-11-05";
 
 pub fn run(db_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
-    let mut db = crate::schema::open(db_path)?;
+    let log_path = std::path::PathBuf::from("/tmp/sqmd-mcp-debug.log");
+    let start = std::time::Instant::now();
+
+    let _ = std::fs::remove_file(&log_path);
+    let mut log = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path);
+
+    macro_rules! dbg {
+        ($f:expr, $($arg:tt)*) => {
+            if let Ok(ref mut f) = $f {
+                let _ = writeln!(f, "[{}] {}", chrono::Local::now().format("%H:%M:%S%.3f"), format!($($arg)*));
+                let _ = f.flush();
+            }
+        };
+    }
+
+    dbg!(
+        log,
+        "=== sqmd MCP starting === pid={} CWD={:?} db_path={:?}",
+        std::process::id(),
+        std::env::current_dir().unwrap_or_default().display(),
+        db_path.display()
+    );
+    dbg!(log, "PATH={:?}", std::env::var("PATH").unwrap_or_default());
+    dbg!(log, "args={:?}", std::env::args().collect::<Vec<_>>());
+
+    let mut db = match crate::schema::open(db_path) {
+        Ok(db) => db,
+        Err(e) => {
+            dbg!(
+                log,
+                "ERROR: schema::open failed: {} ({:.1}ms)",
+                e,
+                start.elapsed().as_millis()
+            );
+            return Err(Box::new(e));
+        }
+    };
+
+    dbg!(log, "DB opened ({:.1}ms)", start.elapsed().as_millis());
+
     let root = db_path.parent().unwrap_or(db_path).to_path_buf();
 
     let mut stdin = BufReader::new(std::io::stdin());
     let mut stdout = std::io::stdout();
+    let mut msg_count: usize = 0;
+
+    dbg!(log, "Entering message loop, waiting for stdin...");
+
+    let mut framed_mode: Option<bool> = None;
 
     loop {
         let mut line = String::new();
         let n = match stdin.read_line(&mut line) {
             Ok(n) => n,
             Err(e) => {
+                dbg!(
+                    log,
+                    "stdin read_line error: {} (kind={:?}, os={:?})",
+                    e,
+                    e.kind(),
+                    e.raw_os_error()
+                );
                 if e.kind() == std::io::ErrorKind::BrokenPipe || e.raw_os_error() == Some(32) {
+                    dbg!(log, "Broken pipe — exiting");
                     return Ok(());
                 }
                 return Err(Box::new(e));
             }
         };
         if n == 0 {
+            dbg!(log, "stdin EOF (n=0) — exiting");
             return Ok(());
         }
 
@@ -34,41 +90,120 @@ pub fn run(db_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
             continue;
         }
 
-        let msg: Value = if let Some(len_str) = line.strip_prefix("Content-Length:") {
+        let is_framed = line.starts_with("Content-Length:");
+        if framed_mode.is_none() {
+            framed_mode = Some(is_framed);
+            dbg!(
+                log,
+                "Detected transport mode: {}",
+                if is_framed {
+                    "Content-Length framed (stdio)"
+                } else {
+                    "raw JSON line-delimited"
+                }
+            );
+        }
+
+        let msg: Value = if is_framed {
+            let len_str = line.strip_prefix("Content-Length:").unwrap();
             let len: usize = match len_str.trim().parse() {
                 Ok(l) => l,
-                Err(_) => continue,
+                Err(e) => {
+                    dbg!(log, "Failed to parse Content-Length: {:?} ({})", len_str, e);
+                    continue;
+                }
             };
             let mut sep = String::new();
             let _ = stdin.read_line(&mut sep);
             let mut buf = vec![0u8; len];
             if stdin.read_exact(&mut buf).is_err() {
+                dbg!(log, "Failed to read {} bytes of body", len);
                 continue;
             }
+            let body_str = String::from_utf8_lossy(&buf);
+            dbg!(
+                log,
+                "MSG [{}]: {}",
+                msg_count,
+                &body_str[..body_str.len().min(500)]
+            );
             match serde_json::from_slice(&buf) {
                 Ok(m) => m,
-                Err(_) => continue,
+                Err(e) => {
+                    dbg!(log, "JSON parse error: {}", e);
+                    continue;
+                }
             }
         } else if line.starts_with('{') {
+            dbg!(
+                log,
+                "MSG [{}] (raw JSON): {}",
+                msg_count,
+                &line[..line.len().min(500)]
+            );
             match serde_json::from_str(line) {
                 Ok(m) => m,
-                Err(_) => continue,
+                Err(e) => {
+                    dbg!(log, "JSON parse error: {}", e);
+                    continue;
+                }
             }
         } else {
+            dbg!(log, "Skipping line: {}", &line[..line.len().min(200)]);
             continue;
         };
 
+        msg_count += 1;
+
         let has_id = msg.get("id").is_some();
+        let method = msg["method"].as_str().unwrap_or("");
+        dbg!(
+            log,
+            "Processing msg #{}: method={} has_id={}",
+            msg_count,
+            method,
+            has_id
+        );
+
         if !has_id && msg.get("method").is_some() {
-            let method = msg["method"].as_str().unwrap_or("");
-            if method == "notifications/initialized" {
+            if method == "notifications/initialized" || method == "initialized" {
+                dbg!(log, "Skipping notification: {}", method);
                 continue;
             }
         }
 
         let response = handle_message(&mut db, &root, &msg);
+        dbg!(
+            log,
+            "Response for msg #{}: {}",
+            msg_count,
+            serde_json::to_string(&response).unwrap_or_else(|_| "SER_ERROR".into())
+        );
+
         if has_id {
-            send_response_framed(&mut stdout, &response)?;
+            if framed_mode.unwrap_or(false) {
+                if let Err(e) = send_response_framed(&mut stdout, &response) {
+                    dbg!(log, "send_response_framed ERROR: {}", e);
+                    return Err(e);
+                }
+            } else {
+                if let Err(e) = send_response_raw(&mut stdout, &response) {
+                    dbg!(log, "send_response_raw ERROR: {}", e);
+                    return Err(e);
+                }
+            }
+            dbg!(
+                log,
+                "Response sent for msg #{} (mode={})",
+                msg_count,
+                if framed_mode.unwrap_or(false) {
+                    "framed"
+                } else {
+                    "raw"
+                }
+            );
+        } else {
+            dbg!(log, "No id — notification, not sending response");
         }
     }
 }
@@ -79,6 +214,16 @@ fn send_response_framed(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let body = serde_json::to_string(response)?;
     write!(stdout, "Content-Length: {}\r\n\r\n{}", body.len(), body)?;
+    stdout.flush()?;
+    Ok(())
+}
+
+fn send_response_raw(
+    stdout: &mut impl Write,
+    response: &Value,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let body = serde_json::to_string(response)?;
+    writeln!(stdout, "{}", body)?;
     stdout.flush()?;
     Ok(())
 }
