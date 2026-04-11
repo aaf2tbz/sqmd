@@ -153,10 +153,11 @@ impl NativeRuntime {
         let mut all_embeddings = Vec::with_capacity(texts.len());
 
         for text in texts {
-            let tokens = self
+            let mut tokens = self
                 .model
                 .str_to_token(text, llama_cpp_2::model::AddBos::Always)
                 .unwrap_or_else(|_| vec![self.model.token_bos()]);
+            tokens.truncate(512);
 
             if tokens.is_empty() {
                 all_embeddings.push(vec![0.0f32; EMBED_DIMS]);
