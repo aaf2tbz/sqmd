@@ -1012,7 +1012,7 @@ fn sqmd_home() -> PathBuf {
     PathBuf::from(home).join(".sqmd")
 }
 
-fn sqmd_start(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+fn cmd_start(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let root = path.canonicalize()?;
     let pid_path = sqmd_home().join("daemon.pid");
 

@@ -2,32 +2,34 @@
 
 **Code intelligence for AI agents. Drop any project in, get instant semantic search, dependency graphs, and structured recall — no network, no API keys, one binary.**
 
-sqmd parses your codebase with tree-sitter, chunks every function, class, struct, and import into a local SQLite index, then exposes a unified layered search pipeline across FTS5, entity graphs, communities, vector embeddings, and hint vectors through a Unix socket daemon. An LLM asks "how does authentication work" and gets back the exact functions, their signatures, and their callers — not a wall of grep output.
+sqmd parses your codebase with tree-sitter, chunks every function, class, struct, and import into a local SQLite index, then exposes a unified layered search pipeline across FTS5, entity graphs, communities, vector embeddings, and hint vectors. An LLM asks "how does authentication work" and gets back the exact functions, their signatures, and their callers — not a wall of grep output.
 
 ## Benchmark Results
 
-Tested against the Signet codebase (505 TypeScript files, 8,886 chunks, 200 queries). Layered search 
-matches FTS search speeds, and MRR:
+Tested against the Signet codebase (505 TypeScript files, 8,886 chunks, 200 queries):
 
 | Lane | Hit@1 | Hit@3 | Hit@5 | Hit@10 | MRR |
 |------|-------|-------|-------|--------|-----|
 | **FTS** | 86% | 97.5% | 98.5% | 99.5% | 0.915 |
 | **Layered** | 86% | 97.5% | 98.5% | 99.5% | 0.915 |
 
-See [BENCHMARKING.md](BENCHMARKING.md) for methodology, reproduction steps, and historical results.
+Performance: ~0.55s per query, ~19 q/sec batch throughput. Native llama.cpp with Metal GPU acceleration on Apple Silicon.
+
+See [BENCHMARKING.md](BENCHMARKING.md) for methodology and reproduction steps.
 
 ## Table of Contents
 
 - [Why sqmd](#why-sqmd)
 - [Quick Start](#quick-start)
-- [How Agents Use sqmd](#how-agents-use-sqmd)
+- [Connecting to AI Tools](#connecting-to-ai-tools)
 - [What Gets Indexed](#what-gets-indexed)
 - [Languages](#languages)
 - [Search](#search)
 - [Architecture](#architecture)
 - [Feature Flags](#feature-flags)
-- [Build & Size](#build--size)
+- [Build](#build)
 - [Commands](#commands)
+- [MCP Server](#mcp-server)
 - [Daemon Protocol](#daemon-protocol)
 - [Benchmarking](#benchmarking)
 - [Changelog](#changelog)
@@ -42,8 +44,8 @@ LLMs are bad at reading large codebases. They lose context, hallucinate file pat
 - **Entity graph.** Every named symbol becomes a first-class entity linked by structural relationships (extends, implements, contains) and import dependencies.
 - **Dependency-aware recall.** Import and call graphs let an agent trace "who calls this" across files, bidirectionally.
 - **Unified layered search.** 5-layer pipeline: FTS, graph expansion, community detection, vector KNN, hint vector. No alpha-blending.
-- **mxbai-embed-large.** 1024-dim embeddings, SOTA for code retrieval on MTEB, running locally through Ollama.
-- **Template + LLM hints.** AST-derived hints at index time (no LLM) plus optional Ollama hints for natural-language retrieval cues.
+- **Native llama.cpp runtime.** Embeddings run locally via llama.cpp with Metal GPU offloading. No external services required.
+- **MCP server.** JSON-RPC over stdio — plug sqmd directly into OpenCode, Codex, or Claude Code.
 - **Typed communities.** Module communities (files connected by imports) and type-hierarchy communities (extends/implements).
 - **Ranked retrieval.** Three-factor scoring (relevance x recency x importance) with diversity dampening.
 - **Token-budgeted context.** Assembles responses within a token budget, expanding dependencies only when budget allows.
@@ -51,21 +53,22 @@ LLMs are bad at reading large codebases. They lose context, hallucinate file pat
 ## Quick Start
 
 ```bash
-# Prerequisites: Ollama running with mxbai-embed-large
-ollama pull mxbai-embed-large
-
-cargo build --release                         # ~10MB: FTS5 + graph + chunking
-cargo build --release --features embed        # + vector embeddings via Ollama
-cargo build --release --features embed,ollama # + LLM prospective hints
+cargo build --release --features native
 
 cd /path/to/your/project
-sqmd init     # creates .sqmd/index.db
-sqmd index    # tree-sitter parse -> chunk -> store (incremental on re-runs)
-sqmd embed    # generate vector embeddings (mxbai-embed-large via Ollama)
-sqmd hints    # generate LLM prospective hints (requires --features ollama + running Ollama)
+sqmd init           # creates .sqmd/index.db
+sqmd index          # tree-sitter parse -> chunk -> store (incremental on re-runs)
+sqmd index --embed  # index + generate embeddings in one step
+sqmd embed          # generate vector embeddings (mxbai-embed-large via native llama.cpp)
 ```
 
-Note: `sqmd index --embed` combines indexing and embedding in one step. After generating hints with `sqmd hints`, re-run `sqmd embed` to embed the hint text into `hints_vec`.
+sqmd looks for the `mxbai-embed-large` GGUF in your Ollama model store (`~/.ollama/models/`). If you have Ollama installed:
+
+```bash
+ollama pull mxbai-embed-large
+```
+
+Or set `SQMD_NATIVE_MODEL` to point directly at a GGUF file path.
 
 ```bash
 sqmd search "error handling"                        # layered search (all 5 layers)
@@ -75,14 +78,18 @@ sqmd context --query "how does auth work" --max-tokens 8000 --deps
 sqmd deps src/auth.ts --depth 2                     # trace dependency graph
 ```
 
-## How Agents Use sqmd
+## Connecting to AI Tools
 
-1. **Index once.** Run `sqmd index` in the project root. Re-runs are incremental — only changed files are re-parsed.
-2. **Search for code.** `sqmd search "database connection pool"` returns ranked chunks with file paths, line numbers, and context.
-3. **Trace dependencies.** `sqmd deps src/db/pool.rs --depth 2` shows imports and dependents two levels deep.
-4. **Assemble context.** `sqmd context --query "how is middleware chained" --max-tokens 4000` returns a token-budgeted bundle.
+sqmd includes an MCP server that works with OpenCode, Codex, and Claude Code:
 
-The daemon mode (`sqmd serve`) exposes all of this over a Unix socket with a JSON protocol.
+```bash
+sqmd setup                   # register sqmd in all harness configs
+sqmd setup opencode          # OpenCode only (~/.config/opencode/opencode.json)
+sqmd setup codex             # Codex only (~/.config/codex/config.json)
+sqmd setup claude            # Claude Code only (~/.claude/settings.json)
+```
+
+This writes the MCP server config into each tool's settings so agents can call `sqmd search`, `sqmd context`, `sqmd deps`, `sqmd stats`, and `sqmd get` directly.
 
 ## What Gets Indexed
 
@@ -130,8 +137,8 @@ Five retrieval layers run in sequence, each contributing results with tuned scor
 1. **FTS5** — Porter-stemmed full-text search. Includes hint boost and graph boost. Short-circuits on 3+ high-confidence hits.
 2. **Graph expansion** — 3-hop entity relationship traversal. 0.7x multiplier.
 3. **Community summaries** — Module and type-hierarchy community matching. 0.5x multiplier.
-4. **Vector KNN** — 1024-dim mxbai-embed-large. New results at 0.6x; existing matches get +0.3 boost. Requires `--features embed`.
-5. **Hint vector** — KNN over embedded hint text. Existing matches +0.2; new at 0.4x. Requires `--features embed`.
+4. **Vector KNN** — 1024-dim mxbai-embed-large via native llama.cpp. New results at 0.6x; existing matches get +0.3 boost.
+5. **Hint vector** — KNN over embedded hint text. Existing matches +0.2; new at 0.4x.
 
 All results scored with `relevance x recency x importance`, then importance-boosted and diversity-dampened.
 
@@ -154,6 +161,8 @@ source files
     |
     | [optional] sqmd hints -> LLM hints (Ollama / phi4-mini)
     |
+    | native llama.cpp -> mxbai-embed-large embeddings (Metal GPU)
+    |
 SQLite database (schema v13)
     |-- chunks         (raw code + metadata)
     |-- chunks_fts     (FTS5 full-text index)
@@ -173,51 +182,119 @@ Single-pass parsing with incremental re-indexing via content hashes.
 
 | Feature | Dependencies | Purpose |
 |---------|-------------|---------|
-| `embed` | `ureq` | Vector embeddings (mxbai-embed-large, 1024-dim, via Ollama) |
-| `ollama` | `ureq` | LLM prospective hint generation via Ollama API |
+| `native` (default) | `llama-cpp-2` | Vector embeddings via native llama.cpp with Metal GPU |
+| `ollama` | `ureq` | LLM prospective hint generation via Ollama HTTP API |
+
+Both features can be combined. `native` is enabled by default — `ollama` is only needed for `sqmd hints`.
 
 Configuration:
-- `OLLAMA_HOST` — Ollama server URL (default: `http://localhost:11434`)
-- `SQMD_EMBED_MODEL` — Embedding model (default: `mxbai-embed-large`)
-- `SQMD_HINT_MODEL` — Hint generation model (default: `phi4-mini`)
+- `SQMD_NATIVE_MODEL` — Path to GGUF file or model name (default: auto-discover `mxbai-embed-large` from Ollama store)
+- `OLLAMA_MODELS` — Path to Ollama model store (default: `~/.ollama/models`)
+- `OLLAMA_HOST` — Ollama server URL for hints (default: `http://localhost:11434`)
+- `SQMD_HINT_MODEL` — Hint generation model (default: `phi4-mini:latest`)
 
-## Build & Size
+## Build
 
-| Build | Size | What's included |
-|-------|------|-----------------|
-| `cargo build --release` | ~10MB | Chunking, FTS5, relationships, daemon, 18 languages |
-| `cargo build --release --features embed` | ~10MB | + vector search via Ollama |
-| `cargo build --release --features embed,ollama` | ~10MB | + LLM hint generation |
+```bash
+cargo build --release                          # default: native llama.cpp + Metal GPU
+cargo build --release --features native,ollama # + LLM hint generation via Ollama
+```
+
+Requires `cmake` for building llama.cpp from source (`brew install cmake`).
 
 ## Commands
+
+### Indexing
 
 ```bash
 sqmd init                            # create index at .sqmd/index.db
 sqmd index                           # full or incremental index
 sqmd index --embed                   # index + generate embeddings
 sqmd embed                           # generate embeddings for unembedded chunks
-sqmd hints                           # generate LLM prospective hints
-sqmd hints --min-importance 0.7      # only high-importance chunks
-sqmd hints --limit 100               # process at most 100 chunks
+sqmd watch                           # live re-index on file changes
+```
 
+### Search & Retrieval
+
+```bash
 sqmd search "auth"                   # layered search (all 5 layers)
 sqmd search "auth" --keyword         # FTS-only
 sqmd search "config" --file src/lib  # file-filtered search
+sqmd search "User" --type Struct     # type-filtered search
 
 sqmd deps src/auth.ts                # imports + dependents
 sqmd deps src/auth.ts --depth 2      # traverse 2 levels
 
 sqmd context --query "how does X work" --max-tokens 8000 --deps
 sqmd context --files a.ts,b.ts --max-tokens 4000
+```
 
-sqmd ls                              # list chunks
+### Browsing
+
+```bash
+sqmd ls                              # list chunks (tree view)
 sqmd ls --type function              # filter by type
 sqmd cat 42                          # get chunk by ID
 sqmd get src/auth.ts:42              # get chunk at file:line
 sqmd stats                           # index statistics
+sqmd entities                        # list knowledge graph entities
+```
 
-sqmd serve                           # Unix socket daemon
-sqmd watch                           # live re-index on file changes
+### Lifecycle
+
+```bash
+sqmd start                           # start daemon in background
+sqmd stop                            # stop running daemon
+sqmd serve                           # run daemon in foreground (Unix socket)
+sqmd mcp                             # start MCP server (JSON-RPC over stdio)
+sqmd setup                           # register sqmd in all AI tool configs
+sqmd setup opencode                  # register for OpenCode only
+sqmd doctor                          # run diagnostic checks
+sqmd update                          # update sqmd to latest version
+sqmd install                         # install sqmd from source
+```
+
+### Hint Generation (requires `--features ollama`)
+
+```bash
+sqmd hints                           # generate LLM prospective hints
+sqmd hints --min-importance 0.7      # only high-importance chunks
+sqmd hints --limit 100               # process at most 100 chunks
+```
+
+After generating hints, re-run `sqmd embed` to embed the hint text into `hints_vec`.
+
+## MCP Server
+
+`sqmd mcp` starts a JSON-RPC 2.0 server over stdio for use with AI tools:
+
+```bash
+sqmd mcp
+```
+
+Exposes 5 tools:
+
+| Tool | Description |
+|------|-------------|
+| `search` | Layered search with query, top_k, file/type filters |
+| `context` | Assemble token-budgeted context with dependency expansion |
+| `deps` | Get dependencies and dependents for a file path |
+| `stats` | Index statistics (files, chunks, embeddings, relationships) |
+| `get` | Get chunk by file path and line number |
+
+Register with `sqmd setup` or manually add to your tool's config:
+
+**OpenCode** (`~/.config/opencode/opencode.json`):
+```json
+{
+  "mcp": {
+    "sqmd": {
+      "type": "local",
+      "command": ["sqmd", "mcp"],
+      "enabled": true
+    }
+  }
+}
 ```
 
 ## Daemon Protocol
@@ -239,10 +316,8 @@ All responses are JSON. Add `--json` to any CLI command for machine-readable out
 
 See [BENCHMARKING.md](BENCHMARKING.md) for full methodology, reproduction steps, and historical results across datasets.
 
-Quick start:
-
 ```bash
-cargo run -p sqmd-bench --features embed,ollama -- compare /path/to/index.db --ground-truth queries.json
+cargo run -p sqmd-bench --features native -- compare /path/to/index.db --ground-truth queries.json
 ```
 
 ## Changelog

@@ -2,6 +2,38 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.1.0] - 2026-04-11
+
+### Added
+
+- Lifecycle commands: `sqmd start`, `sqmd stop`, `sqmd setup`, `sqmd doctor`, `sqmd update`, `sqmd install`
+- `sqmd setup` writes MCP config into OpenCode, Codex, and Claude Code settings automatically
+- `sqmd doctor` runs diagnostics on index, native embedder, model manifest, MCP binary, and daemon status
+- Native llama.cpp embedding runtime — replaces Ollama HTTP calls with direct GGUF loading via `llama-cpp-2`
+- Metal GPU acceleration on Apple Silicon (99 GPU layers)
+- MCP server (`sqmd mcp`) — JSON-RPC 2.0 over stdio with 5 tools (search, context, deps, stats, get)
+- Daemon PID tracking at `~/.sqmd/daemon.pid` with stale PID cleanup
+- `libc` and `dirs` dependencies in CLI crate
+
+### Changed
+
+- Default feature is now `native` (was `embed`)
+- Removed `embed` feature — replaced by `native`
+- `ollama` feature is now only for hint generation (not embeddings)
+- README rewritten for native runtime, MCP server, and lifecycle commands
+- BENCHMARKING.md updated with native feature flags and current benchmark numbers
+
+### Benchmark
+
+Tested against Signet codebase (505 TypeScript files, 8,886 chunks, 200 queries):
+
+| Lane | Hit@1 | Hit@3 | Hit@5 | Hit@10 | MRR |
+|------|-------|-------|-------|--------|-----|
+| FTS | 86% | 97.5% | 98.5% | 99.5% | 0.915 |
+| Layered (native) | 86% | 97.5% | 98.5% | 99.5% | 0.915 |
+
+Performance: ~0.55s per query, ~19 q/sec batch throughput.
+
 ## [3.0.0] - 2026-04-11
 
 ### Added
