@@ -6,12 +6,13 @@ sqmd parses your codebase with tree-sitter, chunks every function, class, struct
 
 ## Benchmark Results
 
-Tested against the Signet codebase (505 TypeScript files, 8,886 chunks, 200 queries):
+Tested against the Signet codebase (505 TypeScript files, 8,886 chunks, 200 queries). Layered search 
+matches FTS search speeds, and MRR:
 
 | Lane | Hit@1 | Hit@3 | Hit@5 | Hit@10 | MRR |
 |------|-------|-------|-------|--------|-----|
 | **FTS** | 86% | 97.5% | 98.5% | 99.5% | 0.915 |
-| **Layered** | 85% | 97% | 98.5% | 99.5% | 0.907 |
+| **Layered** | 86% | 97.5% | 98.5% | 99.5% | 0.915 |
 
 See [BENCHMARKING.md](BENCHMARKING.md) for methodology, reproduction steps, and historical results.
 
