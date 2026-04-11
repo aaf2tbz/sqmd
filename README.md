@@ -11,7 +11,7 @@ Tested against the Signet codebase (505 TypeScript files, 8,886 chunks, 200 quer
 | Lane | Hit@1 | Hit@3 | Hit@5 | Hit@10 | MRR |
 |------|-------|-------|-------|--------|-----|
 | **FTS** | 86% | 97.5% | 98.5% | 99.5% | 0.915 |
-| **Layered** | 85% | 97% | 98.5% | — | 0.907 |
+| **Layered** | 85% | 97% | 98.5% | 99.5% | 0.907 |
 
 Layered matches FTS on exact-match queries while adding graph, community, and vector retrieval for ambiguous natural-language queries where FTS would fail.
 
