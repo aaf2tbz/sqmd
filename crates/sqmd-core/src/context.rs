@@ -64,12 +64,16 @@ impl ContextAssembler {
             };
             #[cfg(feature = "native")]
             let results = {
-                let mut provider = crate::embed::make_provider()?;
-                crate::search::layered_search(db, &search_query, Some(&mut *provider))
-                    .map(|lr| lr.results)?
+                match crate::embed::make_provider() {
+                    Ok(mut provider) => {
+                        crate::search::layered_search(db, &search_query, Some(&mut *provider))
+                            .map(|lr| lr.results)?
+                    }
+                    Err(_) => crate::search::fts_search(db, &search_query)?,
+                }
             };
             #[cfg(not(feature = "native"))]
-            let results = crate::search::layered_search(db, &search_query).map(|lr| lr.results)?;
+            let results = crate::search::fts_search(db, &search_query)?;
             for r in &results {
                 if seen_ids.insert(r.chunk_id) {
                     let (content, language, source_type) =
