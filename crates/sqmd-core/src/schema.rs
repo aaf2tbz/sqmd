@@ -606,6 +606,12 @@ pub fn open(path: &Path) -> SqlResult<Connection> {
 }
 
 pub fn open_fast(path: &Path) -> SqlResult<Connection> {
+    #[allow(clippy::missing_transmute_annotations)]
+    unsafe {
+        rusqlite::ffi::sqlite3_auto_extension(Some(std::mem::transmute(
+            sqlite_vec::sqlite3_vec_init as *const (),
+        )));
+    }
     let db = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
     db.execute_batch("PRAGMA mmap_size = 268435456;")?;
     db.execute_batch("PRAGMA cache_size = -8000;")?;
