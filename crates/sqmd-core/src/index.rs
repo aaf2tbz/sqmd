@@ -189,8 +189,33 @@ fn chunk_file_content(
                 .unwrap_or_default();
             (chunks, imports)
         }
+        Language::Scss => {
+            let chunks = crate::chunker::FileChunker::chunk_file(content, relative, "scss");
+            (chunks, Vec::new())
+        }
         Language::Markdown => {
             let chunks = crate::languages::markdown::MarkdownChunker::chunk(content, relative);
+            (chunks, Vec::new())
+        }
+        Language::Shell
+        | Language::Sql
+        | Language::Dockerfile
+        | Language::Makefile
+        | Language::Kotlin
+        | Language::Swift
+        | Language::CSharp
+        | Language::Php
+        | Language::Lua
+        | Language::Dart
+        | Language::Scala
+        | Language::Haskell
+        | Language::Elixir
+        | Language::Zig
+        | Language::Xml
+        | Language::GraphQL
+        | Language::Protobuf => {
+            let chunks =
+                crate::chunker::FileChunker::chunk_file(content, relative, language.as_str());
             (chunks, Vec::new())
         }
         _ => (
@@ -229,6 +254,51 @@ fn extract_structural_rels_for_file(
         }
         "python" => {
             let c = crate::languages::python::PythonChunker::new();
+            let (_, tree) = c.chunk(content, "");
+            let rels = tree
+                .as_ref()
+                .map(|t| c.extract_structural_rels(t, content))
+                .unwrap_or_default();
+            (rels, content.to_string())
+        }
+        "go" => {
+            let c = crate::languages::go::GoChunker::new();
+            let (_, tree) = c.chunk(content, "");
+            let rels = tree
+                .as_ref()
+                .map(|t| c.extract_structural_rels(t, content))
+                .unwrap_or_default();
+            (rels, content.to_string())
+        }
+        "java" => {
+            let c = crate::languages::java::JavaChunker::new();
+            let (_, tree) = c.chunk(content, "");
+            let rels = tree
+                .as_ref()
+                .map(|t| c.extract_structural_rels(t, content))
+                .unwrap_or_default();
+            (rels, content.to_string())
+        }
+        "c" => {
+            let c = crate::languages::c::CChunker::new();
+            let (_, tree) = c.chunk(content, "");
+            let rels = tree
+                .as_ref()
+                .map(|t| c.extract_structural_rels(t, content))
+                .unwrap_or_default();
+            (rels, content.to_string())
+        }
+        "cpp" => {
+            let c = crate::languages::cpp::CppChunker::new();
+            let (_, tree) = c.chunk(content, "");
+            let rels = tree
+                .as_ref()
+                .map(|t| c.extract_structural_rels(t, content))
+                .unwrap_or_default();
+            (rels, content.to_string())
+        }
+        "ruby" => {
+            let c = crate::languages::ruby::RubyChunker::new();
             let (_, tree) = c.chunk(content, "");
             let rels = tree
                 .as_ref()
