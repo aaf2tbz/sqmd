@@ -142,7 +142,8 @@ pub fn walk_project(root: &Path) -> impl Iterator<Item = PathBuf> {
         .hidden(true)
         .git_ignore(true)
         .git_exclude(true)
-        .git_global(true);
+        .git_global(true)
+        .add_custom_ignore_filename(".sqmdignore");
     builder.filter_entry(|entry| {
         let name = entry.file_name().to_string_lossy();
         if name == ".git"

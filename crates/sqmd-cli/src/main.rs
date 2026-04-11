@@ -420,7 +420,8 @@ fn cmd_embed_with_db(db: &mut rusqlite::Connection) -> Result<(), Box<dyn std::e
             break;
         }
         total += count;
-        print!("\r  {} / {}", total, unembedded);
+        let pct = (total as f64 / unembedded as f64) * 100.0;
+        eprint!("\r  {}/{} ({:.0}%)", total, unembedded, pct);
         std::io::stderr().flush().ok();
     }
 

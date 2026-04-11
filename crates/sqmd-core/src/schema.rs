@@ -2,7 +2,7 @@ use rusqlite::{Connection, Result as SqlResult};
 use sqlite_vec::sqlite3_vec_init;
 use std::path::Path;
 
-const CURRENT_VERSION: i64 = 13;
+const CURRENT_VERSION: i64 = 14;
 
 pub fn init(db: &mut Connection) -> SqlResult<()> {
     #[allow(clippy::missing_transmute_annotations)]
@@ -81,6 +81,9 @@ pub fn init(db: &mut Connection) -> SqlResult<()> {
             if sql_version < 13 {
                 migrate_v13(db)?;
             }
+            if sql_version < 14 {
+                migrate_v14(db)?;
+            }
         }
         return Ok(());
     }
@@ -131,6 +134,10 @@ pub fn init(db: &mut Connection) -> SqlResult<()> {
 
     if version < 13 {
         migrate_v13(db)?;
+    }
+
+    if version < 14 {
+        migrate_v14(db)?;
     }
 
     Ok(())
@@ -574,6 +581,14 @@ fn migrate_v13(db: &mut Connection) -> SqlResult<()> {
     }
     db.execute_batch("INSERT OR IGNORE INTO schema_version (version) VALUES (13);")?;
     eprintln!("[schema] v13 complete — run `sqmd embed` to re-embed with new model");
+    Ok(())
+}
+
+fn migrate_v14(db: &mut Connection) -> SqlResult<()> {
+    db.execute_batch(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_hints_chunk_text ON hints(chunk_id, hint_text);",
+    )?;
+    db.execute_batch("INSERT OR IGNORE INTO schema_version (version) VALUES (14);")?;
     Ok(())
 }
 
