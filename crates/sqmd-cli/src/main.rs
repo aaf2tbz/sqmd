@@ -156,7 +156,11 @@ enum Commands {
         limit: usize,
     },
     /// Start MCP server (JSON-RPC over stdio)
-    Mcp,
+    Mcp {
+        /// Project root directory (defaults to ~/.sqmd if no local .sqmd found)
+        #[arg(default_value = ".")]
+        path: PathBuf,
+    },
     /// Start sqmd daemon in background
     Start {
         /// Project root directory
@@ -258,7 +262,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             min_importance,
             limit,
         } => cmd_hints(min_importance, limit),
-        Commands::Mcp => cmd_mcp(),
+        Commands::Mcp { path } => cmd_mcp(&path),
         Commands::Start { path } => cmd_start(&path),
         Commands::Stop => cmd_stop(),
         Commands::Setup { harness } => cmd_setup(harness.as_deref()),
@@ -296,15 +300,23 @@ fn ensure_db() -> Result<rusqlite::Connection, Box<dyn std::error::Error>> {
     Ok(db)
 }
 
-fn cmd_mcp() -> Result<(), Box<dyn std::error::Error>> {
-    let path = db_path();
-    if !path.exists() {
+fn cmd_mcp(given_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    let local_index = given_path.join(".sqmd/index.db");
+    let home_index = dirs::home_dir()
+        .map(|h| h.join(".sqmd/index.db"))
+        .filter(|p| p.exists());
+
+    let path = if local_index.exists() {
+        local_index
+    } else if let Some(home) = home_index {
+        home
+    } else {
         eprintln!(
             "No index found at {}. Run `sqmd init` first.",
-            path.display()
+            local_index.display()
         );
         std::process::exit(1);
-    }
+    };
     sqmd_core::mcp_server::run(&path)
 }
 
