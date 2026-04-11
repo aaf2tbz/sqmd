@@ -7,22 +7,20 @@ const DEFAULT_EMBED_MODEL_NAME: &str = "mxbai-embed-large";
 const EMBED_DIMS: usize = 1024;
 
 static BACKEND: OnceLock<Mutex<llama_cpp_2::llama_backend::LlamaBackend>> = OnceLock::new();
+static INIT_LOCK: Mutex<()> = Mutex::new(());
 
-fn init_backend() -> Result<(), Box<dyn std::error::Error>> {
-    if BACKEND.get().is_some() {
-        return Ok(());
+fn get_backend(
+) -> Result<&'static Mutex<llama_cpp_2::llama_backend::LlamaBackend>, Box<dyn std::error::Error>> {
+    if let Some(b) = BACKEND.get() {
+        return Ok(b);
+    }
+    let _guard = INIT_LOCK.lock().unwrap();
+    if let Some(b) = BACKEND.get() {
+        return Ok(b);
     }
     let backend = llama_cpp_2::llama_backend::LlamaBackend::init()
         .map_err(|e| format!("backend init failed: {}", e))?;
     let _ = BACKEND.set(Mutex::new(backend));
-    Ok(())
-}
-
-fn get_backend(
-) -> Result<&'static Mutex<llama_cpp_2::llama_backend::LlamaBackend>, Box<dyn std::error::Error>> {
-    if BACKEND.get().is_none() {
-        init_backend()?;
-    }
     BACKEND
         .get()
         .ok_or_else(|| "backend not initialized".into())

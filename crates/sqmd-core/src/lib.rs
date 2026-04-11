@@ -10,6 +10,7 @@ pub mod episodes;
 pub mod files;
 pub mod index;
 pub mod languages;
+pub mod mcp_server;
 #[cfg(feature = "native")]
 pub mod native;
 #[cfg(feature = "ollama")]
