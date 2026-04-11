@@ -60,7 +60,7 @@ impl Embedder {
         }
 
         let owned: Vec<String> = texts.iter().map(|t| t.to_string()).collect();
-        let batch_size = 64;
+        let batch_size = 8;
         let mut all_results = Vec::with_capacity(texts.len());
 
         for chunk in owned.chunks(batch_size) {
@@ -74,7 +74,8 @@ impl Embedder {
                     for text in chunk {
                         match self.call_ollama_embed(std::slice::from_ref(text)) {
                             Ok(r) => all_results.extend(r),
-                            Err(_) => {
+                            Err(e2) => {
+                                eprintln!("[embed] single item failed: {e2}");
                                 all_results.push(vec![0.0f32; DIMS]);
                             }
                         }

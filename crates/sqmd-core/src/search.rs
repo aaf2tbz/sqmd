@@ -1137,7 +1137,7 @@ pub fn get_unembedded_chunk_ids(
 }
 
 #[cfg(feature = "embed")]
-const EMBED_MAX_CHARS: usize = 6000;
+const EMBED_MAX_CHARS: usize = 1500;
 
 #[cfg(feature = "embed")]
 pub fn embed_unembedded(
