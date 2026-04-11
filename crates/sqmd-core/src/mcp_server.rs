@@ -249,6 +249,11 @@ fn handle_message(db: &mut Connection, root: &Path, msg: &Value) -> Value {
             }
         }),
         "notifications/initialized" | "initialized" => Value::Null,
+        "ping" => json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "result": {}
+        }),
         "tools/list" => json!({
             "jsonrpc": "2.0",
             "id": id,
