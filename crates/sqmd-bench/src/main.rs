@@ -111,6 +111,7 @@ struct LaneMetrics {
     hit_at_1: f64,
     hit_at_3: f64,
     hit_at_5: f64,
+    hit_at_10: f64,
     mrr: f64,
 }
 
@@ -805,6 +806,7 @@ fn cmd_compare(db_path: &PathBuf, ground_truth_path: &str) {
         let mut hit_at_1 = 0usize;
         let mut hit_at_3 = 0usize;
         let mut hit_at_5 = 0usize;
+        let mut hit_at_10 = 0usize;
         let mut mrr_sum = 0.0f64;
 
         #[cfg(feature = "embed")]
@@ -853,6 +855,9 @@ fn cmd_compare(db_path: &PathBuf, ground_truth_path: &str) {
             if rank.is_some_and(|r| r <= 5) {
                 hit_at_5 += 1;
             }
+            if rank.is_some_and(|r| r <= 10) {
+                hit_at_10 += 1;
+            }
             mrr_sum += rank.map(|r| 1.0 / r as f64).unwrap_or(0.0);
         }
 
@@ -860,6 +865,7 @@ fn cmd_compare(db_path: &PathBuf, ground_truth_path: &str) {
             hit_at_1: hit_at_1 as f64 / total as f64,
             hit_at_3: hit_at_3 as f64 / total as f64,
             hit_at_5: hit_at_5 as f64 / total as f64,
+            hit_at_10: hit_at_10 as f64 / total as f64,
             mrr: mrr_sum / total as f64,
         };
 
