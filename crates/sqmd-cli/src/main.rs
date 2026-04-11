@@ -1140,35 +1140,56 @@ fn setup_opencode() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn setup_codex() -> Result<(), Box<dyn std::error::Error>> {
-    let config_path = dirs::config_dir()
-        .ok_or("Cannot find config directory")?
-        .join("codex")
-        .join("config.json");
+    let home = std::env::var("HOME").unwrap_or_default();
+    let config_path = PathBuf::from(home).join(".codex").join("config.toml");
 
-    let mut config: serde_json::Value = if config_path.exists() {
-        let content = std::fs::read_to_string(&config_path)?;
-        serde_json::from_str(&content).unwrap_or(serde_json::json!({}))
+    let mut content = if config_path.exists() {
+        std::fs::read_to_string(&config_path)?
     } else {
-        std::fs::create_dir_all(config_path.parent().unwrap())?;
-        serde_json::json!({})
+        String::new()
     };
 
-    let obj = config.as_object_mut().ok_or("config is not an object")?;
-    if !obj.contains_key("mcpServers") {
-        obj.insert("mcpServers".to_string(), serde_json::json!({}));
-    }
-    obj.get_mut("mcpServers")
-        .unwrap()
-        .as_object_mut()
-        .ok_or("mcpServers is not an object")?
-        .insert(
-            "sqmd".to_string(),
-            serde_json::json!({
-                "command": ["sqmd", "mcp"]
-            }),
-        );
+    let section = "[mcp_servers.sqmd]\ncommand = \"sqmd\"\nargs = [\"mcp\"]\n";
 
-    std::fs::write(&config_path, serde_json::to_string_pretty(&config)?)?;
+    if content.contains("[mcp_servers.sqmd]") {
+        let lines: Vec<&str> = content.lines().collect();
+        let mut skip_start = None;
+        let mut skip_end = lines.len();
+        for (i, line) in lines.iter().enumerate() {
+            if *line == "[mcp_servers.sqmd]" {
+                skip_start = Some(i);
+                continue;
+            }
+            if skip_start.is_some() && (line.starts_with('[') || i == lines.len() - 1) {
+                skip_end = if line.starts_with('[') { i } else { i + 1 };
+                break;
+            }
+        }
+        if let Some(start) = skip_start {
+            let before: String = lines[..start].join("\n");
+            let after: String = if skip_end < lines.len() {
+                lines[skip_end..].join("\n")
+            } else {
+                String::new()
+            };
+            content = format!(
+                "{}\n{}\n{}",
+                before.trim_end(),
+                section.trim_end(),
+                after.trim_start()
+            );
+        }
+    } else {
+        if !content.is_empty() && !content.ends_with('\n') {
+            content.push('\n');
+        }
+        content.push_str(section);
+    }
+
+    if let Some(parent) = config_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(&config_path, content)?;
     println!("{}: registered sqmd MCP server", config_path.display());
     Ok(())
 }
@@ -1343,40 +1364,30 @@ fn cmd_update(force: bool) -> Result<(), Box<dyn std::error::Error>> {
     println!("sqmd v{}", current);
 
     if !force {
-        println!("Checking for updates...");
+        println!("Updating...");
     }
 
-    let exe = std::env::current_exe()?;
-    let is_installed = exe.to_string_lossy().contains(".cargo");
+    let repo =
+        std::env::var("SQMD_REPO").unwrap_or_else(|_| "/Users/alexmondello/repos/sqmd".to_string());
 
-    if is_installed {
-        println!("Updating via cargo...");
-        let status = std::process::Command::new("cargo")
-            .args(["install", "sqmd-cli", "--features", "native", "--locked"])
-            .status()?;
-        if status.success() {
-            println!("Updated successfully.");
+    println!("Building from source at {}...", repo);
+    let status = std::process::Command::new("cargo")
+        .args(["build", "--release", "--features", "native"])
+        .current_dir(&repo)
+        .status()?;
+    if status.success() {
+        let bin = std::path::Path::new(&repo).join("target/release/sqmd");
+        println!("Built: {}", bin.display());
+        let home = std::env::var("HOME").unwrap_or_default();
+        let dest = PathBuf::from(home).join(".cargo").join("bin").join("sqmd");
+        if let Err(e) = std::fs::copy(&bin, &dest) {
+            eprintln!("Warning: could not copy to {}: {}", dest.display(), e);
+            println!("Manually copy: cp {} /usr/local/bin/sqmd", bin.display());
         } else {
-            eprintln!("Update failed. Try: cargo install sqmd-cli --features native --locked");
+            println!("Installed to {}", dest.display());
         }
     } else {
-        let repo = std::env::var("SQMD_REPO")
-            .unwrap_or_else(|_| "/Users/alexmondello/repos/sqmd".to_string());
-        println!("Building from source at {}...", repo);
-        let status = std::process::Command::new("cargo")
-            .args(["build", "--release", "--features", "native"])
-            .current_dir(&repo)
-            .status()?;
-        if status.success() {
-            let bin = std::path::Path::new(&repo).join("target/release/sqmd");
-            println!("Built: {}", bin.display());
-            println!(
-                "Copy to your PATH or run: cp {} /usr/local/bin/sqmd",
-                bin.display()
-            );
-        } else {
-            eprintln!("Build failed.");
-        }
+        eprintln!("Build failed.");
     }
     Ok(())
 }
