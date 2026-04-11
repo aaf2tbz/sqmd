@@ -21,6 +21,7 @@ See [BENCHMARKING.md](BENCHMARKING.md) for methodology and reproduction steps.
 
 - [Why sqmd](#why-sqmd)
 - [Quick Start](#quick-start)
+- [Skills](#skills)
 - [Supported Harnesses](#supported-harnesses)
 - [What Gets Indexed](#what-gets-indexed)
 - [Languages](#languages)
@@ -72,6 +73,29 @@ sqmd search "User" --type Struct                    # filter by chunk type
 sqmd context --query "how does auth work" --max-tokens 8000 --deps
 sqmd deps src/auth.ts --depth 2                     # trace dependency graph
 ```
+
+## Skills
+
+sqmd ships with ready-to-use skills that plug into OpenCode, Codex, and Claude Code. Copy a skill directory into your tool's skills folder:
+
+```bash
+# OpenCode
+cp -r skills/sqmd-review ~/.config/opencode/skills/
+
+# Codex
+cp -r skills/sqmd-review ~/.codex/skills/
+
+# Claude Code
+cp -r skills/sqmd-review ~/.claude/skills/
+```
+
+### sqmd-review
+
+Local self-review for uncommitted or staged changes using sqmd-indexed codebase context. Adapted from [pr-reviewer](https://github.com/NicholaiVogel/pr-reviewer). Runs entirely offline — no GitHub required.
+
+Before pushing, the agent uses sqmd to build dependency impact graphs and semantic context around your changes, then runs a structured review checking for bugs, security issues, race conditions, and convention drift. Outputs findings grouped by severity (`blocking`, `warning`, `nitpick`) with confidence levels.
+
+Trigger: "review my changes", "self-review", "review before push", "check my diff".
 
 ## Supported Harnesses
 
