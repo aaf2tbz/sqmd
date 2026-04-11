@@ -21,7 +21,7 @@ See [BENCHMARKING.md](BENCHMARKING.md) for methodology and reproduction steps.
 
 - [Why sqmd](#why-sqmd)
 - [Quick Start](#quick-start)
-- [Connecting to AI Tools](#connecting-to-ai-tools)
+- [Supported Harnesses](#supported-harnesses)
 - [What Gets Indexed](#what-gets-indexed)
 - [Languages](#languages)
 - [Search](#search)
@@ -73,18 +73,62 @@ sqmd context --query "how does auth work" --max-tokens 8000 --deps
 sqmd deps src/auth.ts --depth 2                     # trace dependency graph
 ```
 
-## Connecting to AI Tools
+## Supported Harnesses
 
-sqmd includes an MCP server that works with OpenCode, Codex, and Claude Code:
+sqmd exposes an MCP server (JSON-RPC 2.0 over stdio) that plugs into AI coding tools. All harnesses get the same 5 tools: `search`, `context`, `deps`, `stats`, `get`.
 
-```bash
-sqmd setup                   # register sqmd in all harness configs
-sqmd setup opencode          # OpenCode only (~/.config/opencode/opencode.json)
-sqmd setup codex             # Codex only (~/.config/codex/config.json)
-sqmd setup claude            # Claude Code only (~/.claude/settings.json)
+| Harness | Config path | Format | Setup command |
+|---------|------------|--------|---------------|
+| **OpenCode** | `~/.config/opencode/opencode.json` | JSON | `sqmd setup opencode` |
+| **Codex** | `~/.codex/config.toml` | TOML | `sqmd setup codex` |
+| **Claude Code** | `~/.claude/settings.json` | JSON | `sqmd setup claude` |
+
+Run `sqmd setup` to register all three at once.
+
+### OpenCode
+
+```json
+{
+  "mcp": {
+    "sqmd": {
+      "type": "local",
+      "command": ["/absolute/path/to/sqmd", "mcp"],
+      "enabled": true
+    }
+  }
+}
 ```
 
-This writes the MCP server config into each tool's settings so agents can call `sqmd search`, `sqmd context`, `sqmd deps`, `sqmd stats`, and `sqmd get` directly.
+### Codex
+
+```toml
+[mcp_servers.sqmd]
+command = "/absolute/path/to/sqmd"
+args = ["mcp"]
+```
+
+### Claude Code
+
+```json
+{
+  "mcpServers": {
+    "sqmd": {
+      "command": "/absolute/path/to/sqmd",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+### Raw JSON-RPC
+
+Any tool that speaks MCP over stdio can use sqmd directly:
+
+```bash
+echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"my-tool","version":"1.0"}}}' | sqmd mcp
+```
+
+Supports both raw JSON lines and `Content-Length:` framed transport.
 
 ## What Gets Indexed
 
