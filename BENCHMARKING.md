@@ -4,18 +4,19 @@ sqmd includes a benchmark harness (`sqmd-bench`) for measuring retrieval quality
 
 ## Latest Results
 
-### Signet Codebase — v3.0.0
+### Signet Codebase — v3.0.0 (native llama.cpp)
 
 | Metric | FTS | Layered |
 |--------|-----|---------|
-| Hit@1 | 86% | 85% |
-| Hit@3 | 97.5% | 97% |
+| Hit@1 | 86% | 86% |
+| Hit@3 | 97.5% | 97.5% |
 | Hit@5 | 98.5% | 98.5% |
 | Hit@10 | 99.5% | 99.5% |
-| MRR | 0.915 | 0.907 |
+| MRR | 0.915 | 0.915 |
 
 **Dataset**: 505 TypeScript files, 8,886 chunks, 3,547 relationships, 200 queries
-**Embedding model**: mxbai-embed-large (1024-dim)
+**Embedding model**: mxbai-embed-large (1024-dim) via native llama.cpp
+**Performance**: ~0.55s per query, ~19 q/sec
 **Date**: 2026-04-11
 
 ### Metrics
@@ -40,11 +41,8 @@ Each query targets a specific chunk (the chunk whose name generated the query). 
 ### Prerequisites
 
 ```bash
-# Build bench with embed features
-cargo build -p sqmd-bench --features embed,ollama --release
-
-# Ensure Ollama is running with embedding model
-ollama pull mxbai-embed-large
+# Build bench with native feature
+cargo build -p sqmd-bench --features native --release
 ```
 
 ### Generate Queries
@@ -68,19 +66,19 @@ FROM (
   ORDER BY RANDOM() LIMIT 200
 );" > queries.json
 
-# LLM-generated queries (slow)
-cargo run -p sqmd-bench --features embed,ollama -- generate /path/to/index.db --output queries.json
+# LLM-generated queries (slow, requires ollama feature)
+cargo run -p sqmd-bench --features native,ollama -- generate /path/to/index.db --output queries.json
 ```
 
 ### Run Comparison
 
 ```bash
 # FTS vs Layered head-to-head
-cargo run -p sqmd-bench --features embed,ollama -- compare /path/to/index.db --ground-truth queries.json
+cargo run -p sqmd-bench --features native -- compare /path/to/index.db --ground-truth queries.json
 
 # Single lane
-cargo run -p sqmd-bench --features embed,ollama -- run /path/to/index.db layered
-cargo run -p sqmd-bench --features embed,ollama -- run /path/to/index.db fts
+cargo run -p sqmd-bench --features native -- run /path/to/index.db layered
+cargo run -p sqmd-bench --features native -- run /path/to/index.db fts
 ```
 
 ### Expected Output
@@ -97,11 +95,11 @@ cargo run -p sqmd-bench --features embed,ollama -- run /path/to/index.db fts
       "mrr": 0.915
     },
     "layered": {
-      "hit_at_1": 0.85,
-      "hit_at_3": 0.97,
+      "hit_at_1": 0.86,
+      "hit_at_3": 0.975,
       "hit_at_5": 0.985,
       "hit_at_10": 0.995,
-      "mrr": 0.907
+      "mrr": 0.915
     }
   }
 }
@@ -128,5 +126,5 @@ sqmd embed
 
 # 4. Generate queries and run
 # (use the SQL query from above)
-cargo run -p sqmd-bench --features embed,ollama -- compare .sqmd/index.db --ground-truth queries.json
+cargo run -p sqmd-bench --features native -- compare .sqmd/index.db --ground-truth queries.json
 ```
