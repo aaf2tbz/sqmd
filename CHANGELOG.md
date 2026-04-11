@@ -2,6 +2,19 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.3.1] - 2026-04-11
+
+### Changed
+
+- `sqmd-review` now treats the actual git diff, commit blobs, and checked-out files as authoritative, using sqmd indexed context as a cross-checked second lens.
+- README refreshed for current MCP tools, background embedding, review skill behavior, and git worktree usage.
+- MCP server version bumped to 3.3.1.
+
+### Fixed
+
+- `sqmd mcp` now maps `.sqmd/index.db` back to the project root before indexing files, so relative paths are interpreted correctly.
+- MCP index discovery now finds a main-worktree `.sqmd/index.db` when launched from a linked git worktree.
+
 ## [3.3.0] - 2026-04-11
 
 ### Added
