@@ -7,7 +7,6 @@ edition = "2021"
 default = ["native"]
 native = ["dep:llama-cpp-2"]
 native-metal = ["native", "llama-cpp-2/metal"]
-ollama = ["dep:ureq"]
 
 [dependencies]
 rusqlite = { version = "0.34", features = ["bundled"] }
@@ -16,7 +15,6 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
 thiserror = "2"
-ureq = { version = "3", optional = true, features = ["json"] }
 llama-cpp-2 = { version = "0.1", optional = true }
 ignore = "0.4"
 walkdir = "2"

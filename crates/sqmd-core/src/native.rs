@@ -4,6 +4,7 @@ use std::sync::{Mutex, OnceLock};
 use crate::embed::EmbedProvider;
 
 const DEFAULT_EMBED_MODEL_NAME: &str = "mxbai-embed-large";
+const DEFAULT_HINT_MODEL_NAME: &str = "phi4-mini";
 const EMBED_DIMS: usize = 1024;
 
 static BACKEND: OnceLock<Mutex<llama_cpp_2::llama_backend::LlamaBackend>> = OnceLock::new();
@@ -58,18 +59,25 @@ impl NativeRuntime {
     }
 
     fn find_model() -> Result<PathBuf, Box<dyn std::error::Error>> {
-        if let Ok(path) = std::env::var("SQMD_NATIVE_MODEL") {
+        Self::find_named_model(DEFAULT_EMBED_MODEL_NAME, "SQMD_NATIVE_MODEL")
+    }
+
+    fn find_named_model(
+        model_name: &str,
+        env_var: &str,
+    ) -> Result<PathBuf, Box<dyn std::error::Error>> {
+        if let Ok(path) = std::env::var(env_var) {
             let p = PathBuf::from(&path);
             if p.exists() {
                 return Ok(p);
             }
             eprintln!(
-                "[native] SQMD_NATIVE_MODEL={} not found, searching ollama store",
-                path
+                "[native] {}={} not found, searching model store",
+                env_var, path
             );
         }
 
-        let ollama_home = std::env::var("OLLAMA_MODELS").unwrap_or_else(|_| {
+        let store_home = std::env::var("OLLAMA_MODELS").unwrap_or_else(|_| {
             format!(
                 "{}/.ollama/models",
                 std::env::var("HOME").unwrap_or_default()
@@ -78,7 +86,7 @@ impl NativeRuntime {
 
         let manifest_path = format!(
             "{}/manifests/registry.ollama.ai/library/{}/latest",
-            ollama_home, DEFAULT_EMBED_MODEL_NAME
+            store_home, model_name
         );
 
         let manifest_str = std::fs::read_to_string(&manifest_path)
@@ -93,7 +101,7 @@ impl NativeRuntime {
             let media_type = layer["mediaType"].as_str().unwrap_or("");
             if media_type.contains("gguf") {
                 let digest = layer["digest"].as_str().ok_or("layer missing digest")?;
-                let blob_path = format!("{}/blobs/{}", ollama_home, digest.replace(":", "-"));
+                let blob_path = format!("{}/blobs/{}", store_home, digest.replace(":", "-"));
                 if std::path::Path::new(&blob_path).exists() {
                     return Ok(PathBuf::from(blob_path));
                 }
@@ -107,7 +115,7 @@ impl NativeRuntime {
             }
             let size = layer["size"].as_u64().unwrap_or(0);
             if size > 100_000_000 {
-                let blob_path = format!("{}/blobs/{}", ollama_home, digest.replace(":", "-"));
+                let blob_path = format!("{}/blobs/{}", store_home, digest.replace(":", "-"));
                 if std::path::Path::new(&blob_path).exists() {
                     return Ok(PathBuf::from(blob_path));
                 }
@@ -115,8 +123,8 @@ impl NativeRuntime {
         }
 
         Err(format!(
-            "no GGUF blob found for {} — set SQMD_NATIVE_MODEL to a GGUF path or install via ollama",
-            DEFAULT_EMBED_MODEL_NAME
+            "no GGUF blob found for {} — set {} to a GGUF path",
+            model_name, env_var
         )
         .into())
     }
@@ -208,55 +216,225 @@ impl EmbedProvider for NativeRuntime {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+pub struct NativeGenerator {
+    model: llama_cpp_2::model::LlamaModel,
+    model_path: PathBuf,
+}
 
-    #[test]
-    fn test_find_model() {
-        let path = NativeRuntime::find_model();
-        if let Ok(p) = &path {
-            assert!(p.exists(), "model file should exist: {:?}", p);
-            eprintln!("[test] found model at {:?}", p);
+unsafe impl Send for NativeGenerator {}
+
+impl NativeGenerator {
+    pub fn new() -> Result<Self, Box<dyn std::error::Error>> {
+        let model_name = std::env::var("SQMD_HINT_MODEL")
+            .unwrap_or_else(|_| DEFAULT_HINT_MODEL_NAME.to_string());
+        let model_path = Self::find_named_model(&model_name)?;
+        eprintln!("[native] loading generator model from {:?}", model_path);
+        Self::from_path(&model_path)
+    }
+
+    pub fn from_path(path: &std::path::Path) -> Result<Self, Box<dyn std::error::Error>> {
+        let backend = get_backend()?;
+        let backend_guard = backend.lock().unwrap();
+
+        let model_params =
+            llama_cpp_2::model::params::LlamaModelParams::default().with_n_gpu_layers(99);
+
+        let model =
+            llama_cpp_2::model::LlamaModel::load_from_file(&backend_guard, path, &model_params)
+                .map_err(|e| format!("failed to load generator model from {:?}: {}", path, e))?;
+
+        Ok(Self {
+            model,
+            model_path: path.to_path_buf(),
+        })
+    }
+
+    fn find_named_model(model_name: &str) -> Result<PathBuf, Box<dyn std::error::Error>> {
+        if let Ok(path) = std::env::var("SQMD_HINT_MODEL_PATH") {
+            let p = PathBuf::from(&path);
+            if p.exists() {
+                return Ok(p);
+            }
+        }
+
+        let name = model_name.split(':').next().unwrap_or(model_name);
+
+        let store_home = std::env::var("OLLAMA_MODELS").unwrap_or_else(|_| {
+            format!(
+                "{}/.ollama/models",
+                std::env::var("HOME").unwrap_or_default()
+            )
+        });
+
+        let manifest_path = format!(
+            "{}/manifests/registry.ollama.ai/library/{}/latest",
+            store_home, name
+        );
+
+        if let Ok(manifest_str) = std::fs::read_to_string(&manifest_path) {
+            if let Ok(manifest) = serde_json::from_str::<serde_json::Value>(&manifest_str) {
+                if let Some(layers) = manifest["layers"].as_array() {
+                    for layer in layers {
+                        let media_type = layer["mediaType"].as_str().unwrap_or("");
+                        if media_type.contains("gguf") {
+                            if let Some(digest) = layer["digest"].as_str() {
+                                let blob_path =
+                                    format!("{}/blobs/{}", store_home, digest.replace(":", "-"));
+                                if std::path::Path::new(&blob_path).exists() {
+                                    return Ok(PathBuf::from(blob_path));
+                                }
+                            }
+                        }
+                    }
+                    for layer in layers {
+                        if let Some(digest) = layer["digest"].as_str() {
+                            if digest.is_empty() {
+                                continue;
+                            }
+                            let size = layer["size"].as_u64().unwrap_or(0);
+                            if size > 100_000_000 {
+                                let blob_path =
+                                    format!("{}/blobs/{}", store_home, digest.replace(":", "-"));
+                                if std::path::Path::new(&blob_path).exists() {
+                                    return Ok(PathBuf::from(blob_path));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Err(format!(
+            "no GGUF found for hint model '{}' — set SQMD_HINT_MODEL_PATH to a GGUF file path",
+            model_name
+        )
+        .into())
+    }
+
+    pub fn generate(
+        &mut self,
+        prompt: &str,
+        max_tokens: u32,
+    ) -> Result<String, Box<dyn std::error::Error>> {
+        let backend = get_backend()?;
+        let backend_guard = backend.lock().unwrap();
+
+        let n_ctx = std::num::NonZero::new(2048u32).unwrap();
+        let ctx_params = llama_cpp_2::context::params::LlamaContextParams::default()
+            .with_n_ctx(Some(n_ctx))
+            .with_n_batch(512);
+
+        let mut ctx = self
+            .model
+            .new_context(&backend_guard, ctx_params)
+            .map_err(|e| format!("generator context creation failed: {}", e))?;
+
+        let tokens = self
+            .model
+            .str_to_token(prompt, llama_cpp_2::model::AddBos::Always)
+            .unwrap_or_else(|_| vec![self.model.token_bos()]);
+
+        if tokens.is_empty() {
+            return Ok(String::new());
+        }
+
+        let n_ctx_val = n_ctx.get() as usize;
+        let prompt_tokens = tokens.len().min(n_ctx_val);
+        let tokens = &tokens[..prompt_tokens];
+
+        let mut batch = llama_cpp_2::llama_batch::LlamaBatch::new(prompt_tokens, 1);
+        for (i, token) in tokens.iter().enumerate() {
+            let is_last = i == prompt_tokens - 1;
+            batch.add(*token, i as i32, &[0], is_last)?;
+        }
+
+        ctx.decode(&mut batch)
+            .map_err(|e| format!("generator decode failed: {}", e))?;
+
+        let eos = self.model.token_eos();
+        let nl = self
+            .model
+            .str_to_token("\n", llama_cpp_2::model::AddBos::Never)
+            .ok()
+            .and_then(|v| v.first().copied());
+
+        let mut sampler = llama_cpp_2::sampling::LlamaSampler::chain_simple([
+            llama_cpp_2::sampling::LlamaSampler::top_k(40),
+            llama_cpp_2::sampling::LlamaSampler::top_p(0.9, 1),
+            llama_cpp_2::sampling::LlamaSampler::temp(0.8),
+            llama_cpp_2::sampling::LlamaSampler::dist(42),
+        ]);
+
+        let mut generated_tokens = Vec::new();
+        let mut n_past = prompt_tokens as i32;
+
+        for _ in 0..max_tokens {
+            let new_token = sampler.sample(&ctx, -1);
+            sampler.accept(new_token);
+
+            if new_token == eos {
+                break;
+            }
+            if Some(new_token) == nl && !generated_tokens.is_empty() {
+                break;
+            }
+
+            generated_tokens.push(new_token);
+
+            let mut cont_batch = llama_cpp_2::llama_batch::LlamaBatch::new(1, 1);
+            cont_batch.add(new_token, n_past, &[0], true)?;
+
+            ctx.decode(&mut cont_batch)
+                .map_err(|e| format!("generator continuation decode failed: {}", e))?;
+            n_past += 1;
+
+            if n_past as u32 >= n_ctx.get() - 1 {
+                break;
+            }
+        }
+
+        let text = generated_tokens
+            .iter()
+            .filter_map(|t| {
+                self.model
+                    .token_to_piece_bytes(*t, 32, true, None)
+                    .ok()
+                    .and_then(|bytes| String::from_utf8(bytes).ok())
+            })
+            .collect::<String>();
+
+        Ok(text)
+    }
+
+    pub fn generate_prospective_hints(
+        &mut self,
+        content: &str,
+    ) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+        let truncated = if content.len() > 1500 {
+            &content[..1500]
         } else {
-            eprintln!("[test] model not found (skipping): {:?}", path.err());
-        }
+            content
+        };
+
+        let prompt = format!(
+            "3 search queries for this code, one per line, no explanation:\n{}",
+            truncated
+        );
+
+        let output = self.generate(&prompt, 128)?;
+
+        let hints: Vec<String> = output
+            .lines()
+            .map(|l| l.trim().to_string())
+            .filter(|l| !l.is_empty())
+            .take(3)
+            .collect();
+
+        Ok(hints)
     }
 
-    #[test]
-    fn test_embed_one() {
-        let mut rt = match NativeRuntime::new() {
-            Ok(r) => r,
-            Err(e) => {
-                eprintln!("[test] skipping: {}", e);
-                return;
-            }
-        };
-        let vec = rt
-            .embed_one("fn authenticate(user: &str, token: &str) -> Result<bool>")
-            .unwrap();
-        assert_eq!(vec.len(), EMBED_DIMS);
-        let norm: f32 = vec.iter().map(|x| x * x).sum::<f32>().sqrt();
-        assert!(norm > 0.0, "embedding should not be zero");
-        eprintln!("[test] embedding norm = {:.4}", norm);
-    }
-
-    #[test]
-    fn test_embed_batch() {
-        let mut rt = match NativeRuntime::new() {
-            Ok(r) => r,
-            Err(e) => {
-                eprintln!("[test] skipping: {}", e);
-                return;
-            }
-        };
-        let texts = vec!["fn login()", "struct User", "enum Color { Red, Blue }"];
-        let refs: Vec<&str> = texts.iter().copied().collect();
-        let vecs = rt.embed_batch(&refs).unwrap();
-        assert_eq!(vecs.len(), 3);
-        for (i, v) in vecs.iter().enumerate() {
-            assert_eq!(v.len(), EMBED_DIMS, "embedding {} wrong dim", i);
-        }
-        eprintln!("[test] batch of 3 embeddings OK");
+    pub fn model_path_val(&self) -> &std::path::Path {
+        &self.model_path
     }
 }

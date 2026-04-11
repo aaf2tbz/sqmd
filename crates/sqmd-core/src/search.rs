@@ -1300,13 +1300,13 @@ pub fn render_search_markdown(
     Ok(rendered)
 }
 
-#[cfg(feature = "ollama")]
-pub fn generate_ollama_hints_batch(
+#[cfg(feature = "native")]
+pub fn generate_hints_batch(
     db: &mut Connection,
     limit: usize,
     min_importance: f64,
 ) -> Result<usize, Box<dyn std::error::Error>> {
-    let client = crate::ollama::OllamaClient::new();
+    let mut generator = crate::native::NativeGenerator::new()?;
 
     let ids: Vec<i64> = {
         let mut stmt = db.prepare(
@@ -1333,13 +1333,7 @@ pub fn generate_ollama_hints_batch(
             |r| r.get(0),
         )?;
 
-        let truncated = if content.len() > 1500 {
-            &content[..1500]
-        } else {
-            &content
-        };
-
-        match client.generate_prospective_hints(truncated) {
+        match generator.generate_prospective_hints(&content) {
             Ok(hints) if !hints.is_empty() => {
                 let typed: Vec<(String, &str)> =
                     hints.into_iter().map(|h| (h, "prospective")).collect();
@@ -1350,7 +1344,7 @@ pub fn generate_ollama_hints_batch(
             }
             Ok(_) => {}
             Err(e) => {
-                eprintln!("[hints] ollama failed for chunk {}: {e}", chunk_id);
+                eprintln!("[hints] generation failed for chunk {}: {e}", chunk_id);
             }
         }
     }

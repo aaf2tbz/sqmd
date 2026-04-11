@@ -10,18 +10,31 @@ All notable changes to this project will be documented in this file.
 - `sqmd setup` writes MCP config into OpenCode, Codex, and Claude Code settings automatically
 - `sqmd doctor` runs diagnostics on index, native embedder, model manifest, MCP binary, and daemon status
 - Native llama.cpp embedding runtime — replaces Ollama HTTP calls with direct GGUF loading via `llama-cpp-2`
+- `NativeGenerator` — text generation via native llama.cpp for hint production (replaces Ollama HTTP client)
+- `sqmd hints` now runs entirely through native llama.cpp (phi4-mini GGUF), no Ollama service required
 - Metal GPU acceleration on Apple Silicon (99 GPU layers)
 - MCP server (`sqmd mcp`) — JSON-RPC 2.0 over stdio with 5 tools (search, context, deps, stats, get)
 - Daemon PID tracking at `~/.sqmd/daemon.pid` with stale PID cleanup
+- `native-metal` feature for Metal GPU (default on macOS), `native` for CPU-only (Linux CI)
 - `libc` and `dirs` dependencies in CLI crate
 
 ### Changed
 
-- Default feature is now `native` (was `embed`)
+- Default feature is now `native-metal` on macOS, `native` for CPU-only builds
 - Removed `embed` feature — replaced by `native`
-- `ollama` feature is now only for hint generation (not embeddings)
+- Removed `ollama` feature entirely — all inference now runs through native llama.cpp
+- Removed `ureq` dependency (was only used for Ollama HTTP calls)
+- Removed `ollama.rs` module
+- `generate_ollama_hints_batch` replaced by `generate_hints_batch` using `NativeGenerator`
 - README rewritten for native runtime, MCP server, and lifecycle commands
 - BENCHMARKING.md updated with native feature flags and current benchmark numbers
+
+### Removed
+
+- `ollama` feature flag
+- `ollama.rs` module (Ollama HTTP client)
+- `ureq` dependency
+- All Ollama HTTP API calls — replaced by native llama.cpp inference
 
 ### Benchmark
 

@@ -7,7 +7,6 @@ edition = "2021"
 default = ["native-metal"]
 native = ["sqmd-core/native"]
 native-metal = ["sqmd-core/native-metal"]
-ollama = ["sqmd-core/ollama"]
 
 [dependencies]
 sqmd-core = { path = "../sqmd-core" }
