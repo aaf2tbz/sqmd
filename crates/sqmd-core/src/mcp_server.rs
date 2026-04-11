@@ -4,17 +4,27 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::path::Path;
 
 const SERVER_NAME: &str = "sqmd";
-const SERVER_VERSION: &str = "3.0.0";
+const SERVER_VERSION: &str = "3.2.0";
 const PROTOCOL_VERSION: &str = "2025-03-26";
 
 pub fn run(db_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let db = crate::schema::open_fast(db_path)?;
+    eprintln!("[mcp] opened index at {}", db_path.display());
+
     let mut stdin = BufReader::new(std::io::stdin());
     let mut stdout = std::io::stdout();
 
     loop {
         let mut line = String::new();
-        let n = stdin.read_line(&mut line)?;
+        let n = match stdin.read_line(&mut line) {
+            Ok(n) => n,
+            Err(e) => {
+                if e.kind() == std::io::ErrorKind::BrokenPipe || e.raw_os_error() == Some(32) {
+                    return Ok(());
+                }
+                return Err(Box::new(e));
+            }
+        };
         if n == 0 {
             return Ok(());
         }
@@ -24,26 +34,41 @@ pub fn run(db_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
             continue;
         }
 
-        if let Some(len_str) = line.strip_prefix("Content-Length:") {
-            let len: usize = len_str.trim().parse()?;
+        let msg: Value = if let Some(len_str) = line.strip_prefix("Content-Length:") {
+            let len: usize = match len_str.trim().parse() {
+                Ok(l) => l,
+                Err(_) => continue,
+            };
             let mut sep = String::new();
-            stdin.read_line(&mut sep)?;
+            let _ = stdin.read_line(&mut sep);
             let mut buf = vec![0u8; len];
-            stdin.read_exact(&mut buf)?;
-            let msg: Value = serde_json::from_slice(&buf)?;
-            if msg.get("id").is_some() {
-                let response = handle_message(&db, &msg);
-                send_response_framed(&mut stdout, &response)?;
+            if stdin.read_exact(&mut buf).is_err() {
+                continue;
+            }
+            match serde_json::from_slice(&buf) {
+                Ok(m) => m,
+                Err(_) => continue,
             }
         } else if line.starts_with('{') {
-            let msg: Value = serde_json::from_str(line)?;
-            if msg.get("id").is_some() {
-                let response = handle_message(&db, &msg);
-                let body = serde_json::to_string(&response)?;
-                stdout.write_all(body.as_bytes())?;
-                stdout.write_all(b"\n")?;
-                stdout.flush()?;
+            match serde_json::from_str(line) {
+                Ok(m) => m,
+                Err(_) => continue,
             }
+        } else {
+            continue;
+        };
+
+        let has_id = msg.get("id").is_some();
+        if !has_id && msg.get("method").is_some() {
+            let method = msg["method"].as_str().unwrap_or("");
+            if method == "notifications/initialized" {
+                continue;
+            }
+        }
+
+        let response = handle_message(&db, &msg);
+        if has_id {
+            send_response_framed(&mut stdout, &response)?;
         }
     }
 }

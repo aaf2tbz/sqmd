@@ -1149,7 +1149,14 @@ fn setup_codex() -> Result<(), Box<dyn std::error::Error>> {
         String::new()
     };
 
-    let section = "[mcp_servers.sqmd]\ncommand = \"sqmd\"\nargs = [\"mcp\"]\n";
+    let exe = std::env::current_exe()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|_| "sqmd".to_string());
+
+    let section = format!(
+        "[mcp_servers.sqmd]\ncommand = \"{}\"\nargs = [\"mcp\"]\n",
+        exe.replace('"', "\\\"")
+    );
 
     if content.contains("[mcp_servers.sqmd]") {
         let lines: Vec<&str> = content.lines().collect();
@@ -1183,7 +1190,7 @@ fn setup_codex() -> Result<(), Box<dyn std::error::Error>> {
         if !content.is_empty() && !content.ends_with('\n') {
             content.push('\n');
         }
-        content.push_str(section);
+        content.push_str(&section);
     }
 
     if let Some(parent) = config_path.parent() {
