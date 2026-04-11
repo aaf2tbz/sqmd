@@ -8,8 +8,9 @@ name = "sqmd"
 path = "src/main.rs"
 
 [features]
-default = ["native"]
+default = ["native-metal"]
 native = ["sqmd-core/native"]
+native-metal = ["sqmd-core/native-metal"]
 ollama = ["sqmd-core/ollama"]
 
 [dependencies]

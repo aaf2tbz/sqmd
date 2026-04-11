@@ -454,7 +454,7 @@ fn cmd_search(
         }
         #[cfg(not(feature = "native"))]
         {
-            sqmd_core::search::layered_search(&db, &search_query).map(|lr| lr.results)?
+            sqmd_core::search::fts_search(&db, &search_query)?
         }
     };
 
