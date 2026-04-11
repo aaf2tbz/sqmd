@@ -13,10 +13,14 @@ Output MUST be a JSON object in a fenced block tagged `pr-review-json`.
     "reasons": [
       // one or more:
       "sufficient_diff_evidence",
+      "authoritative_local_code_reviewed",
+      "local_callers_checked",
+      "sqmd_context_cross_checked",
       "targeted_context_included",
       "missing_runtime_repro",
       "missing_cross_module_context",
-      "ambiguous_requirements"
+      "ambiguous_requirements",
+      "sqmd_context_limited"
     ],
     "justification": "string — concrete evidence, NOT boilerplate. Name specific files, lines, or missing artifacts."
   },
@@ -28,6 +32,13 @@ Output MUST be a JSON object in a fenced block tagged `pr-review-json`.
       "body": "string — the finding description",
       "evidence_note": "string (optional) — required when re-raising a previously rebutted concern",
       "severity": "blocking | warning | nitpick"
+    }
+  ],
+  "tool_observations": [
+    {
+      "area": "scope_detection | sqmd_root | sqmd_index | sqmd_deps | sqmd_search | other",
+      "severity": "info | warning",
+      "detail": "string — describe tool/workflow limitations separately from code findings"
     }
   ]
 }
@@ -51,7 +62,7 @@ Must be grounded in concrete evidence. Use when:
 - Breaking API/contract change without migration
 - Missing null/undefined/error handling on a critical path
 
-Escalate to `blocking` only if the issue is directly provable from the diff or sqmd context. If confidence is `low` or `medium` due to `missing_cross_module_context`, downgrade to `warning`.
+Escalate to `blocking` only if the issue is directly provable from the actual diff, local file/commit contents, or locally verified sqmd context. If confidence is `low` or `medium` due to `missing_cross_module_context`, downgrade to `warning`.
 
 ### `warning`
 Use when:
@@ -71,9 +82,13 @@ Use when:
 
 | Level | When to Use |
 |-------|------------|
-| `high` | Finding is directly provable from diff + sqmd context. Named specific files, lines, and evidence. |
+| `high` | Finding is directly provable from the actual diff plus local codebase context, with sqmd context cross-checked when used. Named specific files, lines, and evidence. |
 | `medium` | Finding is supported by evidence but requires context not in scope (e.g., cross-module type contract). |
 | `low` | Finding is a reasonable concern but cannot be verified without runtime or broader codebase context. |
+
+Use `authoritative_local_code_reviewed` when the actual git diff/commit blobs and checked-out files were inspected directly. Use `local_callers_checked` when direct `rg`/file reads validated caller impact. Use `sqmd_context_cross_checked` only when sqmd search/dependency output was compared against current local files before being used as evidence.
+
+Use `sqmd_context_limited` when the sqmd index, dependency graph, or search behavior was unavailable, stale, rooted in another worktree, or too noisy to support a high-confidence cross-module review. This does not by itself make the review low-confidence if the actual local diff and local caller checks are sufficient for the change scope.
 
 ## Example
 
@@ -84,8 +99,8 @@ Use when:
   "verdict": "comment",
   "confidence": {
     "level": "medium",
-    "reasons": ["sufficient_diff_evidence", "missing_cross_module_context"],
-    "justification": "The race condition in worker.rs:198 is directly visible in the diff — two async tasks read/write shared state without a lock. The missing error handler in pipeline.ts:41 is provable from the diff. Confidence is medium because WorkerStats type definition (not in diff) is needed to confirm whether the shared state access is safe via TypeScript structural typing."
+    "reasons": ["sufficient_diff_evidence", "authoritative_local_code_reviewed", "local_callers_checked", "missing_cross_module_context"],
+    "justification": "The race condition in worker.rs:198 is directly visible in the diff and was checked against the current local worker implementation. The missing error handler in pipeline.ts:41 is provable from the diff. Confidence is medium because WorkerStats type definition (not in diff) is needed to confirm whether the shared state access is safe via TypeScript structural typing."
   },
   "ui_screenshot_needed": false,
   "comments": [
@@ -100,6 +115,13 @@ Use when:
       "line": 41,
       "body": "The `process()` call is not awaited and has no `.catch()`. A rejection here will surface as an unhandled promise rejection at runtime.",
       "severity": "warning"
+    }
+  ],
+  "tool_observations": [
+    {
+      "area": "sqmd_deps",
+      "severity": "info",
+      "detail": "Dependency graph returned no dependents for the changed worker file, so caller validation used direct import search instead."
     }
   ]
 }
