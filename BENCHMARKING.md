@@ -18,23 +18,6 @@ sqmd includes a benchmark harness (`sqmd-bench`) for measuring retrieval quality
 **Embedding model**: mxbai-embed-large (1024-dim)
 **Date**: 2026-04-11
 
-### Grafana Codebase — v2.2.0
-
-| Metric | FTS | Layered | Hybrid |
-|--------|-----|---------|--------|
-| Hit@1 | 9-10% | 25-26% | 2-3% |
-| Hit@3 | 12-14% | 37% | 7-8% |
-| Hit@5 | 12-14% | 37-38% | 11-12% |
-| MRR | 0.11-0.13 | 0.31 | 0.05-0.06 |
-
-**Dataset**: Go + TypeScript slices from Grafana, ~9,696 chunks, 200 queries
-**Embedding model**: nomic-embed-text (768-dim)
-**Date**: 2026-04-10
-
-Layered dominated on the Grafana dataset because the entity graph expansion and community detection provide structural retrieval that vector similarity alone cannot match for code-syntax-heavy queries.
-
-## Methodology
-
 ### Metrics
 
 - **Hit@K**: Is the target chunk present in the top K results? (K = 1, 3, 5, 10)
