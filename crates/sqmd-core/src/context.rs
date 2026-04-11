@@ -62,13 +62,13 @@ impl ContextAssembler {
                 source_type_filter: request.source_types.clone(),
                 ..Default::default()
             };
-            #[cfg(feature = "embed")]
+            #[cfg(feature = "native")]
             let results = {
-                let mut embedder = crate::embed::Embedder::new()?;
-                crate::search::layered_search(db, &search_query, Some(&mut embedder))
+                let mut provider = crate::embed::make_provider()?;
+                crate::search::layered_search(db, &search_query, Some(&mut *provider))
                     .map(|lr| lr.results)?
             };
-            #[cfg(not(feature = "embed"))]
+            #[cfg(not(feature = "native"))]
             let results = crate::search::layered_search(db, &search_query).map(|lr| lr.results)?;
             for r in &results {
                 if seen_ids.insert(r.chunk_id) {

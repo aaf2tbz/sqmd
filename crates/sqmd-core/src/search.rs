@@ -1,6 +1,6 @@
 use crate::dampening;
-#[cfg(feature = "embed")]
-use crate::embed::{self, Embedder};
+#[cfg(feature = "native")]
+use crate::embed::{self, EmbedProvider};
 use rusqlite::{params, Connection};
 
 #[derive(Debug, Clone)]
@@ -67,16 +67,16 @@ pub fn fts_search(
 const SHORT_CIRCUIT_THRESHOLD: f64 = 0.7;
 const MIN_SHORT_CIRCUIT_HITS: usize = 3;
 
-#[cfg(feature = "embed")]
+#[cfg(feature = "native")]
 pub fn layered_search(
     db: &Connection,
     query: &SearchQuery,
-    embedder: Option<&mut Embedder>,
+    embedder: Option<&mut dyn EmbedProvider>,
 ) -> Result<LayeredResult, Box<dyn std::error::Error>> {
     layered_search_inner(db, query, embedder)
 }
 
-#[cfg(not(feature = "embed"))]
+#[cfg(not(feature = "native"))]
 pub fn layered_search(
     db: &Connection,
     query: &SearchQuery,
@@ -87,7 +87,7 @@ pub fn layered_search(
 fn layered_search_inner(
     db: &Connection,
     query: &SearchQuery,
-    #[cfg(feature = "embed")] mut embedder_opt: Option<&mut Embedder>,
+    #[cfg(feature = "native")] mut embedder_opt: Option<&mut dyn EmbedProvider>,
 ) -> Result<LayeredResult, Box<dyn std::error::Error>> {
     let mut all_results: Vec<SearchResult> = Vec::new();
     let mut layers_hit: Vec<String> = Vec::new();
@@ -145,7 +145,7 @@ fn layered_search_inner(
         }
     }
 
-    #[cfg(feature = "embed")]
+    #[cfg(feature = "native")]
     if let Some(ref mut embedder) = embedder_opt {
         if embedder.is_available() {
             if let Ok(query_vec) = embedder.embed_query(&query.text) {
@@ -1061,7 +1061,7 @@ fn format_vector(vec: &[f32]) -> String {
     format!("[{}]", items.join(", "))
 }
 
-#[cfg(feature = "embed")]
+#[cfg(feature = "native")]
 pub fn store_embedding(
     db: &Connection,
     chunk_id: i64,
@@ -1082,7 +1082,7 @@ pub fn store_embedding(
     Ok(())
 }
 
-#[cfg(feature = "embed")]
+#[cfg(feature = "native")]
 pub fn store_hint_embedding(
     db: &Connection,
     chunk_id: i64,
@@ -1095,7 +1095,7 @@ pub fn store_hint_embedding(
     Ok(())
 }
 
-#[cfg(feature = "embed")]
+#[cfg(feature = "native")]
 fn hint_vec_search(
     db: &Connection,
     query_vec: &[f32],
@@ -1136,13 +1136,13 @@ pub fn get_unembedded_chunk_ids(
     Ok(ids)
 }
 
-#[cfg(feature = "embed")]
+#[cfg(feature = "native")]
 const EMBED_MAX_CHARS: usize = 1500;
 
-#[cfg(feature = "embed")]
+#[cfg(feature = "native")]
 pub fn embed_unembedded(
     db: &mut Connection,
-    embedder: &mut Embedder,
+    embedder: &mut dyn EmbedProvider,
 ) -> Result<usize, Box<dyn std::error::Error>> {
     let ids = get_unembedded_chunk_ids(db, 512)?;
     if ids.is_empty() {
@@ -1185,7 +1185,10 @@ pub fn embed_unembedded(
         return Ok(0);
     }
 
-    let text_refs: Vec<&str> = truncated.iter().map(|(_, t)| t.as_str()).collect();
+    let text_refs: Vec<&str> = truncated
+        .iter()
+        .map(|(_, t): &(_, String)| t.as_str())
+        .collect();
     let vectors = match embedder.embed_batch(&text_refs) {
         Ok(v) => v,
         Err(e) => {
@@ -1211,7 +1214,10 @@ pub fn embed_unembedded(
         .collect();
 
     if !hint_texts.is_empty() {
-        let hint_refs: Vec<&str> = hint_texts.iter().map(|(_, t)| t.as_str()).collect();
+        let hint_refs: Vec<&str> = hint_texts
+            .iter()
+            .map(|(_, t): &(_, String)| t.as_str())
+            .collect();
         let hint_vectors = embedder.embed_batch(&hint_refs)?;
         for ((chunk_id, _), vector) in hint_texts.iter().zip(hint_vectors.iter()) {
             store_hint_embedding(db, *chunk_id, vector)?;
@@ -1426,7 +1432,7 @@ mod tests {
         assert!(results.is_empty());
     }
 
-    #[cfg(feature = "embed")]
+    #[cfg(feature = "native")]
     #[test]
     fn test_layered_search_fts_only() {
         let db = make_test_db();
@@ -1435,11 +1441,11 @@ mod tests {
             top_k: 5,
             ..Default::default()
         };
-        let result = layered_search(&db, &query, None as Option<&mut Embedder>).unwrap();
+        let result = layered_search(&db, &query, None as Option<&mut dyn EmbedProvider>).unwrap();
         assert!(!result.results.is_empty());
     }
 
-    #[cfg(feature = "embed")]
+    #[cfg(feature = "native")]
     #[test]
     fn test_get_unembedded_chunk_ids() {
         let db = make_test_db();
@@ -1455,7 +1461,7 @@ mod tests {
         assert!(!ids.contains(&1));
     }
 
-    #[cfg(feature = "embed")]
+    #[cfg(feature = "native")]
     #[test]
     fn test_store_and_search_vector() {
         let db = make_test_db();

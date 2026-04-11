@@ -4,8 +4,8 @@ version = "3.0.0"
 edition = "2021"
 
 [features]
-default = []
-embed = ["dep:ureq"]
+default = ["native"]
+native = ["dep:llama-cpp-2"]
 ollama = ["dep:ureq"]
 
 [dependencies]
@@ -16,6 +16,7 @@ serde_json = "1"
 sha2 = "0.10"
 thiserror = "2"
 ureq = { version = "3", optional = true, features = ["json"] }
+llama-cpp-2 = { version = "0.1", optional = true, features = ["metal"] }
 ignore = "0.4"
 walkdir = "2"
 tree-sitter = "0.24"

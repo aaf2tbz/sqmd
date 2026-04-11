@@ -25,7 +25,7 @@ enum Commands {
         /// Project root directory
         #[arg(default_value = ".")]
         path: PathBuf,
-        #[cfg(feature = "embed")]
+        #[cfg(feature = "native")]
         /// Also generate embeddings
         #[arg(long)]
         embed: bool,
@@ -50,7 +50,7 @@ enum Commands {
         #[arg(long)]
         keyword: bool,
     },
-    #[cfg(feature = "embed")]
+    #[cfg(feature = "native")]
     /// Generate embeddings for unembedded chunks
     Embed,
     /// Show index statistics
@@ -177,7 +177,7 @@ fn main() {
 fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     match cli.command {
         Commands::Init => cmd_init(),
-        #[cfg(feature = "embed")]
+        #[cfg(feature = "native")]
         Commands::Index { path, embed } => {
             if embed {
                 cmd_index_embed(&path)
@@ -185,7 +185,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 cmd_index(&path)
             }
         }
-        #[cfg(not(feature = "embed"))]
+        #[cfg(not(feature = "native"))]
         Commands::Index { path } => cmd_index(&path),
         Commands::Search {
             query,
@@ -195,7 +195,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             source,
             keyword,
         } => cmd_search(&query, top_k, file, r#type, source, keyword, cli.json),
-        #[cfg(feature = "embed")]
+        #[cfg(feature = "native")]
         Commands::Embed => cmd_embed(),
         Commands::Stats => cmd_stats(cli.json),
         Commands::Get { location } => cmd_get(&location, cli.json),
@@ -318,22 +318,22 @@ fn cmd_index(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-#[cfg(feature = "embed")]
+#[cfg(feature = "native")]
 fn cmd_index_embed(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
     cmd_index(root)?;
     let mut db = ensure_db()?;
     cmd_embed_with_db(&mut db)
 }
 
-#[cfg(feature = "embed")]
+#[cfg(feature = "native")]
 fn cmd_embed() -> Result<(), Box<dyn std::error::Error>> {
     let mut db = ensure_db()?;
     cmd_embed_with_db(&mut db)
 }
 
-#[cfg(feature = "embed")]
+#[cfg(feature = "native")]
 fn cmd_embed_with_db(db: &mut rusqlite::Connection) -> Result<(), Box<dyn std::error::Error>> {
-    let mut embedder = sqmd_core::embed::Embedder::new()?;
+    let mut embedder = sqmd_core::embed::make_provider()?;
 
     let unembedded: i64 = db.query_row(
         "SELECT COUNT(*) FROM chunks LEFT JOIN embeddings ON chunks.id = embeddings.chunk_id WHERE embeddings.chunk_id IS NULL",
@@ -351,7 +351,7 @@ fn cmd_embed_with_db(db: &mut rusqlite::Connection) -> Result<(), Box<dyn std::e
     let mut total = 0;
 
     loop {
-        let count = sqmd_core::search::embed_unembedded(db, &mut embedder)?;
+        let count = sqmd_core::search::embed_unembedded(db, &mut *embedder)?;
         if count == 0 {
             break;
         }
@@ -394,13 +394,13 @@ fn cmd_search(
     let results = if keyword_only {
         sqmd_core::search::fts_search(&db, &search_query)?
     } else {
-        #[cfg(feature = "embed")]
+        #[cfg(feature = "native")]
         {
-            let mut embedder = sqmd_core::embed::Embedder::new()?;
-            sqmd_core::search::layered_search(&db, &search_query, Some(&mut embedder))
+            let mut embedder = sqmd_core::embed::make_provider()?;
+            sqmd_core::search::layered_search(&db, &search_query, Some(&mut *embedder))
                 .map(|lr| lr.results)?
         }
-        #[cfg(not(feature = "embed"))]
+        #[cfg(not(feature = "native"))]
         {
             sqmd_core::search::layered_search(&db, &search_query).map(|lr| lr.results)?
         }

@@ -4,13 +4,14 @@ pub mod communities;
 pub mod context;
 pub mod daemon;
 pub mod dampening;
-#[cfg(feature = "embed")]
 pub mod embed;
 pub mod entities;
 pub mod episodes;
 pub mod files;
 pub mod index;
 pub mod languages;
+#[cfg(feature = "native")]
+pub mod native;
 #[cfg(feature = "ollama")]
 pub mod ollama;
 pub mod query_cache;

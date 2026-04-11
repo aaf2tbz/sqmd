@@ -8,8 +8,8 @@ name = "sqmd"
 path = "src/main.rs"
 
 [features]
-default = []
-embed = ["sqmd-core/embed"]
+default = ["native"]
+native = ["sqmd-core/native"]
 ollama = ["sqmd-core/ollama"]
 
 [dependencies]

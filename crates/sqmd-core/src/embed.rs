@@ -1,138 +1,14 @@
-use std::io::Read;
-
-const DEFAULT_MODEL: &str = "mxbai-embed-large";
-const DIMS: usize = 1024;
-
-pub struct Embedder {
-    base_url: String,
-    model: String,
-    available: Option<bool>,
+pub trait EmbedProvider: Send {
+    fn embed_one(&mut self, text: &str) -> Result<Vec<f32>, Box<dyn std::error::Error>>;
+    fn embed_query(&mut self, text: &str) -> Result<Vec<f32>, Box<dyn std::error::Error>>;
+    fn embed_batch(&mut self, texts: &[&str]) -> Result<Vec<Vec<f32>>, Box<dyn std::error::Error>>;
+    fn is_available(&mut self) -> bool;
+    fn model_name(&self) -> &str;
 }
 
-impl Embedder {
-    pub fn new() -> Result<Self, Box<dyn std::error::Error>> {
-        let base_url =
-            std::env::var("OLLAMA_HOST").unwrap_or_else(|_| "http://localhost:11434".to_string());
-        let model = std::env::var("SQMD_EMBED_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.to_string());
-        Ok(Self {
-            base_url,
-            model,
-            available: None,
-        })
-    }
-
-    pub fn is_available(&mut self) -> bool {
-        if let Some(a) = self.available {
-            return a;
-        }
-        let url = format!("{}/api/tags", self.base_url);
-        let result = ureq::Agent::new_with_defaults()
-            .get(&url)
-            .call()
-            .and_then(|resp| {
-                let mut body = String::new();
-                resp.into_body().into_reader().read_to_string(&mut body)?;
-                Ok(body)
-            });
-        let ok = result.is_ok();
-        self.available = Some(ok);
-        ok
-    }
-
-    pub fn embed_one(&mut self, text: &str) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
-        let results = self.call_ollama_embed(&[text.to_string()])?;
-        results
-            .into_iter()
-            .next()
-            .ok_or_else(|| "No embedding returned".into())
-    }
-
-    pub fn embed_query(&mut self, text: &str) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
-        self.embed_one(text)
-    }
-
-    pub fn embed_batch(
-        &mut self,
-        texts: &[&str],
-    ) -> Result<Vec<Vec<f32>>, Box<dyn std::error::Error>> {
-        if texts.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        let owned: Vec<String> = texts.iter().map(|t| t.to_string()).collect();
-        let batch_size = 8;
-        let mut all_results = Vec::with_capacity(texts.len());
-
-        for chunk in owned.chunks(batch_size) {
-            match self.call_ollama_embed(chunk) {
-                Ok(results) => all_results.extend(results),
-                Err(e) => {
-                    eprintln!(
-                        "[embed] batch failed ({} texts), falling back to single: {e}",
-                        chunk.len()
-                    );
-                    for text in chunk {
-                        match self.call_ollama_embed(std::slice::from_ref(text)) {
-                            Ok(r) => all_results.extend(r),
-                            Err(e2) => {
-                                eprintln!("[embed] single item failed: {e2}");
-                                all_results.push(vec![0.0f32; DIMS]);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        Ok(all_results)
-    }
-
-    fn call_ollama_embed(
-        &mut self,
-        texts: &[String],
-    ) -> Result<Vec<Vec<f32>>, Box<dyn std::error::Error>> {
-        let body = serde_json::json!({
-            "model": self.model,
-            "input": texts,
-        });
-
-        let url = format!("{}/api/embed", self.base_url);
-        let response = ureq::Agent::new_with_defaults()
-            .post(&url)
-            .send_json(&body)?;
-
-        let mut body_str = String::new();
-        response
-            .into_body()
-            .into_reader()
-            .read_to_string(&mut body_str)?;
-        let parsed: serde_json::Value = serde_json::from_str(&body_str)?;
-
-        let embeddings = parsed["embeddings"]
-            .as_array()
-            .ok_or_else(|| "Unexpected embed response: no embeddings array".to_string())?;
-
-        let mut results = Vec::with_capacity(embeddings.len());
-        for emb in embeddings {
-            let vec: Vec<f32> = emb
-                .as_array()
-                .ok_or("Embedding is not an array")?
-                .iter()
-                .filter_map(|v| v.as_f64().map(|f| f as f32))
-                .collect();
-            results.push(vec);
-        }
-
-        Ok(results)
-    }
-
-    pub fn model_name(&self) -> &str {
-        &self.model
-    }
-
-    pub fn dims() -> usize {
-        DIMS
-    }
+pub fn make_provider() -> Result<Box<dyn EmbedProvider>, Box<dyn std::error::Error>> {
+    let rt = crate::native::NativeRuntime::new()?;
+    Ok(Box::new(rt))
 }
 
 pub fn vector_to_blob(vec: &[f32]) -> Vec<u8> {
@@ -161,12 +37,6 @@ pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_embedder_create() {
-        let embedder = Embedder::new().unwrap();
-        assert_eq!(embedder.model, "mxbai-embed-large");
-    }
 
     #[test]
     fn test_vector_blob_roundtrip() {
