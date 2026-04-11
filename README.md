@@ -75,7 +75,7 @@ sqmd deps src/auth.ts --depth 2                     # trace dependency graph
 
 ## Supported Harnesses
 
-sqmd exposes an MCP server (JSON-RPC 2.0 over stdio) that plugs into AI coding tools. All harnesses get the same 5 tools: `search`, `context`, `deps`, `stats`, `get`.
+sqmd exposes an MCP server (JSON-RPC 2.0 over stdio) that plugs into AI coding tools. All harnesses get the same 9 tools: `search`, `context`, `deps`, `stats`, `get`, `index_file`, `embed`, `ls`, `cat`.
 
 | Harness | Config path | Format | Setup command |
 |---------|------------|--------|---------------|
@@ -358,15 +358,21 @@ After generating hints, re-run `sqmd embed` to embed the hint text into `hints_v
 sqmd mcp
 ```
 
-Exposes 5 tools:
+Exposes 9 tools:
 
 | Tool | Description |
 |------|-------------|
-| `search` | Layered search with query, top_k, file/type filters |
+| `search` | Layered search with query, top_k, file/type/source filters |
 | `context` | Assemble token-budgeted context with dependency expansion |
 | `deps` | Get dependencies and dependents for a file path |
 | `stats` | Index statistics (files, chunks, embeddings, relationships) |
 | `get` | Get chunk by file path and line number |
+| `index_file` | Index a single file or all changed files (incremental) |
+| `embed` | Embed unembedded chunks via local llama.cpp (configurable batch) |
+| `ls` | List chunks with file/type/language filters |
+| `cat` | Get full chunk content by ID |
+
+Agents can index new files, keep embeddings up-to-date, and browse the codebase entirely through MCP — no CLI needed.
 
 Register with `sqmd setup` or manually add to your tool's config:
 
