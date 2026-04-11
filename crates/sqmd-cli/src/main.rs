@@ -1242,8 +1242,8 @@ fn setup_claude() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn setup_cursor() -> Result<(), Box<dyn std::error::Error>> {
-    let home = std::env::var("HOME").unwrap_or_default();
-    let config_dir = PathBuf::from(&home).join(".cursor");
+    let cwd = std::env::current_dir()?;
+    let config_dir = cwd.join(".cursor");
     let config_path = config_dir.join("mcp.json");
 
     let mut config: serde_json::Value = if config_path.exists() {
