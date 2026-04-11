@@ -2,6 +2,32 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.2.0] - 2026-04-11
+
+### Added
+
+- 17 new language detections: Shell (sh/bash/zsh/fish), SQL, Dockerfile, Makefile, Kotlin, Swift, C#, PHP, Lua, Dart, Scala, Haskell, Elixir, Zig, XML/SVG, GraphQL, Protobuf
+- `.sqmdignore` support — custom exclusion file in project root, same format as `.gitignore`
+- Markdown code-block sub-chunking — fenced code blocks split into separate `Code`-typed chunks with language tags
+- Structural relationship extraction wired up for Go, Java, C, C++, Ruby
+- `.mjs`/`.cjs` extension support for JavaScript
+- Filename-based detection for `Dockerfile` and `Makefile` (no extension)
+
+### Changed
+
+- SCSS/SASS/LESS separated from CSS into dedicated `Scss` language variant
+- Markdown prose sections now tagged as `SourceType::Document` (was `SourceType::Code`)
+- `sqmd-bench generate` loads native model once and reuses across all queries (was loading per-query)
+- Template eval queries improved from `"how does fn foo() work"` to `"find the method named foo in config.rs"`
+- Edition bumped to 2026 for all crates
+
+### Fixed
+
+- Hint deduplication — added `UNIQUE(chunk_id, hint_text)` index (schema v14) + `INSERT OR IGNORE`
+- `sqmd hints` is now safe to re-run without creating duplicates
+- Embed progress output fixed — writes to stderr consistently, shows percentage
+- Embed progress was printing to stdout but flushing stderr (mismatch)
+
 ## [3.1.0] - 2026-04-11
 
 ### Added
