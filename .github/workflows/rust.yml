@@ -16,15 +16,11 @@ jobs:
 
     steps:
     - uses: actions/checkout@v4
-    - name: Build (default)
-      run: cargo build --verbose
-    - name: Build (embed)
-      run: cargo build --verbose --features embed
-    - name: Test (default)
-      run: cargo test --verbose
-    - name: Test (embed)
-      run: cargo test --verbose --features embed
-    - name: Clippy (default)
-      run: cargo clippy -- -D warnings
-    - name: Clippy (embed)
-      run: cargo clippy --features embed -- -D warnings
+    - name: Install dependencies
+      run: sudo apt-get update && sudo apt-get install -y cmake
+    - name: Build (native, CPU)
+      run: cargo build --verbose --no-default-features --features native
+    - name: Test (native, CPU)
+      run: cargo test --verbose --no-default-features --features native
+    - name: Clippy (native, CPU)
+      run: cargo clippy --no-default-features --features native -- -D warnings

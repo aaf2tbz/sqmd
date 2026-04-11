@@ -486,9 +486,7 @@ fn cmd_run(db_path: &PathBuf, mode: &str) {
                 }
                 #[cfg(not(feature = "native"))]
                 {
-                    sqmd_core::search::layered_search(&db, &search_query)
-                        .map(|lr| lr.results)
-                        .unwrap_or_default()
+                    sqmd_core::search::fts_search(&db, &search_query).unwrap_or_default()
                 }
             }
             _ => {
@@ -531,9 +529,7 @@ fn cmd_run(db_path: &PathBuf, mode: &str) {
             }
             #[cfg(not(feature = "native"))]
             {
-                sqmd_core::search::layered_search(&db, &search_query)
-                    .map(|lr| lr.layers_hit)
-                    .unwrap_or_default()
+                vec!["fts".to_string()]
             }
         } else {
             vec!["fts".to_string()]
@@ -830,9 +826,7 @@ fn cmd_compare(db_path: &PathBuf, ground_truth_path: &str) {
                     }
                     #[cfg(not(feature = "native"))]
                     {
-                        sqmd_core::search::layered_search(&db, &search_query)
-                            .map(|lr| lr.results)
-                            .unwrap_or_default()
+                        sqmd_core::search::fts_search(&db, &search_query).unwrap_or_default()
                     }
                 }
                 _ => Vec::new(),

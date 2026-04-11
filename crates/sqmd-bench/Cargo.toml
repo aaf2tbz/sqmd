@@ -4,8 +4,9 @@ version = "1.0.0"
 edition = "2021"
 
 [features]
-default = ["native"]
+default = ["native-metal"]
 native = ["sqmd-core/native"]
+native-metal = ["sqmd-core/native-metal"]
 ollama = ["sqmd-core/ollama"]
 
 [dependencies]

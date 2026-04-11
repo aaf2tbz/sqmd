@@ -6,6 +6,7 @@ pub trait EmbedProvider: Send {
     fn model_name(&self) -> &str;
 }
 
+#[cfg(feature = "native")]
 pub fn make_provider() -> Result<Box<dyn EmbedProvider>, Box<dyn std::error::Error>> {
     let rt = crate::native::NativeRuntime::new()?;
     Ok(Box::new(rt))
