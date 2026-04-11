@@ -15,7 +15,7 @@ sqmd includes a benchmark harness (`sqmd-bench`) for measuring retrieval quality
 | MRR | 0.915 | 0.915 |
 
 **Dataset**: 505 TypeScript files, 8,886 chunks, 3,547 relationships, 200 queries
-**Embedding model**: mxbai-embed-large (1024-dim) via native llama.cpp
+**Embedding model**: mxbai-embed-large (1024-dim) via native llama.cpp via native llama.cpp
 **Performance**: ~0.55s per query, ~19 q/sec
 **Date**: 2026-04-11
 
@@ -30,7 +30,7 @@ Two approaches:
 
 1. **Name-derived queries** (fast, no LLM needed): Randomly sample function/method/class/interface names from indexed chunks, lowercase with spaces replacing separators. These are FTS-friendly and test exact/near-exact recall.
 
-2. **LLM-generated queries** (slow, requires Ollama): Use `sqmd-bench generate` with a running Ollama instance to produce natural-language queries describing what each chunk does. Better for testing semantic retrieval.
+2. **LLM-generated queries** (slow): Use `sqmd-bench generate` to produce natural-language queries describing what each chunk does. Requires phi4-mini GGUF in model store. Better for testing semantic retrieval.
 
 ### Evaluation
 
@@ -66,8 +66,8 @@ FROM (
   ORDER BY RANDOM() LIMIT 200
 );" > queries.json
 
-# LLM-generated queries (slow, requires ollama feature)
-cargo run -p sqmd-bench --features native,ollama -- generate /path/to/index.db --output queries.json
+# LLM-generated queries (slow, requires hint model GGUF)
+cargo run -p sqmd-bench --features native -- generate /path/to/index.db --output queries.json
 ```
 
 ### Run Comparison

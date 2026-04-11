@@ -62,13 +62,7 @@ sqmd index --embed  # index + generate embeddings in one step
 sqmd embed          # generate vector embeddings (mxbai-embed-large via native llama.cpp)
 ```
 
-sqmd looks for the `mxbai-embed-large` GGUF in your Ollama model store (`~/.ollama/models/`). If you have Ollama installed:
-
-```bash
-ollama pull mxbai-embed-large
-```
-
-Or set `SQMD_NATIVE_MODEL` to point directly at a GGUF file path.
+sqmd looks for `mxbai-embed-large` GGUF in your local model store (`~/.ollama/models/` or set `SQMD_NATIVE_MODEL` to a GGUF path). For hint generation, set `SQMD_HINT_MODEL` (default: `phi4-mini`) and ensure the GGUF is available.
 
 ```bash
 sqmd search "error handling"                        # layered search (all 5 layers)
@@ -159,7 +153,7 @@ source files
     | detect communities -> module + type-hierarchy groupings
     | content-hash pipeline (skip / update / tombstone)
     |
-    | [optional] sqmd hints -> LLM hints (Ollama / phi4-mini)
+    | [optional] sqmd hints -> LLM hints (phi4-mini via native llama.cpp)
     |
     | native llama.cpp -> mxbai-embed-large embeddings (Metal GPU)
     |
@@ -182,22 +176,22 @@ Single-pass parsing with incremental re-indexing via content hashes.
 
 | Feature | Dependencies | Purpose |
 |---------|-------------|---------|
-| `native` (default) | `llama-cpp-2` | Vector embeddings via native llama.cpp with Metal GPU |
-| `ollama` | `ureq` | LLM prospective hint generation via Ollama HTTP API |
+| `native` (default) | `llama-cpp-2` | Embeddings + text generation via native llama.cpp |
+| `native-metal` (default on macOS) | `llama-cpp-2/metal` | + Metal GPU acceleration |
 
-Both features can be combined. `native` is enabled by default — `ollama` is only needed for `sqmd hints`.
+No external services required. All inference runs locally through llama.cpp.
 
 Configuration:
-- `SQMD_NATIVE_MODEL` — Path to GGUF file or model name (default: auto-discover `mxbai-embed-large` from Ollama store)
-- `OLLAMA_MODELS` — Path to Ollama model store (default: `~/.ollama/models`)
-- `OLLAMA_HOST` — Ollama server URL for hints (default: `http://localhost:11434`)
-- `SQMD_HINT_MODEL` — Hint generation model (default: `phi4-mini:latest`)
+- `SQMD_NATIVE_MODEL` — Path to GGUF file or model name (default: auto-discover `mxbai-embed-large` from model store)
+- `OLLAMA_MODELS` — Path to model store (default: `~/.ollama/models`)
+- `SQMD_HINT_MODEL` — Hint generation model (default: `phi4-mini`)
+- `SQMD_HINT_MODEL_PATH` — Direct path to hint model GGUF
 
 ## Build
 
 ```bash
-cargo build --release                          # default: native llama.cpp + Metal GPU
-cargo build --release --features native,ollama # + LLM hint generation via Ollama
+cargo build --release               # default: native llama.cpp + Metal GPU
+cargo build --release --features native  # CPU-only (Linux CI)
 ```
 
 Requires `cmake` for building llama.cpp from source (`brew install cmake`).
@@ -254,10 +248,10 @@ sqmd update                          # update sqmd to latest version
 sqmd install                         # install sqmd from source
 ```
 
-### Hint Generation (requires `--features ollama`)
+### Hint Generation
 
 ```bash
-sqmd hints                           # generate LLM prospective hints
+sqmd hints                           # generate prospective hints (phi4-mini via native llama.cpp)
 sqmd hints --min-importance 0.7      # only high-importance chunks
 sqmd hints --limit 100               # process at most 100 chunks
 ```

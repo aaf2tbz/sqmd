@@ -752,12 +752,14 @@ fn cmd_generate(db_path: &PathBuf, limit: usize, output: &str) {
 }
 
 fn generate_eval_query(name: &str, content: &str) -> String {
-    #[cfg(feature = "ollama")]
+    #[cfg(feature = "native")]
     {
-        if let Ok(client) = std::panic::catch_unwind(sqmd_core::ollama::OllamaClient::new) {
-            if let Ok(hints) = client.generate_prospective_hints(content) {
-                if let Some(first) = hints.into_iter().next() {
-                    return first;
+        if let Ok(mut gen) = std::panic::catch_unwind(sqmd_core::native::NativeGenerator::new) {
+            if let Ok(gen) = gen.as_mut() {
+                if let Ok(hints) = gen.generate_prospective_hints(content) {
+                    if let Some(first) = hints.into_iter().next() {
+                        return first;
+                    }
                 }
             }
         }

@@ -145,8 +145,8 @@ enum Commands {
         #[arg(default_value = "30")]
         days: i64,
     },
-    /// Generate prospective search hints using Ollama
-    #[cfg(feature = "ollama")]
+    /// Generate prospective search hints using native llama.cpp
+    #[cfg(feature = "native")]
     Hints {
         /// Minimum chunk importance to generate hints for
         #[arg(long, default_value = "0.5")]
@@ -253,7 +253,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         Commands::Entities { r#type, limit } => cmd_entities(r#type.as_deref(), limit, cli.json),
         Commands::EntityDeps { name, depth } => cmd_entity_deps(&name, depth),
         Commands::Prune { days } => cmd_prune(days),
-        #[cfg(feature = "ollama")]
+        #[cfg(feature = "native")]
         Commands::Hints {
             min_importance,
             limit,
@@ -990,7 +990,7 @@ fn cmd_diff(since: &str, json: bool) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-#[cfg(feature = "ollama")]
+#[cfg(feature = "native")]
 fn cmd_hints(min_importance: f64, limit: usize) -> Result<(), Box<dyn std::error::Error>> {
     let mut db = ensure_db()?;
     let effective_limit = if limit == 0 { 10000 } else { limit };
@@ -999,8 +999,7 @@ fn cmd_hints(min_importance: f64, limit: usize) -> Result<(), Box<dyn std::error
         min_importance, effective_limit
     );
     let start = std::time::Instant::now();
-    let count =
-        sqmd_core::search::generate_ollama_hints_batch(&mut db, effective_limit, min_importance)?;
+    let count = sqmd_core::search::generate_hints_batch(&mut db, effective_limit, min_importance)?;
     let elapsed = start.elapsed();
     println!("Generated hints for {} chunks in {:?}", count, elapsed);
     drop(db);

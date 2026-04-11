@@ -13,8 +13,6 @@ pub mod languages;
 pub mod mcp_server;
 #[cfg(feature = "native")]
 pub mod native;
-#[cfg(feature = "ollama")]
-pub mod ollama;
 pub mod query_cache;
 pub mod relationships;
 pub mod schema;
