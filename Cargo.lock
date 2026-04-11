@@ -1123,7 +1123,7 @@ dependencies = [
 
 [[package]]
 name = "sqmd-cli"
-version = "3.3.0"
+version = "3.3.1"
 dependencies = [
  "clap",
  "dirs",
@@ -1136,7 +1136,7 @@ dependencies = [
 
 [[package]]
 name = "sqmd-core"
-version = "3.3.0"
+version = "3.3.1"
 dependencies = [
  "chrono",
  "ignore",

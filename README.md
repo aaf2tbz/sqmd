@@ -1,8 +1,17 @@
 # sqmd
 
-**Code intelligence for AI agents. Drop any project in, get instant semantic search, dependency graphs, and structured recall — no network, no API keys, one binary.**
+**Code intelligence for AI agents. Drop any project in, get semantic search, dependency graphs, structured recall, and review-ready context — local-first, no API keys, one binary.**
 
-sqmd parses your codebase with tree-sitter, chunks every function, class, struct, and import into a local SQLite index, then exposes a unified layered search pipeline across FTS5, entity graphs, communities, vector embeddings, and hint vectors. An LLM asks "how does authentication work" and gets back the exact functions, their signatures, and their callers — not a wall of grep output.
+sqmd parses your codebase with tree-sitter, chunks functions/classes/structs/imports into a local SQLite index, then exposes layered search across FTS5, entity graphs, communities, vector embeddings, and hint vectors. An agent can ask "how does authentication work?" and get the exact functions, signatures, paths, callers, and dependency context it needs.
+
+It is built for agent workflows:
+
+- Keep a local code index fresh while you edit.
+- Ask MCP tools for search, context, dependencies, chunks, and stats.
+- Re-index changed files from the agent without leaving the conversation.
+- Start embeddings in the background and poll progress instead of blocking.
+- Use the bundled `sqmd-review` skill for local pre-push review that checks the real git diff first and uses sqmd as extra codebase context.
+- Work from linked git worktrees while reusing the main worktree's `.sqmd/index.db`.
 
 ## Benchmark Results
 
@@ -74,6 +83,8 @@ sqmd context --query "how does auth work" --max-tokens 8000 --deps
 sqmd deps src/auth.ts --depth 2                     # trace dependency graph
 ```
 
+Using git worktrees? Run `sqmd init` and `sqmd index` once in the main checkout. When an MCP client starts from a linked worktree, sqmd can find that main-worktree index and still interpret changed file paths relative to the worktree/project root.
+
 ## Skills
 
 sqmd ships with ready-to-use skills that plug into OpenCode, Codex, and Claude Code. Copy a skill directory into your tool's skills folder:
@@ -91,15 +102,21 @@ cp -r skills/sqmd-review ~/.claude/skills/
 
 ### sqmd-review
 
-Local self-review for uncommitted or staged changes using sqmd-indexed codebase context. Adapted from [pr-reviewer](https://github.com/NicholaiVogel/pr-reviewer). Runs entirely offline — no GitHub required.
+Local self-review for commits, staged changes, or uncommitted diffs. Adapted from [pr-reviewer](https://github.com/NicholaiVogel/pr-reviewer). Runs offline — no GitHub required.
 
-Before pushing, the agent uses sqmd to build dependency impact graphs and semantic context around your changes, then runs a structured review checking for bugs, security issues, race conditions, and convention drift. Outputs findings grouped by severity (`blocking`, `warning`, `nitpick`) with confidence levels.
+Before pushing, the agent reads the actual git diff and checked-out files first, then uses sqmd's index as a second lens for dependency impact and semantic context. This keeps local code authoritative while still giving the reviewer codebase-wide recall. Findings are grouped by severity (`blocking`, `warning`, `nitpick`) with confidence levels and tool-health observations.
 
-Trigger: "review my changes", "self-review", "review before push", "check my diff".
+Useful prompts:
+
+- "review my changes"
+- "self-review"
+- "review this commit"
+- "review before push"
+- "check my diff"
 
 ## Supported Harnesses
 
-sqmd exposes an MCP server (JSON-RPC 2.0 over stdio) that plugs into AI coding tools. All harnesses get the same 9 tools: `search`, `context`, `deps`, `stats`, `get`, `index_file`, `embed`, `ls`, `cat`.
+sqmd exposes an MCP server (JSON-RPC 2.0 over stdio) that plugs into AI coding tools. All harnesses get the same tools: `search`, `context`, `deps`, `stats`, `get`, `index_file`, `embed`, `embed_start`, `embed_progress`, `embed_stop`, `ls`, and `cat`.
 
 | Harness | Config path | Format | Setup command |
 |---------|------------|--------|---------------|
@@ -169,6 +186,22 @@ echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":
 ```
 
 Supports both raw JSON lines and `Content-Length:` framed transport.
+
+### Worktrees and Index Discovery
+
+sqmd stores its index at `<project>/.sqmd/index.db`. If you run agents from git worktrees, the MCP server now handles the common setup where the index lives in the main worktree:
+
+```bash
+cd /path/to/main-checkout
+sqmd init
+sqmd index
+
+git worktree add ../feature-branch -b feature-branch
+cd ../feature-branch
+sqmd mcp
+```
+
+When launched from the linked worktree, sqmd asks git for the common git directory, finds the main checkout's `.sqmd/index.db`, and still treats file paths as project-relative. That means `index_file` can safely re-index `src/foo.ts` from the worktree without tombstoning the wrong path.
 
 ## What Gets Indexed
 
@@ -398,7 +431,7 @@ After generating hints, re-run `sqmd embed` to embed the hint text into `hints_v
 sqmd mcp
 ```
 
-Exposes 9 tools:
+Exposes 12 tools:
 
 | Tool | Description |
 |------|-------------|
@@ -408,7 +441,10 @@ Exposes 9 tools:
 | `stats` | Index statistics (files, chunks, embeddings, relationships) |
 | `get` | Get chunk by file path and line number |
 | `index_file` | Index a single file or all changed files (incremental) |
-| `embed` | Embed unembedded chunks via local llama.cpp (configurable batch) |
+| `embed` | Embed unembedded chunks via local llama.cpp in the current request |
+| `embed_start` | Start embedding in a background thread |
+| `embed_progress` | Poll embedding progress, percentage, progress bar, and ETA |
+| `embed_stop` | Request a graceful stop after the current batch |
 | `ls` | List chunks with file/type/language filters |
 | `cat` | Get full chunk content by ID |
 
