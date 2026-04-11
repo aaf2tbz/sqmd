@@ -82,8 +82,9 @@ sqmd exposes an MCP server (JSON-RPC 2.0 over stdio) that plugs into AI coding t
 | **OpenCode** | `~/.config/opencode/opencode.json` | JSON | `sqmd setup opencode` |
 | **Codex** | `~/.codex/config.toml` | TOML | `sqmd setup codex` |
 | **Claude Code** | `~/.claude/settings.json` | JSON | `sqmd setup claude` |
+| **Cursor** | `<project-root>/.cursor/mcp.json` | JSON | `sqmd setup cursor` |
 
-Run `sqmd setup` to register all three at once.
+Run `sqmd setup` to register all four at once. Note: Cursor writes to the project root, not your home directory.
 
 ### OpenCode
 
@@ -108,6 +109,21 @@ args = ["mcp"]
 ```
 
 ### Claude Code
+
+```json
+{
+  "mcpServers": {
+    "sqmd": {
+      "command": "/absolute/path/to/sqmd",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+### Cursor
+
+Cursor reads MCP config from the project root (not your home directory). Run `sqmd setup cursor` from within your project:
 
 ```json
 {
