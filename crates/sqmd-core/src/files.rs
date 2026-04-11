@@ -23,6 +23,24 @@ pub enum Language {
     Toml,
     Html,
     Css,
+    Scss,
+    Shell,
+    Sql,
+    Dockerfile,
+    Makefile,
+    Kotlin,
+    Swift,
+    CSharp,
+    Php,
+    Lua,
+    Dart,
+    Scala,
+    Haskell,
+    Elixir,
+    Zig,
+    Xml,
+    GraphQL,
+    Protobuf,
     Unknown,
 }
 
@@ -31,10 +49,10 @@ impl Language {
         match ext.to_lowercase().as_str() {
             "ts" => Language::TypeScript,
             "tsx" => Language::TSX,
-            "js" => Language::JavaScript,
+            "js" | "mjs" | "cjs" => Language::JavaScript,
             "jsx" => Language::JSX,
             "rs" => Language::Rust,
-            "py" => Language::Python,
+            "py" | "pyi" => Language::Python,
             "go" => Language::Go,
             "java" => Language::Java,
             "c" | "h" => Language::C,
@@ -46,7 +64,23 @@ impl Language {
             "yml" | "yaml" => Language::Yaml,
             "toml" => Language::Toml,
             "html" | "htm" => Language::Html,
-            "css" | "scss" | "sass" | "less" => Language::Css,
+            "css" | "less" => Language::Css,
+            "scss" | "sass" => Language::Scss,
+            "sh" | "bash" | "zsh" | "fish" => Language::Shell,
+            "sql" => Language::Sql,
+            "kt" | "kts" => Language::Kotlin,
+            "swift" => Language::Swift,
+            "cs" => Language::CSharp,
+            "php" => Language::Php,
+            "lua" => Language::Lua,
+            "dart" => Language::Dart,
+            "scala" | "sc" => Language::Scala,
+            "hs" => Language::Haskell,
+            "ex" | "exs" => Language::Elixir,
+            "zig" => Language::Zig,
+            "xml" | "svg" | "xsl" | "xslt" => Language::Xml,
+            "graphql" | "gql" => Language::GraphQL,
+            "proto" => Language::Protobuf,
             _ => Language::Unknown,
         }
     }
@@ -73,6 +107,24 @@ impl Language {
             Language::Toml => "toml",
             Language::Html => "html",
             Language::Css => "css",
+            Language::Scss => "scss",
+            Language::Shell => "shell",
+            Language::Sql => "sql",
+            Language::Dockerfile => "dockerfile",
+            Language::Makefile => "makefile",
+            Language::Kotlin => "kotlin",
+            Language::Swift => "swift",
+            Language::CSharp => "csharp",
+            Language::Php => "php",
+            Language::Lua => "lua",
+            Language::Dart => "dart",
+            Language::Scala => "scala",
+            Language::Haskell => "haskell",
+            Language::Elixir => "elixir",
+            Language::Zig => "zig",
+            Language::Xml => "xml",
+            Language::GraphQL => "graphql",
+            Language::Protobuf => "protobuf",
             Language::Unknown => "unknown",
         }
     }
@@ -87,6 +139,8 @@ pub fn detect_language(path: &Path) -> Language {
     match fname {
         "CMakeLists.txt" => return Language::CMake,
         "meson.build" | "meson_options.txt" => return Language::Meson,
+        "Dockerfile" | "dockerfile" => return Language::Dockerfile,
+        "Makefile" | "makefile" | "GNUmakefile" => return Language::Makefile,
         _ => {}
     }
     if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
@@ -194,6 +248,30 @@ mod tests {
         assert_eq!(detect_language(Path::new("README.md")), Language::Markdown);
         assert_eq!(detect_language(Path::new("Cargo.toml")), Language::Toml);
         assert_eq!(detect_language(Path::new("data.xyz")), Language::Unknown);
+        assert_eq!(
+            detect_language(Path::new("Dockerfile")),
+            Language::Dockerfile
+        );
+        assert_eq!(detect_language(Path::new("Makefile")), Language::Makefile);
+        assert_eq!(detect_language(Path::new("deploy.sh")), Language::Shell);
+        assert_eq!(detect_language(Path::new("migrate.sql")), Language::Sql);
+        assert_eq!(detect_language(Path::new("style.scss")), Language::Scss);
+        assert_eq!(detect_language(Path::new("Main.kt")), Language::Kotlin);
+        assert_eq!(detect_language(Path::new("app.swift")), Language::Swift);
+        assert_eq!(detect_language(Path::new("Program.cs")), Language::CSharp);
+        assert_eq!(detect_language(Path::new("index.php")), Language::Php);
+        assert_eq!(detect_language(Path::new("config.lua")), Language::Lua);
+        assert_eq!(
+            detect_language(Path::new("schema.graphql")),
+            Language::GraphQL
+        );
+        assert_eq!(detect_language(Path::new("api.proto")), Language::Protobuf);
+        assert_eq!(detect_language(Path::new("layout.xml")), Language::Xml);
+        assert_eq!(detect_language(Path::new("app.zig")), Language::Zig);
+        assert_eq!(detect_language(Path::new("lib.exs")), Language::Elixir);
+        assert_eq!(detect_language(Path::new("Main.hs")), Language::Haskell);
+        assert_eq!(detect_language(Path::new("main.dart")), Language::Dart);
+        assert_eq!(detect_language(Path::new("App.scala")), Language::Scala);
     }
 
     #[test]
