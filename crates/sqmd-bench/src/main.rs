@@ -724,8 +724,38 @@ fn cmd_generate(db_path: &PathBuf, limit: usize, output: &str) {
 
     let mut eval_queries: Vec<EvalQuery> = Vec::new();
 
-    for (chunk_id, file_path, name, content_raw, chunk_type, language, _importance) in &rows {
-        let query = generate_eval_query(name, content_raw);
+    #[cfg(feature = "native")]
+    let mut generator: Option<sqmd_core::native::NativeGenerator> = {
+        match std::panic::catch_unwind(sqmd_core::native::NativeGenerator::new) {
+            Ok(Ok(gen)) => {
+                eprintln!("[native] loaded generator model for query generation");
+                Some(gen)
+            }
+            Ok(Err(e)) => {
+                eprintln!("[native] failed to load generator: {e}, using template queries");
+                None
+            }
+            Err(_) => {
+                eprintln!("[native] generator panicked on load, using template queries");
+                None
+            }
+        }
+    };
+
+    for (i, (chunk_id, file_path, name, content_raw, chunk_type, language, _importance)) in
+        rows.iter().enumerate()
+    {
+        let query = generate_eval_query_with_gen(
+            name,
+            content_raw,
+            chunk_type,
+            file_path,
+            #[cfg(feature = "native")]
+            &mut generator,
+        );
+        if (i + 1) % 10 == 0 || i + 1 == rows.len() {
+            eprintln!("  generated {}/{} queries", i + 1, rows.len());
+        }
         let preview = if content_raw.len() > 200 {
             &content_raw[..200]
         } else {
@@ -751,32 +781,41 @@ fn cmd_generate(db_path: &PathBuf, limit: usize, output: &str) {
     );
 }
 
-fn generate_eval_query(name: &str, content: &str) -> String {
-    #[cfg(feature = "native")]
-    {
-        if let Ok(mut gen) = std::panic::catch_unwind(sqmd_core::native::NativeGenerator::new) {
-            if let Ok(gen) = gen.as_mut() {
-                if let Ok(hints) = gen.generate_prospective_hints(content) {
-                    if let Some(first) = hints.into_iter().next() {
-                        return first;
-                    }
-                }
+#[cfg(feature = "native")]
+fn generate_eval_query_with_gen(
+    name: &str,
+    content: &str,
+    chunk_type: &str,
+    file_path: &str,
+    generator: &mut Option<sqmd_core::native::NativeGenerator>,
+) -> String {
+    if let Some(gen) = generator.as_mut() {
+        if let Ok(hints) = gen.generate_prospective_hints(content) {
+            if let Some(first) = hints.into_iter().next() {
+                return first;
             }
         }
     }
-
-    let _ = name;
-    template_eval_query(name, content)
+    template_eval_query(name, content, chunk_type, file_path)
 }
 
-fn template_eval_query(name: &str, content: &str) -> String {
-    let first_line = content.lines().next().unwrap_or("");
-    let words: Vec<&str> = first_line.split_whitespace().take(6).collect();
-    if !words.is_empty() {
-        format!("how does {} work", words.join(" "))
-    } else {
-        format!("find {}", name)
-    }
+#[cfg(not(feature = "native"))]
+fn generate_eval_query_with_gen(
+    name: &str,
+    content: &str,
+    chunk_type: &str,
+    file_path: &str,
+) -> String {
+    template_eval_query(name, content, chunk_type, file_path)
+}
+
+fn template_eval_query(name: &str, _content: &str, chunk_type: &str, file_path: &str) -> String {
+    let file_stem = std::path::Path::new(file_path)
+        .file_name()
+        .map(|f| f.to_string_lossy().to_string())
+        .unwrap_or_default();
+
+    format!("find the {chunk_type} named {name} in {file_stem}")
 }
 
 fn cmd_compare(db_path: &PathBuf, ground_truth_path: &str) {

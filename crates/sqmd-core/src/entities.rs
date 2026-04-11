@@ -823,8 +823,9 @@ pub fn insert_hints_typed(
     hints: &[(String, &str)],
 ) -> Result<usize, Box<dyn std::error::Error>> {
     let mut count = 0;
-    let mut stmt =
-        db.prepare("INSERT INTO hints (chunk_id, hint_text, hint_type) VALUES (?1, ?2, ?3)")?;
+    let mut stmt = db.prepare(
+        "INSERT OR IGNORE INTO hints (chunk_id, hint_text, hint_type) VALUES (?1, ?2, ?3)",
+    )?;
     for (hint, hint_type) in hints {
         stmt.execute(params![chunk_id, hint, hint_type])?;
         count += 1;
