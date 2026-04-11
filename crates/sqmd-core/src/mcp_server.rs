@@ -165,11 +165,12 @@ pub fn run(db_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
             has_id
         );
 
-        if !has_id && msg.get("method").is_some() {
-            if method == "notifications/initialized" || method == "initialized" {
-                dbg!(log, "Skipping notification: {}", method);
-                continue;
-            }
+        if !has_id
+            && msg.get("method").is_some()
+            && (method == "notifications/initialized" || method == "initialized")
+        {
+            dbg!(log, "Skipping notification: {}", method);
+            continue;
         }
 
         let response = handle_message(&mut db, &root, &msg);
@@ -755,6 +756,9 @@ fn tool_embed(db: &mut Connection, args: &Value) -> Result<Vec<Value>, Box<dyn s
 }
 
 fn tool_ls(db: &Connection, args: &Value) -> Result<Vec<Value>, Box<dyn std::error::Error>> {
+    #[allow(clippy::type_complexity)]
+    type ChunkRow = (i64, Option<String>, String, String, String, i64, i64, f64);
+
     let file_filter = args["file_filter"].as_str().map(|s| s.to_string());
     let type_filter = args["type_filter"].as_str().map(|s| s.to_string());
     let language = args["language"].as_str().map(|s| s.to_string());
@@ -786,7 +790,7 @@ fn tool_ls(db: &Connection, args: &Value) -> Result<Vec<Value>, Box<dyn std::err
     sql.push_str(&format!(" ORDER BY importance DESC LIMIT {}", limit));
 
     let mut stmt = db.prepare(&sql)?;
-    let rows: Vec<(i64, Option<String>, String, String, String, i64, i64, f64)> = stmt
+    let rows: Vec<ChunkRow> = stmt
         .query_map(
             rusqlite::params_from_iter(param_vals.iter().map(|v| v.as_ref())),
             |r| {
