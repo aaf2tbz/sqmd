@@ -418,6 +418,8 @@ impl<'a> Indexer<'a> {
         // Phase 4: write to DB (serial, needs Connection)
         self.db.execute_batch("BEGIN")?;
 
+        let mut pending_imports: Vec<(String, Vec<ImportInfo>)> = Vec::new();
+
         for (work, chunks, raw_imports) in &chunked {
             // mtime pre-filter can have false positives; verify with content hash
             let existing_hash: Option<String> = self
@@ -461,7 +463,7 @@ impl<'a> Indexer<'a> {
             let mut file_decisions = IndexDecisions::default();
             let mut rel_count = 0;
             rel_count += self.decision_write_chunks(&work.relative, chunks, &mut file_decisions)?;
-            rel_count += self.write_import_relationships(&work.relative, raw_imports)?;
+            pending_imports.push((work.relative.clone(), raw_imports.clone()));
             self.build_entity_graph(&work.relative, chunks)?;
             let structural_rels = extract_structural_rels_for_file(&work.language, &work.content);
             stats.relationships_total += self.write_structural_rels(&structural_rels)?;
@@ -471,6 +473,10 @@ impl<'a> Indexer<'a> {
             stats.decisions.added += file_decisions.added;
             stats.decisions.updated += file_decisions.updated;
             stats.decisions.skipped += file_decisions.skipped;
+        }
+
+        for (relative, raw_imports) in &pending_imports {
+            stats.relationships_total += self.write_import_relationships(relative, raw_imports)?;
         }
 
         // Handle deletions
@@ -1524,5 +1530,34 @@ mod tests {
         let stats2 = indexer.index().unwrap();
         assert_eq!(stats2.files_indexed, 0);
         assert_eq!(stats2.files_skipped, 20);
+    }
+
+    #[test]
+    fn test_index_resolves_imports_after_all_chunks_are_written() {
+        let dir = tempfile::tempdir().unwrap();
+        let importer = dir.path().join("src/a_importer.ts");
+        let target = dir.path().join("src/z_target.ts");
+        std::fs::create_dir_all(importer.parent().unwrap()).unwrap();
+        std::fs::write(
+            &importer,
+            "import {\n  targetFunction,\n} from './z_target';\n\nexport function caller() { return targetFunction(); }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            &target,
+            "export function targetFunction(): string { return 'ok'; }\n",
+        )
+        .unwrap();
+
+        let mut indexer = make_indexer(dir.path());
+        let stats = indexer.index().unwrap();
+        assert_eq!(stats.files_indexed, 2);
+
+        let deps = crate::relationships::get_dependencies(indexer.db, "src/a_importer.ts").unwrap();
+        assert!(
+            deps.iter().any(|dep| dep.target_file == "src/z_target.ts"
+                && dep.target_name.as_deref() == Some("targetFunction")),
+            "deps: {deps:?}",
+        );
     }
 }
