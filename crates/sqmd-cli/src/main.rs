@@ -155,6 +155,8 @@ enum Commands {
         #[arg(long, default_value = "0")]
         limit: usize,
     },
+    /// Start MCP server (JSON-RPC over stdio)
+    Mcp,
 }
 
 fn main() {
@@ -225,6 +227,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             min_importance,
             limit,
         } => cmd_hints(min_importance, limit),
+        Commands::Mcp => cmd_mcp(),
     }
 }
 
@@ -254,6 +257,18 @@ fn ensure_db() -> Result<rusqlite::Connection, Box<dyn std::error::Error>> {
     }
     let db = sqmd_core::schema::open(&path)?;
     Ok(db)
+}
+
+fn cmd_mcp() -> Result<(), Box<dyn std::error::Error>> {
+    let path = db_path();
+    if !path.exists() {
+        eprintln!(
+            "No index found at {}. Run `sqmd init` first.",
+            path.display()
+        );
+        std::process::exit(1);
+    }
+    sqmd_core::mcp_server::run(&path)
 }
 
 fn cmd_init() -> Result<(), Box<dyn std::error::Error>> {
