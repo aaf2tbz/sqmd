@@ -33,8 +33,10 @@ pub fn run(db_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
             let mut buf = vec![0u8; len];
             stdin.read_exact(&mut buf)?;
             let msg: Value = serde_json::from_slice(&buf)?;
-            let response = handle_message(&db, &msg);
-            send_response(&mut stdout, &response)?;
+            if msg.get("id").is_some() {
+                let response = handle_message(&db, &msg);
+                send_response(&mut stdout, &response)?;
+            }
         }
     }
 }
@@ -68,7 +70,7 @@ fn handle_message(db: &Connection, msg: &Value) -> Value {
                 }
             }
         }),
-        "notifications/initialized" => json!({}),
+        "notifications/initialized" | "initialized" => Value::Null,
         "tools/list" => json!({
             "jsonrpc": "2.0",
             "id": id,
