@@ -1084,7 +1084,7 @@ fn cmd_stop() -> Result<(), Box<dyn std::error::Error>> {
 fn cmd_setup(harness: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
     let harness = harness.unwrap_or("all");
     let harnesses = if harness == "all" {
-        vec!["opencode", "codex", "claude"]
+        vec!["opencode", "codex", "claude", "cursor"]
     } else {
         vec![harness]
     };
@@ -1094,8 +1094,12 @@ fn cmd_setup(harness: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
             "opencode" => setup_opencode()?,
             "codex" => setup_codex()?,
             "claude" => setup_claude()?,
+            "cursor" => setup_cursor()?,
             _ => {
-                eprintln!("Unknown harness: {}. Available: opencode, codex, claude", h);
+                eprintln!(
+                    "Unknown harness: {}. Available: opencode, codex, claude, cursor",
+                    h
+                );
                 std::process::exit(1);
             }
         }
@@ -1217,6 +1221,10 @@ fn setup_claude() -> Result<(), Box<dyn std::error::Error>> {
     if !obj.contains_key("mcpServers") {
         obj.insert("mcpServers".to_string(), serde_json::json!({}));
     }
+    let exe = std::env::current_exe()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|_| "sqmd".to_string());
+
     obj.get_mut("mcpServers")
         .unwrap()
         .as_object_mut()
@@ -1224,7 +1232,44 @@ fn setup_claude() -> Result<(), Box<dyn std::error::Error>> {
         .insert(
             "sqmd".to_string(),
             serde_json::json!({
-                "command": ["sqmd", "mcp"]
+                "command": [exe, "mcp"]
+            }),
+        );
+
+    std::fs::write(&config_path, serde_json::to_string_pretty(&config)?)?;
+    println!("{}: registered sqmd MCP server", config_path.display());
+    Ok(())
+}
+
+fn setup_cursor() -> Result<(), Box<dyn std::error::Error>> {
+    let home = std::env::var("HOME").unwrap_or_default();
+    let config_dir = PathBuf::from(&home).join(".cursor");
+    let config_path = config_dir.join("mcp.json");
+
+    let mut config: serde_json::Value = if config_path.exists() {
+        let content = std::fs::read_to_string(&config_path)?;
+        serde_json::from_str(&content).unwrap_or(serde_json::json!({}))
+    } else {
+        std::fs::create_dir_all(&config_dir)?;
+        serde_json::json!({})
+    };
+
+    let obj = config.as_object_mut().ok_or("config is not an object")?;
+    if !obj.contains_key("mcpServers") {
+        obj.insert("mcpServers".to_string(), serde_json::json!({}));
+    }
+    let exe = std::env::current_exe()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|_| "sqmd".to_string());
+
+    obj.get_mut("mcpServers")
+        .unwrap()
+        .as_object_mut()
+        .ok_or("mcpServers is not an object")?
+        .insert(
+            "sqmd".to_string(),
+            serde_json::json!({
+                "command": [exe, "mcp"]
             }),
         );
 
