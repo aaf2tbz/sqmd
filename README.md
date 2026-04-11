@@ -1,10 +1,19 @@
-Note from developer: This system is currently undergoing massive structural changes, and does not include a visual interface to interact with yet. Please be careful when using sqmd for now. Thanks for trying it!
-
 # sqmd
 
 **Code intelligence for AI agents. Drop any project in, get instant semantic search, dependency graphs, and structured recall — no network, no API keys, one binary.**
 
 sqmd parses your codebase with tree-sitter, chunks every function, class, struct, and import into a local SQLite index, then exposes a unified layered search pipeline across FTS5, entity graphs, communities, vector embeddings, and hint vectors through a Unix socket daemon. An LLM asks "how does authentication work" and gets back the exact functions, their signatures, and their callers — not a wall of grep output.
+
+## Benchmark Results
+
+Tested against the Signet codebase (505 TypeScript files, 8,886 chunks, 200 queries):
+
+| Lane | Hit@1 | Hit@3 | Hit@5 | Hit@10 | MRR |
+|------|-------|-------|-------|--------|-----|
+| **FTS** | 86% | 97.5% | 98.5% | 99.5% | 0.915 |
+| **Layered** | 85% | 97% | 98.5% | — | 0.907 |
+
+Layered matches FTS on exact-match queries while adding graph, community, and vector retrieval for ambiguous natural-language queries where FTS would fail.
 
 ## Why sqmd
 
@@ -24,6 +33,9 @@ LLMs are bad at reading large codebases. They lose context, hallucinate file pat
 ## Quick Start
 
 ```bash
+# Prerequisites: Ollama running with mxbai-embed-large pulled
+ollama pull mxbai-embed-large
+
 cargo build --release                         # ~10MB: FTS5 + graph + chunking
 cargo build --release --features embed        # + vector embeddings via Ollama
 cargo build --release --features embed,ollama # + LLM prospective hints
@@ -233,6 +245,28 @@ cargo run -p sqmd-bench --features embed,ollama -- compare /path/to/index.db --g
 ```
 
 The `compare` subcommand runs queries through fts and layered lanes and computes Hit@1, Hit@3, Hit@5, and MRR for each, producing a side-by-side comparison table.
+
+### Benchmark methodology
+
+- **Dataset**: Real TypeScript codebase (Signet) — 505 files, 8,886 chunks, 3,547 relationships
+- **Queries**: 200 randomly sampled function/method/class/interface names, lowercased with spaces
+- **Evaluation**: Hit@K (is the target chunk in top K results?) and MRR (mean reciprocal rank)
+
+## Changelog
+
+### v3.0.0
+
+- **Unified layered search.** Replaced hybrid search with a single 5-layer pipeline: FTS, graph expansion, community summaries, vector KNN, hint vector. No more `--alpha` flag or broken score normalization.
+- **mxbai-embed-large.** Switched from nomic-embed-text (768d) to mxbai-embed-large (1024d). MTEB SOTA for code retrieval at 670MB. Embed truncation reduced to 1500 chars for 512-token context. Batch size reduced to 8 to prevent Ollama API errors on large chunks.
+- **Schema v13.** Auto-migration recreates vector tables at 1024 dimensions. Existing embeddings cleared — requires `sqmd embed` after upgrade.
+- **Signet benchmark.** 86% Hit@1, 98.5% Hit@5, 99.5% Hit@10 on 200 queries against 8,886 chunks.
+- **Removed.** `hybrid_search()`, `merge_results()`, `merge_hint_vec_results()`, `--alpha` CLI flag, ONNX runtime, nomic-embed-text prefix system.
+
+### v2.2.0
+
+- Shortened LLM hint prompts, increased embed batch size
+- Switched embeddings to Ollama nomic-embed-text, removed ONNX runtime
+- Fixed hybrid search scoring, decoupled Ollama hints from indexing
 
 ## Daemon Protocol
 
