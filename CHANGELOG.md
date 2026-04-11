@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 
 ## [3.2.0] - 2026-04-11
 
+### Fixed
+
+- MCP server auto-detects transport mode (Content-Length framed vs raw JSON) for Cursor compatibility
+- MCP server removes stderr logging that Cursor treated as errors
+- MCP server walks parent directories to find `.sqmd/index.db`
+- Clippy `type_complexity` and `collapsible_if` warnings in `mcp_server.rs`
+
 ### Added
 
 - 17 new language detections: Shell (sh/bash/zsh/fish), SQL, Dockerfile, Makefile, Kotlin, Swift, C#, PHP, Lua, Dart, Scala, Haskell, Elixir, Zig, XML/SVG, GraphQL, Protobuf
