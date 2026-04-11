@@ -27,6 +27,7 @@ See [BENCHMARKING.md](BENCHMARKING.md) for methodology and reproduction steps.
 - [Search](#search)
 - [Architecture](#architecture)
 - [Feature Flags](#feature-flags)
+- [Supported Platforms](#supported-platforms)
 - [Build](#build)
 - [Commands](#commands)
 - [MCP Server](#mcp-server)
@@ -187,14 +188,28 @@ Configuration:
 - `SQMD_HINT_MODEL` — Hint generation model (default: `phi4-mini`)
 - `SQMD_HINT_MODEL_PATH` — Direct path to hint model GGUF
 
+## Supported Platforms
+
+| OS | Architecture | GPU | Feature flag |
+|----|-------------|-----|-------------|
+| macOS 13+ (Ventura) | Apple Silicon (M1/M2/M3/M4) | Metal | `native-metal` (default) |
+| macOS 13+ | Intel | CPU | `native` |
+| Linux | x86_64, ARM64 | CPU | `native` |
+| Windows (WSL2) | x86_64 | CPU | `native` |
+
+Native Windows support (without WSL2) is not yet tested. All inference runs through llama.cpp — Metal GPU on Apple Silicon, CPU fallback on everything else.
+
 ## Build
 
 ```bash
-cargo build --release               # default: native llama.cpp + Metal GPU
-cargo build --release --features native  # CPU-only (Linux CI)
+cargo build --release               # default: native llama.cpp + Metal GPU (macOS)
+cargo build --release --features native  # CPU-only (Linux, macOS Intel, WSL2)
 ```
 
-Requires `cmake` for building llama.cpp from source (`brew install cmake`).
+Build requirements:
+- **Rust** 1.80+ (`rustup`)
+- **CMake** (`brew install cmake` on macOS, `sudo apt install cmake` on Linux)
+- **C compiler** (Xcode CLI tools on macOS, `build-essential` on Linux)
 
 ## Commands
 
