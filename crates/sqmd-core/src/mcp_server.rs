@@ -13,35 +13,42 @@ pub fn run(db_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let mut stdout = std::io::stdout();
 
     loop {
-        let mut content_length: Option<usize> = None;
-        loop {
-            let mut header = String::new();
-            let n = stdin.read_line(&mut header)?;
-            if n == 0 {
-                return Ok(());
-            }
-            let trimmed = header.trim();
-            if trimmed.is_empty() {
-                break;
-            }
-            if let Some(len_str) = trimmed.strip_prefix("Content-Length:") {
-                content_length = Some(len_str.trim().parse()?);
-            }
+        let mut line = String::new();
+        let n = stdin.read_line(&mut line)?;
+        if n == 0 {
+            return Ok(());
         }
 
-        if let Some(len) = content_length {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+
+        if let Some(len_str) = line.strip_prefix("Content-Length:") {
+            let len: usize = len_str.trim().parse()?;
+            let mut sep = String::new();
+            stdin.read_line(&mut sep)?;
             let mut buf = vec![0u8; len];
             stdin.read_exact(&mut buf)?;
             let msg: Value = serde_json::from_slice(&buf)?;
             if msg.get("id").is_some() {
                 let response = handle_message(&db, &msg);
-                send_response(&mut stdout, &response)?;
+                send_response_framed(&mut stdout, &response)?;
+            }
+        } else if line.starts_with('{') {
+            let msg: Value = serde_json::from_str(line)?;
+            if msg.get("id").is_some() {
+                let response = handle_message(&db, &msg);
+                let body = serde_json::to_string(&response)?;
+                stdout.write_all(body.as_bytes())?;
+                stdout.write_all(b"\n")?;
+                stdout.flush()?;
             }
         }
     }
 }
 
-fn send_response(
+fn send_response_framed(
     stdout: &mut impl Write,
     response: &Value,
 ) -> Result<(), Box<dyn std::error::Error>> {
