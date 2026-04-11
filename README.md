@@ -104,24 +104,43 @@ Every function, method, class, struct, enum, trait, interface, type alias, impor
 |----------|---------|---------|-------------|
 | TypeScript / JSX | `tree-sitter-typescript` | `import { X } from '...'` | function, class, interface, type, enum, export |
 | TSX | `tree-sitter-typescript` (tsx) | same as TS | same as TS + JSX elements |
+| JavaScript | `tree-sitter-typescript` | `import ...` / `require(...)` | function, class, export |
 | Rust | `tree-sitter-rust` | `use crate::module::Item` | function, struct, enum, trait, impl, mod, const, type, macro |
 | Python | `tree-sitter-python` | `from module import X` | function, class, constant |
 | Go | `tree-sitter-go` | `"fmt"`, `import ()` blocks | function, method, struct, interface, type |
 | Java | `tree-sitter-java` | `import com.example.Class` | method, constructor, class, interface, enum |
 | C | `tree-sitter-c` | `#include <...>` / `#include "..."` | function, struct, enum, typedef, macro, constant |
 | C++ | `tree-sitter-cpp` | `#include <...>` / `#include "..."` | function, class, struct, enum, namespace, template, type, macro |
+| Ruby | `tree-sitter-ruby` | `require '...'` | function, method, class, module, constant |
 | HTML | `tree-sitter-html` | — | element (semantic landmarks) |
 | CSS | `tree-sitter-css` | — | rule_set, media/keyframes/supports |
+| SCSS/SASS | line-based | — | declaration blocks |
 | CMake | `tree-sitter-cmake` | `find_package`, `add_subdirectory` | function, macro, target, dependency, config |
 | QML | `tree-sitter-qmljs` | `import QtQuick 2.15` | component, function, property, import |
 | Meson | regex-based | `dependency()`, `subdir()` | target, dependency, function |
-| Ruby | `tree-sitter-ruby` | `require '...'` | function, method, class, module, constant |
 | YAML | `tree-sitter-yaml` | — | mapping (keyed sections) |
 | JSON | `tree-sitter-json` | — | pair (keyed entries) |
 | TOML | `tree-sitter-toml-ng` | — | table, table_array, pair |
-| Markdown | regex-based | — | section (heading splits) |
+| Markdown | regex-based | — | section (heading splits) + fenced code blocks |
+| Shell | line-based | — | function, declaration blocks |
+| SQL | line-based | — | statement blocks |
+| Dockerfile | line-based | — | instruction blocks |
+| Makefile | line-based | — | target blocks |
+| Kotlin | line-based | — | function, class blocks |
+| Swift | line-based | — | function, class blocks |
+| C# | line-based | — | function, class blocks |
+| PHP | line-based | — | function, class blocks |
+| Lua | line-based | — | function blocks |
+| Dart | line-based | — | function, class blocks |
+| Scala | line-based | — | function, class blocks |
+| Haskell | line-based | — | function, class blocks |
+| Elixir | line-based | — | function, module blocks |
+| Zig | line-based | — | function, class blocks |
+| XML/SVG | line-based | — | element blocks |
+| GraphQL | line-based | — | definition blocks |
+| Protobuf | line-based | — | message, service blocks |
 
-All file types use dedicated chunkers. No line-based fallbacks.
+17 additional languages use line-based chunking (better than being excluded entirely). Tree-sitter grammars can be added incrementally — see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Search
 
@@ -158,7 +177,7 @@ source files
     |
     | native llama.cpp -> mxbai-embed-large embeddings (Metal GPU)
     |
-SQLite database (schema v13)
+SQLite database (schema v14)
     |-- chunks         (raw code + metadata)
     |-- chunks_fts     (FTS5 full-text index)
     |-- chunks_vec     (1024-dim vector index)
@@ -223,6 +242,18 @@ sqmd embed                           # generate embeddings for unembedded chunks
 sqmd watch                           # live re-index on file changes
 ```
 
+#### Excluding files
+
+sqmd respects `.gitignore` rules and hardcodes common exclusions (`node_modules`, `target`, `.git`, `dist`, `build`, etc.). To add custom exclusions, create a `.sqmdignore` file in your project root using the same format as `.gitignore`:
+
+```gitignore
+# .sqmdignore
+vendor/
+*_test.go
+*.generated.ts
+docs/generated/
+```
+
 ### Search & Retrieval
 
 ```bash
@@ -270,6 +301,8 @@ sqmd hints                           # generate prospective hints (phi4-mini via
 sqmd hints --min-importance 0.7      # only high-importance chunks
 sqmd hints --limit 100               # process at most 100 chunks
 ```
+
+Safe to re-run — duplicate hints are automatically ignored (deduped on chunk_id + hint_text).
 
 After generating hints, re-run `sqmd embed` to embed the hint text into `hints_vec`.
 
