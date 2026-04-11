@@ -2,6 +2,29 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.3.0] - 2026-04-11
+
+### Added
+
+- `embed_start` MCP tool — start embedding in a background thread, returns immediately
+- `embed_progress` MCP tool — poll for embedding status, percentage, progress bar, ETA
+- `embed_stop` MCP tool — stop a running embedding job gracefully
+- Index validation on MCP startup — exits with clear error if index missing or empty
+- `humantime()` helper for human-readable duration formatting in embed progress
+
+### Changed
+
+- MCP server version bumped to 3.3.0
+- `setup_opencode` now uses absolute binary path via `current_exe()` (was bare `"sqmd"` in PATH)
+- All `setup_*` functions now merge config keys instead of clobbering (preserves user-added `env`, `timeout`, etc.)
+- `setup_claude` and `setup_cursor` also merge keys (previously only opencode had this fix planned)
+
+### Fixed
+
+- sqmd mcp no longer hangs indefinitely when harness fails to send `initialize` message
+- MCP startup now prints clear error to stderr when index is missing or has 0 chunks
+- Zombie process accumulation reduced — MCP server exits cleanly on BrokenPipe/EOF
+
 ## [3.2.0] - 2026-04-11
 
 ### Fixed

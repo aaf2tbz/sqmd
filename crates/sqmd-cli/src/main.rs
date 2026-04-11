@@ -1118,6 +1118,10 @@ fn cmd_setup(harness: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn setup_opencode() -> Result<(), Box<dyn std::error::Error>> {
+    let exe = std::env::current_exe()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|_| "sqmd".to_string());
+
     let config_path = dirs::config_dir()
         .ok_or("Cannot find config directory")?
         .join("opencode")
@@ -1135,18 +1139,29 @@ fn setup_opencode() -> Result<(), Box<dyn std::error::Error>> {
     if !obj.contains_key("mcp") {
         obj.insert("mcp".to_string(), serde_json::json!({}));
     }
-    obj.get_mut("mcp")
+    let mcp = obj
+        .get_mut("mcp")
         .unwrap()
         .as_object_mut()
-        .ok_or("mcp is not an object")?
-        .insert(
-            "sqmd".to_string(),
-            serde_json::json!({
-                "type": "local",
-                "command": ["sqmd", "mcp"],
-                "enabled": true
-            }),
-        );
+        .ok_or("mcp is not an object")?;
+
+    let new_entry = serde_json::json!({
+        "type": "local",
+        "command": [exe, "mcp"],
+        "enabled": true
+    });
+
+    if let Some(existing) = mcp.get_mut("sqmd") {
+        if let Some(obj) = existing.as_object_mut() {
+            for (k, v) in new_entry.as_object().unwrap() {
+                obj.insert(k.clone(), v.clone());
+            }
+        } else {
+            *existing = new_entry;
+        }
+    } else {
+        mcp.insert("sqmd".to_string(), new_entry);
+    }
 
     std::fs::write(&config_path, serde_json::to_string_pretty(&config)?)?;
     println!("{}: registered sqmd MCP server", config_path.display());
@@ -1235,16 +1250,26 @@ fn setup_claude() -> Result<(), Box<dyn std::error::Error>> {
         .map(|p| p.to_string_lossy().to_string())
         .unwrap_or_else(|_| "sqmd".to_string());
 
-    obj.get_mut("mcpServers")
+    let new_entry = serde_json::json!({
+        "command": [exe, "mcp"]
+    });
+
+    let servers = obj
+        .get_mut("mcpServers")
         .unwrap()
         .as_object_mut()
-        .ok_or("mcpServers is not an object")?
-        .insert(
-            "sqmd".to_string(),
-            serde_json::json!({
-                "command": [exe, "mcp"]
-            }),
-        );
+        .ok_or("mcpServers is not an object")?;
+    if let Some(existing) = servers.get_mut("sqmd") {
+        if let Some(obj) = existing.as_object_mut() {
+            for (k, v) in new_entry.as_object().unwrap() {
+                obj.insert(k.clone(), v.clone());
+            }
+        } else {
+            *existing = new_entry;
+        }
+    } else {
+        servers.insert("sqmd".to_string(), new_entry);
+    }
 
     std::fs::write(&config_path, serde_json::to_string_pretty(&config)?)?;
     println!("{}: registered sqmd MCP server", config_path.display());
@@ -1272,16 +1297,26 @@ fn setup_cursor() -> Result<(), Box<dyn std::error::Error>> {
         .map(|p| p.to_string_lossy().to_string())
         .unwrap_or_else(|_| "sqmd".to_string());
 
-    obj.get_mut("mcpServers")
+    let new_entry = serde_json::json!({
+        "command": [exe, "mcp"]
+    });
+
+    let servers = obj
+        .get_mut("mcpServers")
         .unwrap()
         .as_object_mut()
-        .ok_or("mcpServers is not an object")?
-        .insert(
-            "sqmd".to_string(),
-            serde_json::json!({
-                "command": [exe, "mcp"]
-            }),
-        );
+        .ok_or("mcpServers is not an object")?;
+    if let Some(existing) = servers.get_mut("sqmd") {
+        if let Some(obj) = existing.as_object_mut() {
+            for (k, v) in new_entry.as_object().unwrap() {
+                obj.insert(k.clone(), v.clone());
+            }
+        } else {
+            *existing = new_entry;
+        }
+    } else {
+        servers.insert("sqmd".to_string(), new_entry);
+    }
 
     std::fs::write(&config_path, serde_json::to_string_pretty(&config)?)?;
     println!("{}: registered sqmd MCP server", config_path.display());

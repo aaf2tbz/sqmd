@@ -2,12 +2,60 @@ use rusqlite::Connection;
 use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::Path;
+use std::sync::{Arc, Mutex};
 
 const SERVER_NAME: &str = "sqmd";
-const SERVER_VERSION: &str = "3.2.0";
+const SERVER_VERSION: &str = "3.3.0";
 const PROTOCOL_VERSION: &str = "2024-11-05";
 
+struct EmbedState {
+    total: usize,
+    embedded: usize,
+    pending: usize,
+    started_at: std::time::Instant,
+    chunks_per_sec: f64,
+    is_running: bool,
+    error: Option<String>,
+}
+
+impl EmbedState {
+    fn new(total: usize, pending: usize) -> Self {
+        Self {
+            total,
+            embedded: 0,
+            pending,
+            started_at: std::time::Instant::now(),
+            chunks_per_sec: 0.0,
+            is_running: true,
+            error: None,
+        }
+    }
+
+    fn bar(&self) -> String {
+        if self.total == 0 {
+            return String::new();
+        }
+        let pct = self.embedded as f64 / self.total as f64;
+        let filled = (pct * 20.0).round() as usize;
+        let empty = 20 - filled;
+        format!(
+            "{}{} {:.0}%",
+            "█".repeat(filled),
+            "░".repeat(empty),
+            pct * 100.0
+        )
+    }
+}
+
 pub fn run(db_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    if !db_path.exists() {
+        eprintln!(
+            "[sqmd mcp] ERROR: index not found at {:?}. Run `sqmd init` in the project directory first.",
+            db_path
+        );
+        std::process::exit(1);
+    }
+
     let log_path = std::path::PathBuf::from("/tmp/sqmd-mcp-debug.log");
     let start = std::time::Instant::now();
 
@@ -45,19 +93,47 @@ pub fn run(db_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
                 e,
                 start.elapsed().as_millis()
             );
+            eprintln!(
+                "[sqmd mcp] ERROR: failed to open index: {}. Run `sqmd init` first.",
+                e
+            );
             return Err(Box::new(e));
         }
     };
 
-    dbg!(log, "DB opened ({:.1}ms)", start.elapsed().as_millis());
+    let total_chunks: i64 = db
+        .query_row(
+            "SELECT COUNT(*) FROM chunks WHERE is_deleted = 0",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    if total_chunks == 0 {
+        eprintln!("[sqmd mcp] WARNING: index has 0 chunks. Did you run `sqmd index`?");
+    }
+
+    dbg!(
+        log,
+        "DB opened ({:.1}ms), {} chunks",
+        start.elapsed().as_millis(),
+        total_chunks
+    );
 
     let root = db_path.parent().unwrap_or(db_path).to_path_buf();
-
+    let embed_state: Arc<Mutex<EmbedState>> = Arc::new(Mutex::new(EmbedState {
+        total: 0,
+        embedded: 0,
+        pending: 0,
+        started_at: std::time::Instant::now(),
+        chunks_per_sec: 0.0,
+        is_running: false,
+        error: None,
+    }));
     let mut stdin = BufReader::new(std::io::stdin());
     let mut stdout = std::io::stdout();
     let mut msg_count: usize = 0;
 
-    dbg!(log, "Entering message loop, waiting for stdin...");
+    dbg!(log, "Entering message loop...");
 
     let mut framed_mode: Option<bool> = None;
 
@@ -81,7 +157,7 @@ pub fn run(db_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
             }
         };
         if n == 0 {
-            dbg!(log, "stdin EOF (n=0) — exiting");
+            dbg!(log, "stdin EOF — exiting");
             return Ok(());
         }
 
@@ -173,7 +249,7 @@ pub fn run(db_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
             continue;
         }
 
-        let response = handle_message(&mut db, &root, &msg);
+        let response = handle_message(&mut db, &root, db_path, &msg, &embed_state);
         dbg!(
             log,
             "Response for msg #{}: {}",
@@ -229,7 +305,13 @@ fn send_response_raw(
     Ok(())
 }
 
-fn handle_message(db: &mut Connection, root: &Path, msg: &Value) -> Value {
+fn handle_message(
+    db: &mut Connection,
+    root: &Path,
+    db_path: &Path,
+    msg: &Value,
+    embed_state: &Arc<Mutex<EmbedState>>,
+) -> Value {
     let method = msg["method"].as_str().unwrap_or("");
     let id = msg.get("id").cloned().unwrap_or(Value::Null);
 
@@ -264,7 +346,7 @@ fn handle_message(db: &mut Connection, root: &Path, msg: &Value) -> Value {
         "tools/call" => {
             let tool_name = msg["params"]["name"].as_str().unwrap_or("");
             let arguments = &msg["params"]["arguments"];
-            let result = call_tool(db, root, tool_name, arguments);
+            let result = call_tool(db, root, db_path, tool_name, arguments, embed_state);
             match result {
                 Ok(content) => json!({
                     "jsonrpc": "2.0",
@@ -395,14 +477,44 @@ fn tools() -> Vec<Value> {
                 "required": ["id"]
             }
         }),
+        json!({
+            "name": "embed",
+            "description": "Embed unembedded chunks (blocking). Processes batches until done or batch_size reached. For progress tracking, prefer embed_start + embed_progress.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "batch_size": { "type": "integer", "description": "Max chunks to embed (default: 64)", "default": 64 }
+                }
+            }
+        }),
+        json!({
+            "name": "embed_start",
+            "description": "Start embedding in the background. Returns immediately. Poll embed_progress for status.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {}
+            }
+        }),
+        json!({
+            "name": "embed_progress",
+            "description": "Get embedding progress. Returns current status, percentage, progress bar, ETA.",
+            "inputSchema": { "type": "object", "properties": {} }
+        }),
+        json!({
+            "name": "embed_stop",
+            "description": "Stop a running embedding job. Will stop after the current batch completes.",
+            "inputSchema": { "type": "object", "properties": {} }
+        }),
     ]
 }
 
 fn call_tool(
     db: &mut Connection,
     root: &Path,
+    db_path: &Path,
     name: &str,
     args: &Value,
+    embed_state: &Arc<Mutex<EmbedState>>,
 ) -> Result<Vec<Value>, Box<dyn std::error::Error>> {
     match name {
         "search" => tool_search(db, args),
@@ -412,6 +524,9 @@ fn call_tool(
         "get" => tool_get(db, args),
         "index_file" => tool_index_file(db, root, args),
         "embed" => tool_embed(db, args),
+        "embed_start" => tool_embed_start(db, db_path, embed_state),
+        "embed_progress" => tool_embed_progress(embed_state),
+        "embed_stop" => tool_embed_stop(embed_state),
         "ls" => tool_ls(db, args),
         "cat" => tool_cat(db, args),
         _ => Err(format!("Unknown tool: {name}").into()),
@@ -758,6 +873,221 @@ fn tool_embed(db: &mut Connection, args: &Value) -> Result<Vec<Value>, Box<dyn s
             "text": "Embedding requires the 'native' feature. Rebuild with --features native."
         })])
     }
+}
+
+fn tool_embed_start(
+    db: &Connection,
+    db_path: &Path,
+    embed_state: &Arc<Mutex<EmbedState>>,
+) -> Result<Vec<Value>, Box<dyn std::error::Error>> {
+    #[cfg(feature = "native")]
+    {
+        let mut state = embed_state.lock().map_err(|e| e.to_string())?;
+        if state.is_running {
+            return Ok(vec![json!({
+                "type": "text",
+                "text": json!({
+                    "status": "already_running",
+                    "embedded": state.embedded,
+                    "total": state.total
+                })
+            })]);
+        }
+
+        let total_chunks: i64 = db.query_row(
+            "SELECT COUNT(*) FROM chunks WHERE is_deleted = 0",
+            [],
+            |r| r.get(0),
+        )?;
+        let embedded_chunks: i64 =
+            db.query_row("SELECT COUNT(*) FROM embeddings", [], |r| r.get(0))?;
+        let pending = (total_chunks - embedded_chunks) as usize;
+
+        if pending == 0 {
+            return Ok(vec![json!({
+                "type": "text",
+                "text": "All chunks already embedded. Nothing to do."
+            })]);
+        }
+
+        *state = EmbedState::new(total_chunks as usize, pending);
+
+        let state_clone = embed_state.clone();
+        let db_path_owned = db_path.to_path_buf();
+
+        std::thread::spawn(move || {
+            let db_result = crate::schema::open(&db_path_owned);
+            let mut db = match db_result {
+                Ok(db) => db,
+                Err(e) => {
+                    if let Ok(mut s) = state_clone.lock() {
+                        s.is_running = false;
+                        s.error = Some(format!("Failed to open DB: {e}"));
+                    }
+                    return;
+                }
+            };
+
+            let provider_result = crate::embed::make_provider();
+            let mut provider = match provider_result {
+                Ok(p) => p,
+                Err(e) => {
+                    if let Ok(mut s) = state_clone.lock() {
+                        s.is_running = false;
+                        s.error = Some(format!("Failed to create embedder: {e}"));
+                    }
+                    return;
+                }
+            };
+
+            loop {
+                if let Ok(s) = state_clone.lock() {
+                    if !s.is_running {
+                        break;
+                    }
+                }
+
+                match crate::search::embed_unembedded(&mut db, &mut *provider) {
+                    Ok(0) => {
+                        if let Ok(mut s) = state_clone.lock() {
+                            s.is_running = false;
+                            s.embedded = s.total;
+                            s.pending = 0;
+                        }
+                        break;
+                    }
+                    Ok(count) => {
+                        if let Ok(mut s) = state_clone.lock() {
+                            s.embedded += count;
+                            s.pending = s.total.saturating_sub(s.embedded);
+                            let elapsed = s.started_at.elapsed().as_secs_f64();
+                            if elapsed > 0.0 {
+                                s.chunks_per_sec = s.embedded as f64 / elapsed;
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        if let Ok(mut s) = state_clone.lock() {
+                            s.is_running = false;
+                            s.error = Some(format!("Batch failed: {e}"));
+                        }
+                        break;
+                    }
+                }
+            }
+        });
+
+        Ok(vec![json!({
+            "type": "text",
+            "text": json!({
+                "status": "started",
+                "total": state.total,
+                "pending": state.pending
+            })
+        })])
+    }
+
+    #[cfg(not(feature = "native"))]
+    {
+        let _ = (db, embed_state);
+        Ok(vec![json!({
+            "type": "text",
+            "text": "Embedding requires the 'native' feature. Rebuild with --features native."
+        })])
+    }
+}
+
+fn tool_embed_progress(
+    embed_state: &Arc<Mutex<EmbedState>>,
+) -> Result<Vec<Value>, Box<dyn std::error::Error>> {
+    let state = embed_state.lock().map_err(|e| e.to_string())?;
+
+    let mut response = json!({
+        "status": if state.is_running { "running" } else if state.error.is_some() { "error" } else if state.total > 0 { "complete" } else { "idle" },
+        "total": state.total,
+        "embedded": state.embedded,
+        "pending": state.pending,
+    });
+
+    if state.total > 0 {
+        let pct = state.embedded as f64 / state.total as f64 * 100.0;
+        let elapsed = state.started_at.elapsed().as_secs();
+        let eta = if state.chunks_per_sec > 0.0 {
+            Some((state.pending as f64 / state.chunks_per_sec).round() as u64)
+        } else {
+            None
+        };
+
+        response["percent"] = json!(pct);
+        response["chunks_per_sec"] = json!(state.chunks_per_sec);
+        response["elapsed_secs"] = json!(elapsed);
+        response["bar"] = json!(state.bar());
+
+        if let Some(eta_secs) = eta {
+            response["eta_secs"] = json!(eta_secs);
+        }
+
+        if !state.is_running && state.error.is_none() && state.embedded > 0 {
+            let dur = state.started_at.elapsed();
+            response["summary"] = json!(format!(
+                "Embedded {}/{} chunks in {} ({:.0} chunks/sec)",
+                state.embedded,
+                state.total,
+                humantime(dur),
+                state.chunks_per_sec
+            ));
+        }
+    }
+
+    if let Some(ref err) = state.error {
+        response["error"] = json!(err);
+        response["embedded_before_error"] = json!(state.embedded);
+    }
+
+    if state.total == 0 {
+        response["message"] = json!("No embedding in progress. Call embed_start to begin.");
+    }
+
+    Ok(vec![
+        json!({ "type": "text", "text": serde_json::to_string_pretty(&response).unwrap_or_default() }),
+    ])
+}
+
+fn tool_embed_stop(
+    embed_state: &Arc<Mutex<EmbedState>>,
+) -> Result<Vec<Value>, Box<dyn std::error::Error>> {
+    let mut state = embed_state.lock().map_err(|e| e.to_string())?;
+    if state.is_running {
+        state.is_running = false;
+        Ok(vec![json!({
+            "type": "text",
+            "text": json!({
+                "status": "stopping",
+                "embedded": state.embedded,
+                "message": "Will stop after current batch completes."
+            })
+        })])
+    } else {
+        Ok(vec![json!({
+            "type": "text",
+            "text": "No embedding in progress."
+        })])
+    }
+}
+
+fn humantime(dur: std::time::Duration) -> String {
+    let secs = dur.as_secs();
+    if secs < 60 {
+        return format!("{secs}s");
+    }
+    let mins = secs / 60;
+    let rem_secs = secs % 60;
+    if mins < 60 {
+        return format!("{mins}m {rem_secs}s");
+    }
+    let hours = mins / 60;
+    let rem_mins = mins % 60;
+    format!("{hours}h {rem_mins}m")
 }
 
 fn tool_ls(db: &Connection, args: &Value) -> Result<Vec<Value>, Box<dyn std::error::Error>> {
