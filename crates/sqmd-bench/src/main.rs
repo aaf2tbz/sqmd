@@ -799,12 +799,9 @@ fn cmd_compare(db_path: &PathBuf, ground_truth_path: &str) {
         lanes: serde_json::Map::new(),
     };
 
-    #[cfg(feature = "embed")]
-    let lanes = vec![("fts", false), ("layered", true)];
-    #[cfg(not(feature = "embed"))]
-    let lanes = vec![("fts", false), ("layered", true)];
+    let lanes = vec!["fts", "layered"];
 
-    for (lane_name, use_vectors) in &lanes {
+    for lane_name in &lanes {
         let mut hit_at_1 = 0usize;
         let mut hit_at_3 = 0usize;
         let mut hit_at_5 = 0usize;
@@ -825,12 +822,7 @@ fn cmd_compare(db_path: &PathBuf, ground_truth_path: &str) {
                 "layered" => {
                     #[cfg(feature = "embed")]
                     {
-                        let e = if *use_vectors {
-                            Some(&mut embedder)
-                        } else {
-                            None
-                        };
-                        sqmd_core::search::layered_search(&db, &search_query, e)
+                        sqmd_core::search::layered_search(&db, &search_query, Some(&mut embedder))
                             .map(|lr| lr.results)
                             .unwrap_or_default()
                     }
