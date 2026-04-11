@@ -301,23 +301,33 @@ fn ensure_db() -> Result<rusqlite::Connection, Box<dyn std::error::Error>> {
 }
 
 fn cmd_mcp(given_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
-    let local_index = given_path.join(".sqmd/index.db");
-    let home_index = dirs::home_dir()
-        .map(|h| h.join(".sqmd/index.db"))
-        .filter(|p| p.exists());
-
-    let path = if local_index.exists() {
-        local_index
-    } else if let Some(home) = home_index {
-        home
-    } else {
+    let path = find_index_db(given_path).unwrap_or_else(|| {
         eprintln!(
-            "No index found at {}. Run `sqmd init` first.",
-            local_index.display()
+            "No index found at {} or any parent. Run `sqmd init` first.",
+            given_path.display()
         );
         std::process::exit(1);
-    };
+    });
     sqmd_core::mcp_server::run(&path)
+}
+
+fn find_index_db(start: &Path) -> Option<PathBuf> {
+    let mut dir = start.to_path_buf();
+    loop {
+        let candidate = dir.join(".sqmd/index.db");
+        if candidate.exists() {
+            return Some(candidate);
+        }
+        if !dir.pop() {
+            break;
+        }
+    }
+    let home = dirs::home_dir()?;
+    let home_index = home.join(".sqmd/index.db");
+    if home_index.exists() {
+        return Some(home_index);
+    }
+    None
 }
 
 fn cmd_init() -> Result<(), Box<dyn std::error::Error>> {
