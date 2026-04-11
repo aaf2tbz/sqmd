@@ -1173,7 +1173,13 @@ pub fn embed_unembedded(
         .filter(|(_, text)| !text.trim().is_empty())
         .map(|(id, text)| {
             if text.len() > EMBED_MAX_CHARS {
-                (id, text[..EMBED_MAX_CHARS].to_string())
+                let end = text
+                    .char_indices()
+                    .map(|(idx, _)| idx)
+                    .take_while(|idx| *idx <= EMBED_MAX_CHARS)
+                    .last()
+                    .unwrap_or(0);
+                (id, text[..end].to_string())
             } else {
                 (id, text)
             }
