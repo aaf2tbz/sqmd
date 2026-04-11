@@ -8,7 +8,8 @@ const SERVER_VERSION: &str = "3.2.0";
 const PROTOCOL_VERSION: &str = "2025-03-26";
 
 pub fn run(db_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
-    let db = crate::schema::open_fast(db_path)?;
+    let mut db = crate::schema::open(db_path)?;
+    let root = db_path.parent().unwrap_or(db_path).to_path_buf();
     eprintln!("[mcp] opened index at {}", db_path.display());
 
     let mut stdin = BufReader::new(std::io::stdin());
@@ -66,7 +67,7 @@ pub fn run(db_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
-        let response = handle_message(&db, &msg);
+        let response = handle_message(&mut db, &root, &msg);
         if has_id {
             send_response_framed(&mut stdout, &response)?;
         }
@@ -83,7 +84,7 @@ fn send_response_framed(
     Ok(())
 }
 
-fn handle_message(db: &Connection, msg: &Value) -> Value {
+fn handle_message(db: &mut Connection, root: &Path, msg: &Value) -> Value {
     let method = msg["method"].as_str().unwrap_or("");
     let id = msg.get("id").cloned().unwrap_or(Value::Null);
 
@@ -113,7 +114,7 @@ fn handle_message(db: &Connection, msg: &Value) -> Value {
         "tools/call" => {
             let tool_name = msg["params"]["name"].as_str().unwrap_or("");
             let arguments = &msg["params"]["arguments"];
-            let result = call_tool(db, tool_name, arguments);
+            let result = call_tool(db, root, tool_name, arguments);
             match result {
                 Ok(content) => json!({
                     "jsonrpc": "2.0",
@@ -200,11 +201,56 @@ fn tools() -> Vec<Value> {
                 "required": ["file_path", "line"]
             }
         }),
+        json!({
+            "name": "index_file",
+            "description": "Index a single file (or all files if no path given). Re-indexes changed files incrementally. Use this after editing files to keep the index up-to-date.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "File path relative to project root. Omit to index all changed files." }
+                }
+            }
+        }),
+        json!({
+            "name": "embed",
+            "description": "Embed unembedded chunks using local llama.cpp. Processes up to batch_size chunks (default: 64). Call repeatedly until all chunks are embedded.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "batch_size": { "type": "integer", "description": "Max chunks to embed in this call (default: 64)", "default": 64 }
+                }
+            }
+        }),
+        json!({
+            "name": "ls",
+            "description": "List chunks in the index, optionally filtered by file, type, or language. Returns chunk IDs, names, types, and locations.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "file_filter": { "type": "string", "description": "Filter by file path substring" },
+                    "type_filter": { "type": "string", "description": "Filter by chunk type (function, class, method, struct, enum, etc.)" },
+                    "language": { "type": "string", "description": "Filter by language (typescript, rust, python, etc.)" },
+                    "limit": { "type": "integer", "description": "Max results (default: 50)", "default": 50 }
+                }
+            }
+        }),
+        json!({
+            "name": "cat",
+            "description": "Get a chunk by its ID (from ls or search results). Returns full source code.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "id": { "type": "integer", "description": "Chunk ID" }
+                },
+                "required": ["id"]
+            }
+        }),
     ]
 }
 
 fn call_tool(
-    db: &Connection,
+    db: &mut Connection,
+    root: &Path,
     name: &str,
     args: &Value,
 ) -> Result<Vec<Value>, Box<dyn std::error::Error>> {
@@ -214,6 +260,10 @@ fn call_tool(
         "deps" => tool_deps(db, args),
         "stats" => tool_stats(db),
         "get" => tool_get(db, args),
+        "index_file" => tool_index_file(db, root, args),
+        "embed" => tool_embed(db, args),
+        "ls" => tool_ls(db, args),
+        "cat" => tool_cat(db, args),
         _ => Err(format!("Unknown tool: {name}").into()),
     }
 }
@@ -342,18 +392,27 @@ fn tool_deps(db: &Connection, args: &Value) -> Result<Vec<Value>, Box<dyn std::e
 }
 
 fn tool_stats(db: &Connection) -> Result<Vec<Value>, Box<dyn std::error::Error>> {
-    let total_chunks: i64 = db.query_row("SELECT COUNT(*) FROM chunks", [], |r| r.get(0))?;
-    let total_files: i64 =
-        db.query_row("SELECT COUNT(DISTINCT file_path) FROM chunks", [], |r| {
-            r.get(0)
-        })?;
-    let embedded: i64 = db.query_row("SELECT COUNT(*) FROM embeddings", [], |r| r.get(0))?;
+    let total_chunks: i64 = db.query_row(
+        "SELECT COUNT(*) FROM chunks WHERE is_deleted = 0",
+        [],
+        |r| r.get(0),
+    )?;
+    let total_files: i64 = db.query_row(
+        "SELECT COUNT(DISTINCT file_path) FROM chunks WHERE is_deleted = 0",
+        [],
+        |r| r.get(0),
+    )?;
+    let embedded: i64 = db.query_row(
+        "SELECT COUNT(*) FROM chunks c INNER JOIN embeddings e ON e.chunk_id = c.id WHERE c.is_deleted = 0",
+        [],
+        |r| r.get(0),
+    )?;
     let entities: i64 = db.query_row("SELECT COUNT(*) FROM entities", [], |r| r.get(0))?;
     let communities: i64 = db.query_row("SELECT COUNT(*) FROM communities", [], |r| r.get(0))?;
 
     let type_breakdown: Vec<(String, i64)> = {
         let mut stmt = db.prepare(
-            "SELECT chunk_type, COUNT(*) as cnt FROM chunks GROUP BY chunk_type ORDER BY cnt DESC",
+            "SELECT chunk_type, COUNT(*) as cnt FROM chunks WHERE is_deleted = 0 GROUP BY chunk_type ORDER BY cnt DESC",
         )?;
         let rows: Vec<(String, i64)> = stmt
             .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?
@@ -392,7 +451,7 @@ fn tool_get(db: &Connection, args: &Value) -> Result<Vec<Value>, Box<dyn std::er
     let line = args["line"].as_u64().ok_or("missing 'line' parameter")? as i64;
 
     let result = db.query_row(
-        "SELECT id, name, chunk_type, line_start, line_end, content_raw, signature FROM chunks WHERE file_path = ?1 AND line_start <= ?2 AND line_end >= ?2 ORDER BY importance DESC LIMIT 1",
+        "SELECT id, name, chunk_type, line_start, line_end, content_raw, signature FROM chunks WHERE file_path = ?1 AND line_start <= ?2 AND line_end >= ?2 AND is_deleted = 0 ORDER BY importance DESC LIMIT 1",
         params![file_path, line],
         |r| {
             Ok((
@@ -429,6 +488,243 @@ fn tool_get(db: &Connection, args: &Value) -> Result<Vec<Value>, Box<dyn std::er
         Err(_) => Ok(vec![json!({
             "type": "text",
             "text": format!("No chunk found at {}:{} ", file_path, line)
+        })]),
+    }
+}
+
+fn tool_index_file(
+    db: &mut Connection,
+    root: &Path,
+    args: &Value,
+) -> Result<Vec<Value>, Box<dyn std::error::Error>> {
+    let mut indexer = crate::index::Indexer::new(db, root);
+
+    if let Some(path) = args["path"].as_str() {
+        let abs = if std::path::Path::new(path).is_absolute() {
+            std::path::PathBuf::from(path)
+        } else {
+            root.join(path)
+        };
+        match indexer.index_file(&abs) {
+            Ok(Some(result)) => {
+                let text = format!(
+                    "Indexed: {}\n  Chunks: {}\n  Relationships: {}{}",
+                    result.file_path,
+                    result.chunks,
+                    result.relationships,
+                    if result.was_deleted {
+                        " (file deleted, tombstoned)"
+                    } else {
+                        ""
+                    },
+                );
+                Ok(vec![json!({ "type": "text", "text": text })])
+            }
+            Ok(None) => Ok(vec![json!({
+                "type": "text",
+                "text": format!("Skipped: {} (unsupported language)", path)
+            })]),
+            Err(e) => Ok(vec![json!({
+                "type": "text",
+                "text": format!("Error indexing {}: {}", path, e)
+            })]),
+        }
+    } else {
+        match indexer.index() {
+            Ok(stats) => {
+                let text = format!(
+                    "Full index complete.\n  Files scanned: {}\n  Files indexed: {}\n  Files skipped: {}\n  Chunks: {}\n  Relationships: {}\n",
+                    stats.files_scanned,
+                    stats.files_indexed,
+                    stats.files_skipped,
+                    stats.chunks_total,
+                    stats.relationships_total,
+                );
+                Ok(vec![json!({ "type": "text", "text": text })])
+            }
+            Err(e) => Ok(vec![json!({
+                "type": "text",
+                "text": format!("Error: {}", e)
+            })]),
+        }
+    }
+}
+
+fn tool_embed(db: &mut Connection, args: &Value) -> Result<Vec<Value>, Box<dyn std::error::Error>> {
+    #[cfg(feature = "native")]
+    {
+        let batch_size = args["batch_size"].as_u64().unwrap_or(64) as usize;
+        let mut provider = crate::embed::make_provider()?;
+
+        let unembedded: i64 = db.query_row(
+            "SELECT COUNT(*) FROM chunks LEFT JOIN embeddings ON chunks.id = embeddings.chunk_id WHERE embeddings.chunk_id IS NULL AND chunks.is_deleted = 0",
+            [],
+            |r| r.get(0),
+        )?;
+
+        if unembedded == 0 {
+            return Ok(vec![json!({
+                "type": "text",
+                "text": "All chunks already embedded."
+            })]);
+        }
+
+        let mut total = 0usize;
+        let start = std::time::Instant::now();
+        loop {
+            let count = crate::search::embed_unembedded(db, &mut *provider)?;
+            if count == 0 || total + count > batch_size {
+                total += count.min(batch_size.saturating_sub(total));
+                break;
+            }
+            total += count;
+            if total >= batch_size {
+                break;
+            }
+        }
+
+        let elapsed = start.elapsed();
+        let remaining = unembedded as usize - total;
+        let text = format!(
+            "Embedded {}/{} chunks in {:?} ({:.0} chunks/sec)\n{} remaining.",
+            total,
+            unembedded,
+            elapsed,
+            if elapsed.as_secs_f64() > 0.0 {
+                total as f64 / elapsed.as_secs_f64()
+            } else {
+                0.0
+            },
+            remaining,
+        );
+        Ok(vec![json!({ "type": "text", "text": text })])
+    }
+
+    #[cfg(not(feature = "native"))]
+    {
+        let _ = (db, args);
+        Ok(vec![json!({
+            "type": "text",
+            "text": "Embedding requires the 'native' feature. Rebuild with --features native."
+        })])
+    }
+}
+
+fn tool_ls(db: &Connection, args: &Value) -> Result<Vec<Value>, Box<dyn std::error::Error>> {
+    let file_filter = args["file_filter"].as_str().map(|s| s.to_string());
+    let type_filter = args["type_filter"].as_str().map(|s| s.to_string());
+    let language = args["language"].as_str().map(|s| s.to_string());
+    let limit = args["limit"].as_u64().unwrap_or(50) as usize;
+
+    let mut sql = String::from(
+        "SELECT id, name, chunk_type, file_path, language, line_start, line_end, importance \
+         FROM chunks WHERE is_deleted = 0",
+    );
+    let mut param_idx = 0u32;
+    let mut param_vals: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+
+    if let Some(ff) = &file_filter {
+        param_idx += 1;
+        sql.push_str(&format!(" AND file_path LIKE ?{param_idx}"));
+        param_vals.push(Box::new(format!("%{ff}%")));
+    }
+    if let Some(tf) = &type_filter {
+        param_idx += 1;
+        sql.push_str(&format!(" AND chunk_type = ?{param_idx}"));
+        param_vals.push(Box::new(tf.clone()));
+    }
+    if let Some(lang) = &language {
+        param_idx += 1;
+        sql.push_str(&format!(" AND language = ?{param_idx}"));
+        param_vals.push(Box::new(lang.clone()));
+    }
+
+    sql.push_str(&format!(" ORDER BY importance DESC LIMIT {}", limit));
+
+    let mut stmt = db.prepare(&sql)?;
+    let rows: Vec<(i64, Option<String>, String, String, String, i64, i64, f64)> = stmt
+        .query_map(
+            rusqlite::params_from_iter(param_vals.iter().map(|v| v.as_ref())),
+            |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                    r.get(6)?,
+                    r.get(7)?,
+                ))
+            },
+        )?
+        .collect::<Result<_, _>>()?;
+
+    let mut text = String::new();
+    for (id, name, chunk_type, file_path, _language, line_start, line_end, importance) in &rows {
+        let name = name.as_deref().unwrap_or("(anonymous)");
+        text.push_str(&format!(
+            "[{}] {} `{}` {}:{}-{} (imp: {:.2})\n",
+            id,
+            chunk_type,
+            name,
+            file_path,
+            line_start + 1,
+            line_end + 1,
+            importance,
+        ));
+    }
+
+    if rows.is_empty() {
+        text.push_str("No matching chunks found.\n");
+    }
+
+    Ok(vec![json!({ "type": "text", "text": text })])
+}
+
+fn tool_cat(db: &Connection, args: &Value) -> Result<Vec<Value>, Box<dyn std::error::Error>> {
+    let id = args["id"].as_u64().ok_or("missing 'id' parameter")? as i64;
+
+    let result = db.query_row(
+        "SELECT name, chunk_type, file_path, language, line_start, line_end, content_raw, signature FROM chunks WHERE id = ?1 AND is_deleted = 0",
+        params![id],
+        |r| {
+            Ok((
+                r.get::<_, Option<String>>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+                r.get::<_, i64>(4)?,
+                r.get::<_, i64>(5)?,
+                r.get::<_, Option<String>>(6)?,
+                r.get::<_, Option<String>>(7)?,
+            ))
+        },
+    );
+
+    match result {
+        Ok((name, chunk_type, file_path, language, line_start, line_end, content, signature)) => {
+            let mut text = format!(
+                "[{}] {} `{}` ({}) at {}:{}-{}\n",
+                id,
+                chunk_type,
+                name.as_deref().unwrap_or("(anonymous)"),
+                language,
+                file_path,
+                line_start + 1,
+                line_end + 1,
+            );
+            if let Some(sig) = &signature {
+                text.push_str(&format!("Signature: `{}`\n", sig));
+            }
+            if let Some(c) = &content {
+                text.push_str(&format!("\n```\n{}\n```\n", c));
+            }
+            Ok(vec![json!({ "type": "text", "text": text })])
+        }
+        Err(_) => Ok(vec![json!({
+            "type": "text",
+            "text": format!("No chunk found with ID {}", id)
         })]),
     }
 }
