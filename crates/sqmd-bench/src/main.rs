@@ -457,8 +457,8 @@ fn cmd_run(db_path: &PathBuf, mode: &str) {
 
     eprintln!("sqmd-bench v0.2.0 | {} queries | mode: {}", total, mode);
 
-    #[cfg(feature = "embed")]
-    let mut embedder = sqmd_core::embed::Embedder::new().unwrap();
+    #[cfg(feature = "native")]
+    let mut embedder = sqmd_core::embed::make_provider().unwrap();
 
     let mut results: Vec<QueryResult> = Vec::with_capacity(total);
 
@@ -478,13 +478,13 @@ fn cmd_run(db_path: &PathBuf, mode: &str) {
         let search_results = match mode {
             "fts" => sqmd_core::search::fts_search(&db, &search_query).unwrap_or_default(),
             "layered" => {
-                #[cfg(feature = "embed")]
+                #[cfg(feature = "native")]
                 {
-                    sqmd_core::search::layered_search(&db, &search_query, Some(&mut embedder))
+                    sqmd_core::search::layered_search(&db, &search_query, Some(&mut *embedder))
                         .map(|lr| lr.results)
                         .unwrap_or_default()
                 }
-                #[cfg(not(feature = "embed"))]
+                #[cfg(not(feature = "native"))]
                 {
                     sqmd_core::search::layered_search(&db, &search_query)
                         .map(|lr| lr.results)
@@ -523,13 +523,13 @@ fn cmd_run(db_path: &PathBuf, mode: &str) {
         let entity_found = check_entity_exists(&db, gt.target_function, gt.target_file);
 
         let layers_hit: Vec<String> = if mode == "layered" {
-            #[cfg(feature = "embed")]
+            #[cfg(feature = "native")]
             {
-                sqmd_core::search::layered_search(&db, &search_query, Some(&mut embedder))
+                sqmd_core::search::layered_search(&db, &search_query, Some(&mut *embedder))
                     .map(|lr| lr.layers_hit)
                     .unwrap_or_default()
             }
-            #[cfg(not(feature = "embed"))]
+            #[cfg(not(feature = "native"))]
             {
                 sqmd_core::search::layered_search(&db, &search_query)
                     .map(|lr| lr.layers_hit)
@@ -809,8 +809,8 @@ fn cmd_compare(db_path: &PathBuf, ground_truth_path: &str) {
         let mut hit_at_10 = 0usize;
         let mut mrr_sum = 0.0f64;
 
-        #[cfg(feature = "embed")]
-        let mut embedder = sqmd_core::embed::Embedder::new().unwrap();
+        #[cfg(feature = "native")]
+        let mut embedder = sqmd_core::embed::make_provider().unwrap();
 
         for eq in &eval_queries {
             let search_query = sqmd_core::search::SearchQuery {
@@ -822,13 +822,13 @@ fn cmd_compare(db_path: &PathBuf, ground_truth_path: &str) {
             let search_results = match *lane_name {
                 "fts" => sqmd_core::search::fts_search(&db, &search_query).unwrap_or_default(),
                 "layered" => {
-                    #[cfg(feature = "embed")]
+                    #[cfg(feature = "native")]
                     {
-                        sqmd_core::search::layered_search(&db, &search_query, Some(&mut embedder))
+                        sqmd_core::search::layered_search(&db, &search_query, Some(&mut *embedder))
                             .map(|lr| lr.results)
                             .unwrap_or_default()
                     }
-                    #[cfg(not(feature = "embed"))]
+                    #[cfg(not(feature = "native"))]
                     {
                         sqmd_core::search::layered_search(&db, &search_query)
                             .map(|lr| lr.results)

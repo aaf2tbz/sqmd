@@ -10,8 +10,8 @@ use std::sync::{Arc, Mutex};
 
 pub struct DaemonState {
     pub cache: Mutex<QueryCache>,
-    #[cfg(feature = "embed")]
-    pub embedder: Mutex<Option<crate::embed::Embedder>>,
+    #[cfg(feature = "native")]
+    pub embedder: Mutex<Option<Box<dyn crate::embed::EmbedProvider>>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -41,7 +41,7 @@ pub fn serve(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let root_owned = root.to_path_buf();
     let state = Arc::new(DaemonState {
         cache: Mutex::new(QueryCache::new()),
-        #[cfg(feature = "embed")]
+        #[cfg(feature = "native")]
         embedder: Mutex::new(None),
     });
 
@@ -112,15 +112,15 @@ fn handle_connection(
         "ingest" | "ingest_batch" | "forget" | "modify"
     );
     #[allow(unused_variables)]
-    let is_embed = cfg!(feature = "embed") && matches!(request.method.as_str(), "embed");
+    let is_embed = cfg!(feature = "native") && matches!(request.method.as_str(), "embed");
 
-    #[cfg(feature = "embed")]
+    #[cfg(feature = "native")]
     let mut db = if is_write || is_embed {
         schema::open(&db_path)?
     } else {
         schema::open_fast(&db_path)?
     };
-    #[cfg(not(feature = "embed"))]
+    #[cfg(not(feature = "native"))]
     let db = if is_write {
         schema::open(&db_path)?
     } else {
@@ -138,11 +138,11 @@ fn handle_connection(
         "ingest_batch" => handle_ingest_batch(&db, &request.params),
         "forget" => handle_forget(&db, &request.params),
         "modify" => handle_modify(&db, &request.params),
-        #[cfg(feature = "embed")]
+        #[cfg(feature = "native")]
         "embed" => handle_embed(&mut db),
-        #[cfg(feature = "embed")]
+        #[cfg(feature = "native")]
         "embed_text" => handle_embed_text(&request.params),
-        #[cfg(feature = "embed")]
+        #[cfg(feature = "native")]
         "embed_batch" => handle_embed_batch(&request.params),
         "communities" => handle_communities(&db, &request.params),
         "community_summary" => handle_community_summary(&db, &request.params),
@@ -234,12 +234,12 @@ fn handle_search(
         ..Default::default()
     };
 
-    #[cfg(feature = "embed")]
+    #[cfg(feature = "native")]
     let result = {
         let mut embedder = {
             let mut e = state.embedder.lock().unwrap_or_else(|e| e.into_inner());
             if e.is_none() {
-                match crate::embed::Embedder::new() {
+                match crate::embed::make_provider() {
                     Ok(emb) => *e = Some(emb),
                     Err(err) => {
                         return Response {
@@ -252,7 +252,7 @@ fn handle_search(
             }
             e.take().unwrap()
         };
-        match crate::search::layered_search(db, &search_query, Some(&mut embedder)) {
+        match crate::search::layered_search(db, &search_query, Some(&mut *embedder)) {
             Ok(layered_result) => {
                 let results = layered_result.results;
                 let results_clone = results.clone();
@@ -300,13 +300,13 @@ fn handle_search(
             },
         }
     };
-    #[cfg(not(feature = "embed"))]
+    #[cfg(not(feature = "native"))]
     let result = {
-        #[cfg(feature = "embed")]
+        #[cfg(feature = "native")]
         let layered = {
             let mut embedder_lock = state.embedder.lock().unwrap_or_else(|e| e.into_inner());
             if embedder_lock.is_none() {
-                match crate::embed::Embedder::new() {
+                match crate::embed::make_provider() {
                     Ok(emb) => *embedder_lock = Some(emb),
                     Err(err) => {
                         return Response {
@@ -318,9 +318,9 @@ fn handle_search(
                 }
             }
             let embedder = embedder_lock.as_mut().unwrap();
-            crate::search::layered_search(db, &search_query, Some(embedder))
+            crate::search::layered_search(db, &search_query, Some(&mut **embedder))
         };
-        #[cfg(not(feature = "embed"))]
+        #[cfg(not(feature = "native"))]
         let layered = crate::search::layered_search(db, &search_query);
 
         match layered {
@@ -530,9 +530,9 @@ fn handle_stats(db: &Connection) -> Response {
     }
 }
 
-#[cfg(feature = "embed")]
+#[cfg(feature = "native")]
 fn handle_embed(db: &mut Connection) -> Response {
-    let mut embedder = match crate::embed::Embedder::new() {
+    let mut embedder = match crate::embed::make_provider() {
         Ok(e) => e,
         Err(e) => {
             return Response {
@@ -543,7 +543,7 @@ fn handle_embed(db: &mut Connection) -> Response {
         }
     };
 
-    match crate::search::embed_unembedded(db, &mut embedder) {
+    match crate::search::embed_unembedded(db, &mut *embedder) {
         Ok(count) => Response {
             ok: true,
             result: Some(serde_json::json!({"embedded": count})),
@@ -557,7 +557,7 @@ fn handle_embed(db: &mut Connection) -> Response {
     }
 }
 
-#[cfg(feature = "embed")]
+#[cfg(feature = "native")]
 fn handle_embed_text(params: &serde_json::Value) -> Response {
     let text = match params["text"].as_str() {
         Some(t) => t,
@@ -570,7 +570,7 @@ fn handle_embed_text(params: &serde_json::Value) -> Response {
         }
     };
 
-    let mut embedder = match crate::embed::Embedder::new() {
+    let mut embedder = match crate::embed::make_provider() {
         Ok(e) => e,
         Err(e) => {
             return Response {
@@ -599,7 +599,7 @@ fn handle_embed_text(params: &serde_json::Value) -> Response {
     }
 }
 
-#[cfg(feature = "embed")]
+#[cfg(feature = "native")]
 fn handle_embed_batch(params: &serde_json::Value) -> Response {
     let texts: Vec<String> = match params
         .get("texts")
@@ -619,13 +619,13 @@ fn handle_embed_batch(params: &serde_json::Value) -> Response {
         return Response {
             ok: true,
             result: Some(
-                serde_json::json!({"embeddings": [], "dimensions": 768, "model": "nomic-embed-text-v1.5"}),
+                serde_json::json!({"embeddings": [], "dimensions": 1024, "model": "mxbai-embed-large"}),
             ),
             error: None,
         };
     }
 
-    let mut embedder = match crate::embed::Embedder::new() {
+    let mut embedder = match crate::embed::make_provider() {
         Ok(e) => e,
         Err(e) => {
             return Response {
@@ -642,7 +642,7 @@ fn handle_embed_batch(params: &serde_json::Value) -> Response {
             ok: true,
             result: Some(serde_json::json!({
                 "embeddings": vectors,
-                "dimensions": 768,
+                "dimensions": vectors.first().map(|v| v.len()).unwrap_or(1024),
                 "model": embedder.model_name(),
                 "count": vectors.len(),
             })),
@@ -1161,11 +1161,11 @@ fn handle_layered_search(
         ..Default::default()
     };
 
-    #[cfg(feature = "embed")]
+    #[cfg(feature = "native")]
     let layered = {
         let mut embedder_lock = state.embedder.lock().unwrap_or_else(|e| e.into_inner());
         if embedder_lock.is_none() {
-            match crate::embed::Embedder::new() {
+            match crate::embed::make_provider() {
                 Ok(emb) => *embedder_lock = Some(emb),
                 Err(err) => {
                     return Response {
@@ -1177,9 +1177,9 @@ fn handle_layered_search(
             }
         }
         let embedder = embedder_lock.as_mut().unwrap();
-        crate::search::layered_search(db, &search_query, Some(embedder))
+        crate::search::layered_search(db, &search_query, Some(&mut **embedder))
     };
-    #[cfg(not(feature = "embed"))]
+    #[cfg(not(feature = "native"))]
     let layered = crate::search::layered_search(db, &search_query);
 
     match layered {
