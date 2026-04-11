@@ -10,7 +10,6 @@ const PROTOCOL_VERSION: &str = "2025-03-26";
 pub fn run(db_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let mut db = crate::schema::open(db_path)?;
     let root = db_path.parent().unwrap_or(db_path).to_path_buf();
-    eprintln!("[mcp] opened index at {}", db_path.display());
 
     let mut stdin = BufReader::new(std::io::stdin());
     let mut stdout = std::io::stdout();
