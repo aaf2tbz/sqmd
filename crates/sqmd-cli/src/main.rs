@@ -157,6 +157,37 @@ enum Commands {
     },
     /// Start MCP server (JSON-RPC over stdio)
     Mcp,
+    /// Start sqmd daemon in background
+    Start {
+        /// Project root directory
+        #[arg(default_value = ".")]
+        path: PathBuf,
+    },
+    /// Stop running sqmd daemon
+    Stop,
+    /// Setup sqmd connections to AI harnesses (codex, claude-code, opencode)
+    Setup {
+        /// Harness to configure
+        #[arg(value_enum)]
+        harness: Option<String>,
+    },
+    /// Run diagnostic checks on sqmd installation
+    Doctor {
+        /// Check specific component (index, embed, model, mcp)
+        #[arg(long)]
+        check: Option<String>,
+    },
+    /// Update sqmd to the latest version
+    Update {
+        /// Force update even if already on latest
+        #[arg(long)]
+        force: bool,
+    },
+    /// Install or reinstall sqmd
+    Install {
+        /// Version to install (default: latest)
+        version: Option<String>,
+    },
 }
 
 fn main() {
@@ -228,6 +259,12 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             limit,
         } => cmd_hints(min_importance, limit),
         Commands::Mcp => cmd_mcp(),
+        Commands::Start { path } => cmd_start(&path),
+        Commands::Stop => cmd_stop(),
+        Commands::Setup { harness } => cmd_setup(harness.as_deref()),
+        Commands::Doctor { check } => cmd_doctor(check.as_deref()),
+        Commands::Update { force } => cmd_update(force),
+        Commands::Install { version } => cmd_install(version.as_deref()),
     }
 }
 
@@ -967,5 +1004,404 @@ fn cmd_hints(min_importance: f64, limit: usize) -> Result<(), Box<dyn std::error
     let elapsed = start.elapsed();
     println!("Generated hints for {} chunks in {:?}", count, elapsed);
     drop(db);
+    Ok(())
+}
+
+fn sqmd_home() -> PathBuf {
+    let home = std::env::var("HOME").unwrap_or_default();
+    PathBuf::from(home).join(".sqmd")
+}
+
+fn cmd_start(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    let root = path.canonicalize()?;
+    let pid_path = sqmd_home().join("daemon.pid");
+
+    if pid_path.exists() {
+        let pid_str = std::fs::read_to_string(&pid_path)?;
+        if let Ok(existing_pid) = pid_str.trim().parse::<u32>() {
+            let alive = unsafe { libc::kill(existing_pid as i32, 0) == 0 };
+            if alive {
+                println!("Daemon already running (PID {})", existing_pid);
+                return Ok(());
+            }
+        }
+        let _ = std::fs::remove_file(&pid_path);
+    }
+
+    let db_path = root.join(".sqmd/index.db");
+    if !db_path.exists() {
+        eprintln!(
+            "No index found at {}. Run `sqmd init` first.",
+            root.display()
+        );
+        std::process::exit(1);
+    }
+
+    let exe = std::env::current_exe()?;
+    let child = std::process::Command::new(&exe)
+        .arg("serve")
+        .arg(&root)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()?;
+
+    let pid = child.id();
+    std::fs::create_dir_all(sqmd_home())?;
+    std::fs::write(&pid_path, pid.to_string())?;
+    println!("Daemon started (PID {}) for {}", pid, root.display());
+    Ok(())
+}
+
+fn cmd_stop() -> Result<(), Box<dyn std::error::Error>> {
+    let pid_path = sqmd_home().join("daemon.pid");
+    if !pid_path.exists() {
+        println!("No daemon running.");
+        return Ok(());
+    }
+    let pid_str = std::fs::read_to_string(&pid_path)?;
+    let pid: u32 = pid_str.trim().parse()?;
+    unsafe {
+        libc::kill(pid as i32, libc::SIGTERM);
+    }
+    std::fs::remove_file(&pid_path)?;
+    println!("Daemon stopped (PID {})", pid);
+    Ok(())
+}
+
+fn cmd_setup(harness: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
+    let harness = harness.unwrap_or("all");
+    let harnesses = if harness == "all" {
+        vec!["opencode", "codex", "claude"]
+    } else {
+        vec![harness]
+    };
+
+    for h in &harnesses {
+        match *h {
+            "opencode" => setup_opencode()?,
+            "codex" => setup_codex()?,
+            "claude" => setup_claude()?,
+            _ => {
+                eprintln!("Unknown harness: {}. Available: opencode, codex, claude", h);
+                std::process::exit(1);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn setup_opencode() -> Result<(), Box<dyn std::error::Error>> {
+    let config_path = dirs::config_dir()
+        .ok_or("Cannot find config directory")?
+        .join("opencode")
+        .join("opencode.json");
+
+    let mut config: serde_json::Value = if config_path.exists() {
+        let content = std::fs::read_to_string(&config_path)?;
+        serde_json::from_str(&content).unwrap_or(serde_json::json!({}))
+    } else {
+        std::fs::create_dir_all(config_path.parent().unwrap())?;
+        serde_json::json!({})
+    };
+
+    let obj = config.as_object_mut().ok_or("config is not an object")?;
+    if !obj.contains_key("mcp") {
+        obj.insert("mcp".to_string(), serde_json::json!({}));
+    }
+    obj.get_mut("mcp")
+        .unwrap()
+        .as_object_mut()
+        .ok_or("mcp is not an object")?
+        .insert(
+            "sqmd".to_string(),
+            serde_json::json!({
+                "type": "local",
+                "command": ["sqmd", "mcp"],
+                "enabled": true
+            }),
+        );
+
+    std::fs::write(&config_path, serde_json::to_string_pretty(&config)?)?;
+    println!("{}: registered sqmd MCP server", config_path.display());
+    Ok(())
+}
+
+fn setup_codex() -> Result<(), Box<dyn std::error::Error>> {
+    let config_path = dirs::config_dir()
+        .ok_or("Cannot find config directory")?
+        .join("codex")
+        .join("config.json");
+
+    let mut config: serde_json::Value = if config_path.exists() {
+        let content = std::fs::read_to_string(&config_path)?;
+        serde_json::from_str(&content).unwrap_or(serde_json::json!({}))
+    } else {
+        std::fs::create_dir_all(config_path.parent().unwrap())?;
+        serde_json::json!({})
+    };
+
+    let obj = config.as_object_mut().ok_or("config is not an object")?;
+    if !obj.contains_key("mcpServers") {
+        obj.insert("mcpServers".to_string(), serde_json::json!({}));
+    }
+    obj.get_mut("mcpServers")
+        .unwrap()
+        .as_object_mut()
+        .ok_or("mcpServers is not an object")?
+        .insert(
+            "sqmd".to_string(),
+            serde_json::json!({
+                "command": ["sqmd", "mcp"]
+            }),
+        );
+
+    std::fs::write(&config_path, serde_json::to_string_pretty(&config)?)?;
+    println!("{}: registered sqmd MCP server", config_path.display());
+    Ok(())
+}
+
+fn setup_claude() -> Result<(), Box<dyn std::error::Error>> {
+    let home = std::env::var("HOME").unwrap_or_default();
+    let config_path = PathBuf::from(home).join(".claude").join("settings.json");
+
+    let mut config: serde_json::Value = if config_path.exists() {
+        let content = std::fs::read_to_string(&config_path)?;
+        serde_json::from_str(&content).unwrap_or(serde_json::json!({}))
+    } else {
+        std::fs::create_dir_all(config_path.parent().unwrap())?;
+        serde_json::json!({})
+    };
+
+    let obj = config.as_object_mut().ok_or("config is not an object")?;
+    if !obj.contains_key("mcpServers") {
+        obj.insert("mcpServers".to_string(), serde_json::json!({}));
+    }
+    obj.get_mut("mcpServers")
+        .unwrap()
+        .as_object_mut()
+        .ok_or("mcpServers is not an object")?
+        .insert(
+            "sqmd".to_string(),
+            serde_json::json!({
+                "command": ["sqmd", "mcp"]
+            }),
+        );
+
+    std::fs::write(&config_path, serde_json::to_string_pretty(&config)?)?;
+    println!("{}: registered sqmd MCP server", config_path.display());
+    Ok(())
+}
+
+fn cmd_doctor(check: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
+    println!("sqmd diagnostics\n");
+    let check = check.unwrap_or("all");
+    let checks = if check == "all" {
+        vec!["index", "embed", "model", "mcp", "daemon"]
+    } else {
+        vec![check]
+    };
+
+    let mut all_ok = true;
+
+    for c in &checks {
+        match *c {
+            "index" => {
+                print!("  index:      ");
+                let db_location = db_path();
+                if !db_location.exists() {
+                    println!("MISSING (run `sqmd init`)");
+                    all_ok = false;
+                } else {
+                    let db = sqmd_core::schema::open_fast(&db_location)?;
+                    let chunks: i64 = db.query_row(
+                        "SELECT COUNT(*) FROM chunks WHERE is_deleted = 0",
+                        [],
+                        |r| r.get(0),
+                    )?;
+                    let rels: i64 =
+                        db.query_row("SELECT COUNT(*) FROM relationships", [], |r| r.get(0))?;
+                    let embedded: i64 =
+                        db.query_row("SELECT COUNT(*) FROM embeddings", [], |r| r.get(0))?;
+                    drop(db);
+                    println!(
+                        "OK ({} chunks, {} embedded, {} rels)",
+                        chunks, embedded, rels
+                    );
+                }
+            }
+            "embed" => {
+                #[cfg(feature = "native")]
+                {
+                    print!("  embedder:   ");
+                    match sqmd_core::native::NativeRuntime::new() {
+                        Ok(_) => println!("OK (mxbai-embed-large, Metal GPU)"),
+                        Err(e) => {
+                            println!("FAIL ({})", e);
+                            all_ok = false;
+                        }
+                    }
+                }
+                #[cfg(not(feature = "native"))]
+                {
+                    println!("  embedder:   SKIP (native feature not enabled)");
+                }
+            }
+            "model" => {
+                #[cfg(feature = "native")]
+                {
+                    print!("  model:      ");
+                    let model_env = std::env::var("SQMD_NATIVE_MODEL")
+                        .unwrap_or_else(|_| "mxbai-embed-large".to_string());
+                    let ollama_home = std::env::var("OLLAMA_MODELS").unwrap_or_else(|_| {
+                        format!(
+                            "{}/.ollama/models",
+                            std::env::var("HOME").unwrap_or_default()
+                        )
+                    });
+                    let manifest_path = format!(
+                        "{}/manifests/registry.ollama.ai/library/{}/latest",
+                        ollama_home,
+                        model_env.split(':').next().unwrap_or(&model_env)
+                    );
+                    if std::path::Path::new(&manifest_path).exists() {
+                        println!("OK ({})", model_env);
+                    } else {
+                        println!(
+                            "WARNING (manifest not found for {}, run `ollama pull {}`)",
+                            model_env, model_env
+                        );
+                        all_ok = false;
+                    }
+                }
+            }
+            "mcp" => {
+                print!("  mcp server: ");
+                let exe = std::env::current_exe()?;
+                match std::process::Command::new(&exe).arg("--version").output() {
+                    Ok(o) if o.status.success() => println!("OK"),
+                    _ => {
+                        println!("FAIL");
+                        all_ok = false;
+                    }
+                }
+            }
+            "daemon" => {
+                print!("  daemon:     ");
+                let pid_path = sqmd_home().join("daemon.pid");
+                if pid_path.exists() {
+                    let pid_str = std::fs::read_to_string(&pid_path)?;
+                    match pid_str.trim().parse::<u32>() {
+                        Ok(pid) => {
+                            let alive = unsafe { libc::kill(pid as i32, 0) == 0 };
+                            if alive {
+                                println!("running (PID {})", pid);
+                            } else {
+                                println!("stale PID file (cleaning up)");
+                                let _ = std::fs::remove_file(&pid_path);
+                                all_ok = false;
+                            }
+                        }
+                        Err(_) => {
+                            println!("corrupt PID file");
+                            all_ok = false;
+                        }
+                    }
+                } else {
+                    println!("stopped");
+                }
+            }
+            _ => {
+                println!("  unknown check: {}", c);
+            }
+        }
+    }
+
+    println!();
+    if all_ok {
+        println!("All checks passed.");
+    } else {
+        println!("Some checks failed. See above for details.");
+    }
+    Ok(())
+}
+
+fn cmd_update(force: bool) -> Result<(), Box<dyn std::error::Error>> {
+    let current = std::env!("CARGO_PKG_VERSION");
+    println!("sqmd v{}", current);
+
+    if !force {
+        println!("Checking for updates...");
+    }
+
+    let exe = std::env::current_exe()?;
+    let is_installed = exe.to_string_lossy().contains(".cargo");
+
+    if is_installed {
+        println!("Updating via cargo...");
+        let status = std::process::Command::new("cargo")
+            .args(["install", "sqmd-cli", "--features", "native", "--locked"])
+            .status()?;
+        if status.success() {
+            println!("Updated successfully.");
+        } else {
+            eprintln!("Update failed. Try: cargo install sqmd-cli --features native --locked");
+        }
+    } else {
+        let repo = std::env::var("SQMD_REPO")
+            .unwrap_or_else(|_| "/Users/alexmondello/repos/sqmd".to_string());
+        println!("Building from source at {}...", repo);
+        let status = std::process::Command::new("cargo")
+            .args(["build", "--release", "--features", "native"])
+            .current_dir(&repo)
+            .status()?;
+        if status.success() {
+            let bin = std::path::Path::new(&repo).join("target/release/sqmd");
+            println!("Built: {}", bin.display());
+            println!(
+                "Copy to your PATH or run: cp {} /usr/local/bin/sqmd",
+                bin.display()
+            );
+        } else {
+            eprintln!("Build failed.");
+        }
+    }
+    Ok(())
+}
+
+fn cmd_install(version: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
+    let version = version.unwrap_or("latest");
+    println!("Installing sqmd {}...", version);
+
+    let repo =
+        std::env::var("SQMD_REPO").unwrap_or_else(|_| "/Users/alexmondello/repos/sqmd".to_string());
+    let repo_path = std::path::Path::new(&repo);
+
+    if repo_path.exists() {
+        println!("Found source at {}", repo);
+        let status = std::process::Command::new("cargo")
+            .args(["build", "--release", "--features", "native"])
+            .current_dir(repo_path)
+            .status()?;
+        if !status.success() {
+            eprintln!("Build failed.");
+            std::process::exit(1);
+        }
+        let bin = repo_path.join("target/release/sqmd");
+        if bin.exists() {
+            println!("Built: {}", bin.display());
+            println!("Install: cp {} /usr/local/bin/sqmd", bin.display());
+        }
+    } else {
+        println!("Source not found at {}. Cloning...", repo);
+        let status = std::process::Command::new("git")
+            .args(["clone", "https://github.com/aaf2tbz/sqmd.git", &repo])
+            .status()?;
+        if !status.success() {
+            eprintln!("Clone failed.");
+            std::process::exit(1);
+        }
+        println!("Cloned. Run `sqmd install` again to build.");
+    }
     Ok(())
 }

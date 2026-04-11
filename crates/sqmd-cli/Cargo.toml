@@ -17,3 +17,5 @@ sqmd-core = { path = "../sqmd-core" }
 clap = { version = "4", features = ["derive"] }
 rusqlite = { version = "0.34", features = ["bundled"] }
 serde_json = "1"
+libc = "0.2"
+dirs = "6"
