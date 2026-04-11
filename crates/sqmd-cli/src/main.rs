@@ -322,12 +322,98 @@ fn find_index_db(start: &Path) -> Option<PathBuf> {
             break;
         }
     }
+    if let Some(candidate) = git_common_worktree_index(start) {
+        return Some(candidate);
+    }
     let home = dirs::home_dir()?;
     let home_index = home.join(".sqmd/index.db");
     if home_index.exists() {
         return Some(home_index);
     }
     None
+}
+
+fn git_common_worktree_index(start: &Path) -> Option<PathBuf> {
+    let git_dir = std::process::Command::new("git")
+        .arg("-C")
+        .arg(start)
+        .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .and_then(|output| String::from_utf8(output.stdout).ok())
+        .map(|stdout| stdout.trim().to_string())
+        .filter(|path| !path.is_empty())?;
+
+    let git_dir = PathBuf::from(git_dir);
+    let repo_root = git_dir.parent()?;
+    let candidate = repo_root.join(".sqmd/index.db");
+    if candidate.exists() {
+        return Some(candidate.canonicalize().unwrap_or(candidate));
+    }
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::git_common_worktree_index;
+    use std::fs;
+    use std::process::Command;
+
+    #[test]
+    fn finds_main_worktree_index_from_linked_worktree() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let main = temp.path().join("main");
+        let linked = temp.path().join("linked");
+        fs::create_dir(&main).expect("main dir");
+
+        assert!(
+            Command::new("git")
+                .arg("-C")
+                .arg(&main)
+                .args(["init", "--initial-branch=main"])
+                .status()
+                .expect("git init")
+                .success()
+        );
+        fs::write(main.join("README.md"), "test\n").expect("readme");
+        assert!(
+            Command::new("git")
+                .arg("-C")
+                .arg(&main)
+                .args(["add", "README.md"])
+                .status()
+                .expect("git add")
+                .success()
+        );
+        assert!(
+            Command::new("git")
+                .arg("-C")
+                .arg(&main)
+                .args(["-c", "user.name=sqmd", "-c", "user.email=sqmd@example.com"])
+                .args(["commit", "-m", "init"])
+                .status()
+                .expect("git commit")
+                .success()
+        );
+        assert!(
+            Command::new("git")
+                .arg("-C")
+                .arg(&main)
+                .args(["worktree", "add", "-b", "linked"])
+                .arg(&linked)
+                .status()
+                .expect("git worktree add")
+                .success()
+        );
+
+        let index = main.join(".sqmd/index.db");
+        fs::create_dir_all(index.parent().expect("index parent")).expect("sqmd dir");
+        fs::write(&index, "").expect("index");
+
+        let expected = index.canonicalize().expect("canonical index");
+        assert_eq!(git_common_worktree_index(&linked), Some(expected));
+    }
 }
 
 fn cmd_init() -> Result<(), Box<dyn std::error::Error>> {

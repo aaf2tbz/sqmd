@@ -1,7 +1,7 @@
 use rusqlite::Connection;
 use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Read, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 const SERVER_NAME: &str = "sqmd";
@@ -119,7 +119,7 @@ pub fn run(db_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
         total_chunks
     );
 
-    let root = db_path.parent().unwrap_or(db_path).to_path_buf();
+    let root = project_root_from_index_db(db_path);
     let embed_state: Arc<Mutex<EmbedState>> = Arc::new(Mutex::new(EmbedState {
         total: 0,
         embedded: 0,
@@ -282,6 +282,32 @@ pub fn run(db_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
         } else {
             dbg!(log, "No id — notification, not sending response");
         }
+    }
+}
+
+fn project_root_from_index_db(db_path: &Path) -> PathBuf {
+    db_path
+        .parent()
+        .and_then(|dir| {
+            if dir.file_name().is_some_and(|name| name == ".sqmd") {
+                dir.parent()
+            } else {
+                Some(dir)
+            }
+        })
+        .unwrap_or(db_path)
+        .to_path_buf()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::project_root_from_index_db;
+    use std::path::Path;
+
+    #[test]
+    fn mcp_project_root_is_parent_of_sqmd_dir() {
+        let root = project_root_from_index_db(Path::new("/repo/.sqmd/index.db"));
+        assert_eq!(root, Path::new("/repo"));
     }
 }
 
