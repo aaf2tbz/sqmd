@@ -7,6 +7,7 @@ All notable changes to this project will be documented in this file.
 ### Fixed
 
 - Release workflow now triggers only after `bump-version` completes via `workflow_run`, eliminating the race condition that prevented automatic tag and GitHub release creation.
+- Bump-version workflow now runs with elevated permissions to push to protected main branch.
 
 ## [3.3.1] - 2026-04-11
 
