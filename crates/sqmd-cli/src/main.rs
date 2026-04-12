@@ -20,9 +20,10 @@ struct Cli {
 enum Commands {
     /// Initialize a new index in the current project
     Init,
-    /// Index the project (default: current directory)
+    /// Index the project (default: current directory).
+    /// Pass a file path to re-index a single file without affecting others.
     Index {
-        /// Project root directory
+        /// Project root directory or single file to re-index
         #[arg(default_value = ".")]
         path: PathBuf,
         #[cfg(feature = "native")]
@@ -367,45 +368,37 @@ mod tests {
         let linked = temp.path().join("linked");
         fs::create_dir(&main).expect("main dir");
 
-        assert!(
-            Command::new("git")
-                .arg("-C")
-                .arg(&main)
-                .args(["init", "--initial-branch=main"])
-                .status()
-                .expect("git init")
-                .success()
-        );
+        assert!(Command::new("git")
+            .arg("-C")
+            .arg(&main)
+            .args(["init", "--initial-branch=main"])
+            .status()
+            .expect("git init")
+            .success());
         fs::write(main.join("README.md"), "test\n").expect("readme");
-        assert!(
-            Command::new("git")
-                .arg("-C")
-                .arg(&main)
-                .args(["add", "README.md"])
-                .status()
-                .expect("git add")
-                .success()
-        );
-        assert!(
-            Command::new("git")
-                .arg("-C")
-                .arg(&main)
-                .args(["-c", "user.name=sqmd", "-c", "user.email=sqmd@example.com"])
-                .args(["commit", "-m", "init"])
-                .status()
-                .expect("git commit")
-                .success()
-        );
-        assert!(
-            Command::new("git")
-                .arg("-C")
-                .arg(&main)
-                .args(["worktree", "add", "-b", "linked"])
-                .arg(&linked)
-                .status()
-                .expect("git worktree add")
-                .success()
-        );
+        assert!(Command::new("git")
+            .arg("-C")
+            .arg(&main)
+            .args(["add", "README.md"])
+            .status()
+            .expect("git add")
+            .success());
+        assert!(Command::new("git")
+            .arg("-C")
+            .arg(&main)
+            .args(["-c", "user.name=sqmd", "-c", "user.email=sqmd@example.com"])
+            .args(["commit", "-m", "init"])
+            .status()
+            .expect("git commit")
+            .success());
+        assert!(Command::new("git")
+            .arg("-C")
+            .arg(&main)
+            .args(["worktree", "add", "-b", "linked"])
+            .arg(&linked)
+            .status()
+            .expect("git worktree add")
+            .success());
 
         let index = main.join(".sqmd/index.db");
         fs::create_dir_all(index.parent().expect("index parent")).expect("sqmd dir");
@@ -456,24 +449,48 @@ fn cmd_index(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let start = std::time::Instant::now();
-    let mut indexer = sqmd_core::index::Indexer::new(&mut db, &root);
-    let stats = indexer.index()?;
-    let elapsed = start.elapsed();
 
-    println!("Indexed in {:?}", elapsed);
-    println!(
-        "  {} files scanned, {} indexed, {} skipped, {} deleted",
-        stats.files_scanned, stats.files_indexed, stats.files_skipped, stats.files_deleted
-    );
-    println!(
-        "  {} total chunks, {} relationships",
-        stats.chunks_total, stats.relationships_total
-    );
-    let d = &stats.decisions;
-    println!(
-        "  decisions: {} added, {} updated, {} skipped, {} tombstoned",
-        d.added, d.updated, d.skipped, d.tombstoned
-    );
+    if root.is_file() {
+        let project_root = std::env::current_dir()
+            .map_err(|e| format!("Cannot determine current directory: {e}"))?;
+        let mut indexer = sqmd_core::index::Indexer::new(&mut db, &project_root);
+        match indexer.index_file(&root)? {
+            Some(result) => {
+                let elapsed = start.elapsed();
+                println!("Indexed in {:?}", elapsed);
+                println!("  file: {}", result.file_path);
+                println!(
+                    "  {} chunks, {} relationships",
+                    result.chunks, result.relationships
+                );
+                let d = &result.decisions;
+                println!(
+                    "  decisions: {} added, {} updated, {} skipped, {} tombstoned",
+                    d.added, d.updated, d.skipped, d.tombstoned
+                );
+            }
+            None => println!("File unchanged, skipped."),
+        }
+    } else {
+        let mut indexer = sqmd_core::index::Indexer::new(&mut db, &root);
+        let stats = indexer.index()?;
+        let elapsed = start.elapsed();
+
+        println!("Indexed in {:?}", elapsed);
+        println!(
+            "  {} files scanned, {} indexed, {} skipped, {} deleted",
+            stats.files_scanned, stats.files_indexed, stats.files_skipped, stats.files_deleted
+        );
+        println!(
+            "  {} total chunks, {} relationships",
+            stats.chunks_total, stats.relationships_total
+        );
+        let d = &stats.decisions;
+        println!(
+            "  decisions: {} added, {} updated, {} skipped, {} tombstoned",
+            d.added, d.updated, d.skipped, d.tombstoned
+        );
+    }
 
     Ok(())
 }
