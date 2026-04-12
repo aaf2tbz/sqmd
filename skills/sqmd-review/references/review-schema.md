@@ -14,6 +14,7 @@ Output MUST be a JSON object in a fenced block tagged `pr-review-json`.
       // one or more:
       "sufficient_diff_evidence",
       "authoritative_local_code_reviewed",
+      "changed_file_coverage_audited",
       "local_callers_checked",
       "sqmd_context_cross_checked",
       "targeted_context_included",
@@ -88,6 +89,8 @@ Use when:
 
 Use `authoritative_local_code_reviewed` when the actual git diff/commit blobs and checked-out files were inspected directly. Use `local_callers_checked` when direct `rg`/file reads validated caller impact. Use `sqmd_context_cross_checked` only when sqmd search/dependency output was compared against current local files before being used as evidence.
 
+Use `changed_file_coverage_audited` when every changed source or test file in the selected diff scope was read from the actual checkout or commit blob, mapped to changed symbols/queries/configs/tests, and cross-checked with local caller/import searches before the final verdict. A `no_issues` verdict should include this reason.
+
 Use `sqmd_context_limited` when the sqmd index, dependency graph, or search behavior was unavailable, stale, rooted in another worktree, or too noisy to support a high-confidence cross-module review. This does not by itself make the review low-confidence if the actual local diff and local caller checks are sufficient for the change scope.
 
 ## Example
@@ -99,7 +102,7 @@ Use `sqmd_context_limited` when the sqmd index, dependency graph, or search beha
   "verdict": "comment",
   "confidence": {
     "level": "medium",
-    "reasons": ["sufficient_diff_evidence", "authoritative_local_code_reviewed", "local_callers_checked", "missing_cross_module_context"],
+    "reasons": ["sufficient_diff_evidence", "authoritative_local_code_reviewed", "changed_file_coverage_audited", "local_callers_checked", "missing_cross_module_context"],
     "justification": "The race condition in worker.rs:198 is directly visible in the diff and was checked against the current local worker implementation. The missing error handler in pipeline.ts:41 is provable from the diff. Confidence is medium because WorkerStats type definition (not in diff) is needed to confirm whether the shared state access is safe via TypeScript structural typing."
   },
   "ui_screenshot_needed": false,

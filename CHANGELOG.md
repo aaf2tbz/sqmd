@@ -7,6 +7,7 @@ All notable changes to this project will be documented in this file.
 ### Changed
 
 - `sqmd-review` now treats the actual git diff, commit blobs, and checked-out files as authoritative, using sqmd indexed context as a cross-checked second lens.
+- `sqmd-review` now requires a changed-file coverage audit before a `no_issues` verdict and falls back to direct local searches when sqmd reports existing changed files as tombstoned, missing, or dependency-limited.
 - README refreshed for current MCP tools, background embedding, review skill behavior, and git worktree usage.
 - MCP server version bumped to 3.3.1.
 
