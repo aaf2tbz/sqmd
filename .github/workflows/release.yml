@@ -1,13 +1,10 @@
 name: Release
 
 on:
-  push:
+  workflow_run:
+    workflows: ["Bump Version"]
+    types: [completed]
     branches: [main]
-    paths-ignore:
-      - "docs/**"
-      - "**.md"
-      - ".github/workflows/release.yml"
-      - ".github/workflows/bump-version.yml"
 
 permissions:
   contents: write
@@ -15,6 +12,7 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
     steps:
       - uses: actions/checkout@v4
       - name: Install dependencies
@@ -56,7 +54,6 @@ jobs:
         id: changelog
         if: steps.check_tag.outputs.exists == 'false'
         run: |
-          # Extract the topmost changelog section
           CHANGELOG=$(awk '/^## \[/{n++; next} n==1{print; next} n==2{exit}' CHANGELOG.md | sed '/^$/d;1d')
           {
             echo "body<<EOF"
