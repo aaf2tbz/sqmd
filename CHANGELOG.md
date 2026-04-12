@@ -2,6 +2,24 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.4.0] - 2026-04-12
+
+### Changed
+
+- **sqmd-review** rewritten as a git-connected, iterated review workflow.
+  - Adds PR-aware mode: reads prior bot review comments via `gh api`, tracks
+    dismissed/rebutted/addressed findings to prevent re-flagging.
+  - Adds git scope detection: staged, uncommitted, branch diff, single commit,
+    or PR-linked review with automatic base branch detection.
+  - Improves context assembly: hunk-level file contents, `sqmd_deps` for blast
+    radius, structural search via `sqmd_search` and `sqmd_get`.
+  - Switches to FTS + entity graph only (no embedding/vector search needed).
+  - Adds iteration loop: fix findings → re-review → repeat until `no_issues`
+    verdict before pushing. The goal is zero remote bot comments.
+  - Adds prior_review_status output field tracking suppression counts.
+  - Added dismissal signal detection table for human replies.
+  - Added `no_duplicate_imports` and `no_unused_imports` to convention checklist.
+
 ## [3.3.2] - 2026-04-12
 
 ### Fixed

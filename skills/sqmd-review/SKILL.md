@@ -19,22 +19,45 @@ comments by catching issues locally before pushing. Adapted from
 
 ## Design Philosophy
 
-The goal is **zero-surprise pushes**: every issue the remote bot would flag should be
+The goal is **zero-comment pushes**: every issue the remote bot would flag should be
 caught here first. This means:
 
-- **Full codebase context** via sqmd, not just the diff
+- **Full codebase context** via sqmd structural search (FTS + entity graph), not just the diff
 - **Prior review awareness** — read dismissed/rebutted bot comments so we don't re-flag them
 - **Blast-radius analysis** — dependency graphs show what breaks when signatures change
 - **Hunk-level precision** — findings reference exact changed lines, not whole files
 - **Anti-hallucination by construction** — every finding must quote verbatim code from
   context the agent actually read
+- **Iterate until clean** — if the review finds issues, fix them, re-review, repeat until
+  the verdict is `no_issues`. Only then commit and push. The goal is to reduce remote
+  bot review comments to zero.
+
+### Important: sqmd is FTS + entity graph only
+
+sqmd-review uses sqmd's **structural search tools** (FTS, entity graph, community detection,
+dependency graphs) — **not** semantic/embedding search. Do not use `sqmd_embed` or
+`sqmd_context` (which depends on embeddings). The structural tools are sufficient because
+they provide dependency graphs (`sqmd_deps`), entity expansion (`sqmd_search`), and
+code chunk retrieval (`sqmd_get`, `sqmd_cat`, `sqmd_ls`) without needing vector embeddings.
 
 ## Workflow
 
 ```
 1. Detect scope → 2. Ensure sqmd index → 3. Gather git context → 4. Assemble review context
-→ 5. Run structured review → 6. Present findings
+→ 5. Run structured review → 6. Fix findings → 7. Re-review → repeat until clean → push
 ```
+
+### Iteration loop
+
+The review is not a one-shot pass. It is a loop:
+
+```
+review → findings? → fix → review again → findings? → fix → review again → ... → no_issues → push
+```
+
+After each fix, re-run the full review workflow (steps 1-5) against the updated diff.
+The review must verify that the fixes didn't introduce new issues. Continue until the
+verdict is `no_issues` with high confidence. Only then commit and push.
 
 ## Step 1 — Detect Scope
 
@@ -74,14 +97,15 @@ Store the PR body — the review must verify the implementation matches the stat
 The sqmd index must be fresh before review. Check and update:
 
 ```bash
-# Check if index exists and is recent
+# Check if index exists
 sqmd_stats
-# If empty or stale (>1 hour since last index), re-index changed files
-sqmd_index_file  # index changed files only (fast incremental)
+# Re-index changed files (fast incremental)
+sqmd_index_file
 ```
 
-If the index is completely empty, run `sqmd embed` first. The review CANNOT proceed
-without an indexed codebase — sqmd context is the whole point.
+**Do not run `sqmd_embed`** — sqmd-review uses FTS + entity graph search, not embeddings.
+The index provides structural context (dependency graphs, entity relationships, code chunks)
+which is sufficient for review.
 
 ## Step 3 — Gather Git Context
 
@@ -159,17 +183,23 @@ Focus on **dependents** (files that import FROM the changed file). For each depe
 use `sqmd_get` to read the relevant import lines. If a changed function's signature shifts,
 check whether callers pass the right arguments.
 
-### 4d — Semantic search
+### 4d — Structural search
 
-For each changed file, search sqmd for relevant context:
+Use sqmd's FTS and entity graph tools (NOT embedding-based search):
 
 ```
-# Symbol-level context for the file
+# Find relevant chunks by symbol name
 sqmd_search(query="<primary exported struct/function name>", file_filter="<file_path>", top_k=5)
 
-# Broader context for what the change does
-sqmd_context(query="<description of the change, inferred from diff + commit message>", top_k=10)
+# List chunks in a file
+sqmd_ls(file_filter="<file_path>", type_filter="function")
+
+# Get a specific chunk by file + line
+sqmd_get(file_path="<path>", line=<number>)
 ```
+
+**Do not use** `sqmd_context`, `sqmd_embed`, or `sqmd_embed_start` — these depend on
+vector embeddings which are not needed for structural code review.
 
 ### 4e — Context assembly
 
@@ -208,8 +238,8 @@ For each dependent file:
 <relevant import/usage lines with line numbers>
 <note if signature change may break this caller>
 
-### sqmd Context
-<ranked chunks from sqmd_search and sqmd_context>
+### sqmd Structural Context
+<chunks from sqmd_search and sqmd_get>
 ```
 
 ## Step 5 — Run Structured Review
@@ -295,27 +325,31 @@ Output a JSON object in a fenced block tagged exactly `pr-review-json`.
 
 See [references/review-schema.md](references/review-schema.md) for the full output schema.
 
-## Step 6 — Present Findings
+## Step 6 — Fix Findings and Re-review
 
-Parse the structured JSON output and present:
+This is the critical loop that separates sqmd-review from a one-shot linter:
 
-1. **Summary** — one paragraph overview
-2. **Verdict** — `no_issues`, `comment`, or `request_changes`
-3. **Confidence** — level with justification
-4. **Findings** — grouped by severity:
-   - **Blocking**: must fix before push (bugs, security, data integrity)
-   - **Warning**: should discuss (logic concerns, convention drift)
-   - **Nitpick**: minor observations
+1. Present findings grouped by severity
+2. Fix all blocking and warning findings
+3. Re-run the full review workflow (steps 1-5) against the updated diff
+4. If new findings appear, fix them and repeat
+5. Continue until verdict is `no_issues` with high confidence
+6. Only then commit and push
 
-For each finding, show file, line number, and the issue. Every finding MUST include
-a verbatim quote of the code it references. If sqmd context was used to identify the
-issue, note what search/context supported the finding.
+**Rules for the iteration loop:**
+- Each iteration must re-read the full diff, not just the new changes
+- Each iteration must re-check dependency blast radius for any files that changed
+- Each iteration must verify prior findings are still addressed (not re-introduced)
+- Each iteration must run the convention checklist from scratch
+- Log the iteration number so the user can see progress
 
-### Post-review action
+## Step 7 — Push
 
-If the verdict is `request_changes`, list the specific fixes needed before pushing.
-If the verdict is `no_issues`, confirm the code is ready for push but note that human
-review is still recommended.
+After the verdict is `no_issues`:
+1. Run tests
+2. Run lint
+3. Update PR body with review round summary
+4. Commit and push
 
 ## Resources
 
