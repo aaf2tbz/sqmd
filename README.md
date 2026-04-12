@@ -102,17 +102,36 @@ cp -r skills/sqmd-review ~/.claude/skills/
 
 ### sqmd-review
 
-Local self-review for commits, staged changes, or uncommitted diffs. Adapted from [pr-reviewer](https://github.com/NicholaiVogel/pr-reviewer). Runs offline — no GitHub required.
+Git-connected code review using sqmd-indexed codebase context and GitHub PR history.
+Runs locally before pushing to prevent bot review comments before they happen. Adapted
+from [pr-reviewer](https://github.com/NicholaiVogel/pr-reviewer).
 
-Before pushing, the agent reads the actual git diff and checked-out files first, audits changed-file coverage, then uses sqmd's index as a second lens for dependency impact and semantic context. If sqmd reports a changed file as missing or tombstoned, or returns an incomplete dependency graph, the reviewer falls back to direct local caller/import searches and reports the sqmd limitation as a tool observation instead of treating indexed context as authoritative. Findings are grouped by severity (`blocking`, `warning`, `nitpick`) with confidence levels and tool-health observations.
+**How it works:**
+
+1. Detects scope (staged, uncommitted, branch diff, commit, or PR-linked via `gh api`)
+2. Reads prior bot review comments and tracks dismissed/rebutted/addressed findings
+3. Assembles context from the git diff, `sqmd_deps` blast radius, and `sqmd_search`
+   structural search (FTS + entity graph — no embeddings needed)
+4. Runs a structured review with anti-hallucination rules and a convention checklist
+5. **Iterates** — fixes findings, re-reviews, repeats until verdict is `no_issues`
+6. Only then commits and pushes
+
+The goal is **zero-comment pushes**: every issue the remote bot would flag is caught
+and fixed locally first. The review reads prior PR comments so dismissed findings
+are never re-flagged.
+
+**Works in two modes:**
+- **Offline** — uncommitted/staged/branch diffs, no GitHub connection needed
+- **PR-aware** — linked PR fetches prior review comments via `gh api` for
+  dismissal tracking and verification against stated PR goals
 
 Useful prompts:
 
 - "review my changes"
-- "self-review"
-- "review this commit"
 - "review before push"
-- "check my diff"
+- "review this commit"
+- "review PR #42"
+- "self-review"
 
 ## Supported Harnesses
 
