@@ -19,10 +19,11 @@ Core rule: the actual git diff and local files are authoritative. sqmd is a seco
 
 1. Detect scope: staged changes, uncommitted diff, a single commit, or branch diff against a verified base
 2. Gather authoritative local context from git and the checked-out codebase
-3. Verify sqmd is pointed at the same repository/worktree before using mutating index operations
-4. Gather sqmd context and explicitly cross-check it against local code
-5. Run structured review against the combined local + sqmd context
-6. Output structured JSON with findings and any tool-health observations
+3. Run a changed-file coverage audit before considering sqmd output
+4. Verify sqmd is pointed at the same repository/worktree before using mutating index operations
+5. Gather sqmd context and explicitly cross-check it against local code
+6. Run structured review against the combined local + sqmd context
+7. Output structured JSON with findings and any tool-health observations
 
 ## Step 1 — Detect Scope
 
@@ -107,7 +108,29 @@ The structured review must be able to answer from local code:
 
 If sqmd later disagrees with local files, prefer local files and report the sqmd disagreement as a tool observation.
 
-## Step 3 — Verify sqmd Root and Index Safety
+## Step 3 — Changed-File Coverage Audit
+
+Before using sqmd output as review evidence, prove that the local review covers the entire diff. This is the guardrail that keeps the local reviewer aligned with repository-hosted PR reviewers when sqmd indexing is stale or incomplete.
+
+Build a changed-file table from the selected diff scope:
+
+```markdown
+| file | status | local content read | changed symbols/queries/configs | local caller search | sqmd status |
+```
+
+For each changed source or test file:
+
+- Mark `local content read` only after reading the current file or commit blob from the actual checkout.
+- Identify changed functions, exported types, config keys, SQL queries, worker entry points, or test cases from the diff.
+- Run at least one direct local caller/import/search check for each changed symbol or module boundary. Use `rg`, `git grep`, `cargo check`, `tsc`, or nearby file reads as appropriate for the repo.
+- If the file exists in the checkout but sqmd reports it as deleted, tombstoned, absent from `sqmd_ls`, or missing from dependency output, mark sqmd status as `stale` and keep reviewing with local evidence.
+- Do not let `sqmd_context_cross_checked` appear in confidence reasons unless every sqmd result used as evidence was compared with the current local file or commit blob.
+
+No-issue reviews require this audit. If any changed source/test file was not read locally, the review is incomplete and must not return `no_issues`.
+
+When a changed test file is new or recently renamed, expect sqmd to be wrong more often. New test files must still be reviewed from the checkout and cross-checked against the production code they exercise.
+
+## Step 4 — Verify sqmd Root and Index Safety
 
 Before calling any sqmd mutating operation such as `sqmd_index_file`, verify that sqmd is serving the same repository/worktree being reviewed. This verification supplements the local review; it does not replace it.
 
@@ -118,14 +141,14 @@ Before calling any sqmd mutating operation such as `sqmd_index_file`, verify tha
 
 Only call `sqmd_index_file(path=<file>)` after this root check passes.
 
-If sqmd appears rooted elsewhere, returns stale chunks that contradict local file content, returns unrelated paths despite a `file_filter`, or `sqmd_index_file` reports an existing local file as deleted/tombstoned:
+If sqmd appears rooted elsewhere, returns stale chunks that contradict local file content, returns unrelated paths despite a `file_filter`, omits a changed file that exists in the checkout, or `sqmd_index_file` reports an existing local file as deleted/tombstoned:
 
 - Stop using mutating sqmd index operations for this review.
 - Continue the code review using the authoritative local context from Step 2.
 - Include a `tool_observations` entry in the final JSON explaining the sqmd root/index mismatch.
 - Lower confidence if missing sqmd context materially limits cross-module validation.
 
-## Step 4 — Gather and Cross-Check sqmd Context
+## Step 5 — Gather and Cross-Check sqmd Context
 
 For each changed file, use sqmd tools to build indexed codebase context after the local context is assembled:
 
@@ -140,6 +163,28 @@ sqmd_deps(path=<file_path>, depth=1)
 Include files that depend on the changed file (dependents) — these are the blast radius.
 
 If `sqmd_deps` returns no dependencies for a file that clearly imports or is imported by other code, record that as a tool observation and compensate with the direct import/caller searches from Step 2.
+
+When `sqmd_deps` is empty, incomplete, or stale for a changed file, run fallback local dependency checks before reviewing:
+
+```
+rg -n "from ['\"]<module>|import .*<module>|require\\(['\"]<module>" .
+rg -n "<exported-symbol>|<function-name>|<type-name>|<config-key>|<table-name>" .
+git grep -n "<symbol-or-module>" <base> -- .
+```
+
+For Rust, also inspect `mod` declarations and direct crate references:
+
+```
+rg -n "mod <module>|use .*<symbol>|<symbol>\\(" crates .
+```
+
+For TypeScript/JavaScript, include type-only imports and barrel exports:
+
+```
+rg -n "export .*from ['\"]<module>|import type .*<symbol>|Pick<.*<symbol>" .
+```
+
+Any final review that relied on these fallbacks should include `local_callers_checked` and `sqmd_context_limited` in the confidence reasons.
 
 ### Semantic search context
 
@@ -207,7 +252,7 @@ For each changed file's dependents:
 <scope/index/search/dependency limitations, if any>
 ```
 
-## Step 5 — Run Structured Review
+## Step 6 — Run Structured Review
 
 Use the assembled context with the review prompt below. Output MUST be structured JSON in a fenced block tagged `pr-review-json`.
 
@@ -231,6 +276,7 @@ Instructions:
    Flag deviations only when they affect correctness, consistency, or maintainability.
 4. Cross-reference changes against local caller searches and sqmd dependency impact. If a changed function's signature
    or behavior shifts, verify callers are updated or that the change is backward-compatible using the actual checkout.
+   Do not accept an empty or stale sqmd dependency graph as proof of no callers.
 5. Do not turn adjacent architecture preferences into blockers. A blocker must be grounded
    in concrete evidence from the changed code, local codebase context, or locally verified sqmd context and must directly affect
    correctness, security, or data integrity.
@@ -238,6 +284,8 @@ Instructions:
    or wrong local base is a tool observation unless it directly proves a code defect.
 7. Never raise a finding from sqmd-only evidence. Confirm it against the actual diff,
    checked-out file contents, commit blobs, or direct local searches before including it.
+8. Before returning `no_issues`, verify the changed-file coverage audit is complete, every changed source/test file was read
+   from the actual checkout or commit blob, and any stale sqmd dependency/search result was compensated by direct local search.
 
 Do not approve or state the code is safe. Your role is to flag issues or signal readiness
 for human review.
@@ -247,7 +295,7 @@ Output a JSON object in a fenced block tagged exactly `pr-review-json`.
 
 See [references/review-schema.md](references/review-schema.md) for the full output schema.
 
-## Step 6 — Present Findings
+## Step 7 — Present Findings
 
 Parse the structured JSON output and present:
 

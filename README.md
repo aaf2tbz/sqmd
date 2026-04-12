@@ -104,7 +104,7 @@ cp -r skills/sqmd-review ~/.claude/skills/
 
 Local self-review for commits, staged changes, or uncommitted diffs. Adapted from [pr-reviewer](https://github.com/NicholaiVogel/pr-reviewer). Runs offline — no GitHub required.
 
-Before pushing, the agent reads the actual git diff and checked-out files first, then uses sqmd's index as a second lens for dependency impact and semantic context. This keeps local code authoritative while still giving the reviewer codebase-wide recall. Findings are grouped by severity (`blocking`, `warning`, `nitpick`) with confidence levels and tool-health observations.
+Before pushing, the agent reads the actual git diff and checked-out files first, audits changed-file coverage, then uses sqmd's index as a second lens for dependency impact and semantic context. If sqmd reports a changed file as missing or tombstoned, or returns an incomplete dependency graph, the reviewer falls back to direct local caller/import searches and reports the sqmd limitation as a tool observation instead of treating indexed context as authoritative. Findings are grouped by severity (`blocking`, `warning`, `nitpick`) with confidence levels and tool-health observations.
 
 Useful prompts:
 
