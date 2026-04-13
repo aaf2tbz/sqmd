@@ -571,6 +571,11 @@ fn tools() -> Vec<Value> {
             "description": "Stop a running embedding job. Will stop after the current batch completes.",
             "inputSchema": { "type": "object", "properties": {} }
         }),
+        json!({
+            "name": "health",
+            "description": "Check index health — integrity, orphan counts, index/WAL size, FTS/vector consistency.",
+            "inputSchema": { "type": "object", "properties": {} }
+        }),
     ]
 }
 
@@ -595,6 +600,7 @@ fn call_tool(
         "embed_stop" => tool_embed_stop(embed_state),
         "ls" => tool_ls(db, args),
         "cat" => tool_cat(db, args),
+        "health" => tool_health(db),
         _ => Err(format!("Unknown tool: {name}").into()),
     }
 }
@@ -1282,6 +1288,62 @@ fn tool_cat(db: &Connection, args: &Value) -> Result<Vec<Value>, Box<dyn std::er
             "text": format!("No chunk found with ID {}", id)
         })]),
     }
+}
+
+fn tool_health(db: &Connection) -> Result<Vec<Value>, Box<dyn std::error::Error>> {
+    let report = crate::maintain::run_health_check(db)?;
+    let text = format!(
+        "# Index Health\n\n\
+         - **Integrity**: {}\n\
+         - **Chunks**: {} live, {} tombstoned\n\
+         - **Relationships**: {}\n\
+         - **Embeddings**: {}\n\
+         - **Entities**: {}\n\
+         - **FTS entries**: {}\n\
+         - **Vector entries**: {} (chunks), {} (hints)\n\
+         - **Index size**: {} bytes\n\
+         - **WAL size**: {} bytes\n",
+        if report.integrity_ok {
+            "OK"
+        } else {
+            report.integrity_error.as_deref().unwrap_or("FAILED")
+        },
+        report.live_chunks,
+        report.tombstoned_chunks,
+        report.total_relationships,
+        report.total_embeddings,
+        report.total_entities,
+        report.fts_entries,
+        report.vec_entries,
+        report.hints_vec_entries,
+        report.index_size_bytes,
+        report.wal_size_bytes,
+    );
+    let total_orphans = report.orphan_hints
+        + report.orphan_relationships
+        + report.orphan_entity_attributes
+        + report.orphan_embeddings
+        + report.orphan_entity_deps;
+    let mut text = text;
+    if total_orphans > 0 {
+        text.push_str(&format!(
+            "\n**Orphans**: {} total (run `sqmd maintain clean-orphans` to fix)\n\
+             - Hints: {}\n\
+             - Relationships: {}\n\
+             - Entity attributes: {}\n\
+             - Embeddings: {}\n\
+             - Entity deps: {}\n",
+            total_orphans,
+            report.orphan_hints,
+            report.orphan_relationships,
+            report.orphan_entity_attributes,
+            report.orphan_embeddings,
+            report.orphan_entity_deps,
+        ));
+    } else {
+        text.push_str("\n**Orphans**: none\n");
+    }
+    Ok(vec![json!({ "type": "text", "text": text })])
 }
 
 use rusqlite::params;

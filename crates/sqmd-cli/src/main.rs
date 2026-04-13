@@ -16,6 +16,20 @@ struct Cli {
     json: bool,
 }
 
+#[derive(Subcommand, Clone)]
+enum MaintainAction {
+    /// Run all health checks and print report
+    Health,
+    /// Clean orphaned rows from all tables
+    CleanOrphans,
+    /// Reclaim WAL space (VACUUM)
+    Vacuum,
+    /// Update query planner statistics (ANALYZE)
+    Analyze,
+    /// Run clean-orphans + vacuum + analyze
+    Compact,
+}
+
 #[derive(Subcommand)]
 enum Commands {
     /// Initialize a new index in the current project
@@ -146,6 +160,11 @@ enum Commands {
         #[arg(default_value = "30")]
         days: i64,
     },
+    /// Check index health and run maintenance tasks
+    Maintain {
+        #[command(subcommand)]
+        action: MaintainAction,
+    },
     /// Generate prospective search hints using native llama.cpp
     #[cfg(feature = "native")]
     Hints {
@@ -258,6 +277,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         Commands::Entities { r#type, limit } => cmd_entities(r#type.as_deref(), limit, cli.json),
         Commands::EntityDeps { name, depth } => cmd_entity_deps(&name, depth),
         Commands::Prune { days } => cmd_prune(days),
+        Commands::Maintain { action } => cmd_maintain(action, cli.json),
         #[cfg(feature = "native")]
         Commands::Hints {
             min_importance,
@@ -1084,6 +1104,103 @@ fn cmd_prune(days: i64) -> Result<(), Box<dyn std::error::Error>> {
         "Purged {} tombstoned chunks older than {} days.",
         purged, days
     );
+    drop(db);
+    Ok(())
+}
+
+fn cmd_maintain(action: MaintainAction, json: bool) -> Result<(), Box<dyn std::error::Error>> {
+    let mut db = ensure_db()?;
+    match action {
+        MaintainAction::Health => {
+            let report = sqmd_core::maintain::run_health_check(&db)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                println!("# Index Health Report\n");
+                println!(
+                    "Integrity: {}",
+                    if report.integrity_ok {
+                        "OK"
+                    } else {
+                        report.integrity_error.as_deref().unwrap_or("UNKNOWN")
+                    }
+                );
+                println!(
+                    "Chunks: {} live, {} tombstoned",
+                    report.live_chunks, report.tombstoned_chunks
+                );
+                println!("Relationships: {}", report.total_relationships);
+                println!("Embeddings: {}", report.total_embeddings);
+                println!("Entities: {}", report.total_entities);
+                println!("FTS entries: {}", report.fts_entries);
+                println!(
+                    "Vector entries: {} (chunks), {} (hints)",
+                    report.vec_entries, report.hints_vec_entries
+                );
+                println!("Index size: {} bytes", report.index_size_bytes);
+                println!("WAL size: {} bytes", report.wal_size_bytes);
+                println!();
+                let total_orphans = report.orphan_hints
+                    + report.orphan_relationships
+                    + report.orphan_entity_attributes
+                    + report.orphan_embeddings
+                    + report.orphan_entity_deps;
+                if total_orphans > 0 {
+                    println!("Orphans (run `sqmd maintain clean-orphans` to fix):");
+                    println!("  Hints: {}", report.orphan_hints);
+                    println!("  Relationships: {}", report.orphan_relationships);
+                    println!("  Entity attributes: {}", report.orphan_entity_attributes);
+                    println!("  Embeddings: {}", report.orphan_embeddings);
+                    println!("  Entity deps: {}", report.orphan_entity_deps);
+                } else {
+                    println!("Orphans: none");
+                }
+            }
+        }
+        MaintainAction::CleanOrphans => {
+            let result = sqmd_core::maintain::clean_orphans(&mut db)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&result)?);
+            } else {
+                println!("Cleaned orphans:");
+                println!("  Hints: {}", result.hints);
+                println!("  Relationships: {}", result.relationships);
+                println!("  Entity attributes: {}", result.entity_attributes);
+                println!("  Embeddings: {}", result.embeddings);
+                println!("  Entity deps: {}", result.entity_deps);
+                let total: usize = result.hints
+                    + result.relationships
+                    + result.entity_attributes
+                    + result.embeddings
+                    + result.entity_deps;
+                println!("Total: {} rows removed", total);
+            }
+        }
+        MaintainAction::Vacuum => {
+            sqmd_core::maintain::vacuum(&mut db)?;
+            println!("VACUUM complete.");
+        }
+        MaintainAction::Analyze => {
+            sqmd_core::maintain::analyze(&db)?;
+            println!("ANALYZE complete.");
+        }
+        MaintainAction::Compact => {
+            let result = sqmd_core::maintain::compact(&mut db)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&result)?);
+            } else {
+                println!("Compact complete:");
+                let total: usize = result.orphans.hints
+                    + result.orphans.relationships
+                    + result.orphans.entity_attributes
+                    + result.orphans.embeddings
+                    + result.orphans.entity_deps;
+                println!("  Orphans removed: {}", total);
+                println!("  VACUUM: done");
+                println!("  ANALYZE: done");
+            }
+        }
+    }
     drop(db);
     Ok(())
 }
