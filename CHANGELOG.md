@@ -2,6 +2,27 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.5.0] - 2026-04-12
+
+### Added
+
+- **Plugin system** (`plugin.rs`) — JSON-over-stdio plugin interface for custom chunkers and search layers. Plugins declare supported extensions/languages, communicate via structured JSON messages, and run as child processes with configurable timeouts.
+- **Per-project configuration** (`.sqmd/config.toml`) — configurable SQLite pragmas (mmap, cache, WAL, busy timeout), search parameters, chunking settings, importance overrides, hint/embed/watch/context tuning.
+- **Multi-project registry** — `sqmd projects` commands (add, remove, list, search) for cross-project search. Projects registered in `~/.sqmd/projects.toml`.
+- **Index health checks and maintenance** — `sqmd maintain` with subcommands: `health` (integrity, orphan counts, index/WAL size, FTS/vector consistency), `clean-orphans`, `vacuum`, `analyze`, `compact` (all three combined).
+- **Language-aware import resolution** (`import_resolver.rs`) — resolves TypeScript path aliases via `tsconfig.json`, Rust crate paths via `Cargo.toml` workspace, Go module paths via `go.mod`, and Python packages via `pyproject.toml`.
+- **Tree-sitter AST-based call extraction** (`call_extractor.rs`) — replaces regex-based call graph with per-language AST walking for TypeScript, Rust, Python, Go, Java, C, C++, and Ruby.
+- **Entity graph redesign** — `overrides` and `references` relationship types, `detect_overrides()` for class method override detection, expanded relational hint generation for new relationship types.
+- **MCP tools: `health` and `projects`** — index health report and multi-project search via the MCP server.
+- **Context assembly improvements** — community-aware dependency expansion with configurable boost, budget-aware dep chunk limits, `max_dep_chunks` and `community_boost` parameters.
+
+### Changed
+
+- Schema `open()` and `init()` now accept `ProjectConfig` for pragma tuning.
+- `get_related_chunks()` takes community paths, estimated chunk budget, and community boost for smarter dep expansion.
+- `materialize_entity_deps_to_relationships()` includes `overrides` and `references` dep types.
+- `purge_tombstones()` uses `updated_at` cutoff instead of `deleted_at` for more accurate pruning.
+
 ## [3.4.1] - 2026-04-12
 
 ### Fixed

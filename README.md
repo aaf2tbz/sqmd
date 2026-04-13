@@ -222,6 +222,68 @@ sqmd mcp
 
 When launched from the linked worktree, sqmd asks git for the common git directory, finds the main checkout's `.sqmd/index.db`, and still treats file paths as project-relative. When `.sqmd/` lives at `~/.sqmd/` (global index), the MCP server falls back to CWD for path resolution to prevent broken relative paths.
 
+### Per-Project Configuration
+
+Create `.sqmd/config.toml` in your project root to override defaults:
+
+```toml
+[sqlite]
+mmap_size = "512MB"
+cache_size = "16000 pages"
+busy_timeout = 10000
+
+[search]
+default_top_k = 20
+
+[chunking]
+max_chunk_lines = 200
+
+[importance]
+function = 0.8
+class = 0.9
+
+[hints]
+min_importance = 0.6
+
+[embed]
+batch_size = 16
+
+[context]
+max_dep_chunks = 100
+community_boost = 0.15
+```
+
+All settings are optional — missing values use built-in defaults.
+
+### Plugin System
+
+sqmd supports custom chunkers and search layers via a JSON-over-stdio plugin interface. Configure plugins in `.sqmd/config.toml`:
+
+```toml
+[[plugin]]
+name = "protobuf-chunker"
+type = "chunker"
+command = ["python", "plugins/protobuf_chunker.py"]
+extensions = [".proto"]
+languages = ["protobuf"]
+priority = 10
+timeout_secs = 15
+```
+
+Plugins communicate via structured JSON messages on stdin/stdout. See the plugin module source for the full protocol spec.
+
+### Multi-Project Search
+
+Register multiple projects and search across them from a single query:
+
+```bash
+sqmd projects add frontend ~/projects/frontend
+sqmd projects add backend ~/projects/backend
+sqmd projects search "authentication"
+```
+
+The multi-project registry lives at `~/.sqmd/projects.toml`.
+
 ## What Gets Indexed
 
 Every function, method, class, struct, enum, trait, interface, type alias, import, module, and macro definition is extracted as a named chunk with:
@@ -332,9 +394,12 @@ source files
     | tree-sitter (per-language grammar -> AST)
     | walk declarations -> named chunks (function, class, struct, ...)
     | extract imports -> relationship edges
-    | extract structural relations -> entity_dependencies
-    | promote symbols -> entities (knowledge graph nodes)
-    | generate template hints -> hints (search anchors)
+     | extract structural relations -> entity_dependencies
+     | detect overrides -> overrides relationships
+     | promote symbols -> entities (knowledge graph nodes)
+     | resolve imports -> language-aware path resolution (tsconfig, Cargo, go.mod, pyproject)
+     | extract calls -> tree-sitter AST-based call extraction
+     | generate template hints -> hints (search anchors)
     | detect communities -> module + type-hierarchy groupings
     | content-hash pipeline (skip / update / tombstone)
     |
@@ -347,12 +412,12 @@ SQLite database (schema v14)
     |-- chunks           (raw code + metadata)
     |-- chunks_fts       (FTS5 full-text index)
     |-- chunks_vec       (1024-dim vector index, float32)
-    |-- relationships    (imports, contains, calls)
-    |-- entity_dependencies (extends, implements, contains)
-    |-- entities         (symbol-level graph nodes)
-    |-- entity_aspects   (exports, implementation, constraints)
-    |-- entity_attributes (chunk-level entity annotations)
-    |-- hints + hints_fts (search hints)
+     |-- relationships    (imports, contains, calls, overrides, references)
+     |-- entity_dependencies (extends, implements, contains, overrides, references)
+     |-- entities         (symbol-level graph nodes)
+     |-- entity_aspects   (exports, implementation, constraints)
+     |-- entity_attributes (chunk-level entity annotations)
+     |-- hints + hints_fts (search hints)
     |-- hints_vec        (1024-dim vector index over hints)
     |-- communities      (module, type-hierarchy summaries)
     |-- embeddings       (vector blob fallback)
@@ -470,7 +535,27 @@ sqmd doctor --check embed            # check embedding setup specifically
 sqmd update                          # update sqmd to latest version
 sqmd install                         # install sqmd from source
 sqmd reset                           # delete the index
-sqmd prune 30                        # purge soft-deleted chunks older than 30 days
+ sqmd prune 30                        # purge soft-deleted chunks older than 30 days
+ ```
+
+### Maintenance
+
+```bash
+sqmd maintain health                  # full index health report
+sqmd maintain clean-orphans           # remove orphaned rows from all tables
+sqmd maintain vacuum                  # reclaim WAL space
+sqmd maintain analyze                 # update query planner statistics
+sqmd maintain compact                 # clean-orphans + vacuum + analyze
+```
+
+### Multi-Project
+
+```bash
+sqmd projects add my-project /path/to/project   # register a project
+sqmd projects remove my-project                  # unregister a project
+sqmd projects list                               # list registered projects
+sqmd projects search "authentication"            # search across all projects
+sqmd projects search "auth" --project proj1,proj2 --top-k 20
 ```
 
 ### Hint Generation
@@ -493,12 +578,12 @@ After generating hints, re-run `sqmd embed` to embed the hint text into `hints_v
 sqmd mcp
 ```
 
-Exposes 12 tools:
+Exposes 14 tools:
 
 | Tool | Description |
 |------|-------------|
 | `search` | Layered search with query, top_k, file/type/source filters |
-| `context` | Assemble token-budgeted context with dependency expansion |
+| `context` | Assemble token-budgeted context with dependency expansion and community boosting |
 | `deps` | Get dependencies and dependents for a file path |
 | `stats` | Index statistics (files, chunks, embeddings, entities, communities) |
 | `get` | Get chunk by file path and line number |
@@ -509,6 +594,8 @@ Exposes 12 tools:
 | `embed_stop` | Request a graceful stop after the current batch |
 | `ls` | List chunks with file/type/language filters |
 | `cat` | Get full chunk content by ID |
+| `health` | Check index health — integrity, orphans, index/WAL size, FTS/vector consistency |
+| `projects` | List, add, remove, or cross-project search via the multi-project registry |
 
 Agents can index new files, keep embeddings up-to-date, and browse the codebase entirely through MCP — no CLI needed.
 
