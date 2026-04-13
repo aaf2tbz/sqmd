@@ -31,6 +31,7 @@ tree-sitter-qmljs = "0.3"
 rayon = "1.10"
 chrono = { version = "0.4", features = ["serde"] }
 notify = "7"
+dirs = "5"
 tempfile = "3"
 regex = "1"
 tree-sitter-ruby = "0.23"

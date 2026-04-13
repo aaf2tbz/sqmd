@@ -286,7 +286,7 @@ pub fn run(db_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn project_root_from_index_db(db_path: &Path) -> PathBuf {
-    db_path
+    let inferred = db_path
         .parent()
         .and_then(|dir| {
             if dir.file_name().is_some_and(|name| name == ".sqmd") {
@@ -296,7 +296,27 @@ fn project_root_from_index_db(db_path: &Path) -> PathBuf {
             }
         })
         .unwrap_or(db_path)
-        .to_path_buf()
+        .to_path_buf();
+
+    let home = dirs::home_dir();
+    let is_home_dir = home
+        .as_ref()
+        .is_some_and(|h| inferred == *h || inferred.as_os_str().is_empty());
+
+    if is_home_dir {
+        if let Ok(cwd) = std::env::current_dir() {
+            if cwd != inferred {
+                eprintln!(
+                    "[sqmd mcp] WARNING: index at {:?} resolves to home directory as project root. \
+                     Using CWD {:?} instead. Relative paths in chunks may not match.",
+                    db_path, cwd
+                );
+                return cwd;
+            }
+        }
+    }
+
+    inferred
 }
 
 #[cfg(test)]
@@ -308,6 +328,24 @@ mod tests {
     fn mcp_project_root_is_parent_of_sqmd_dir() {
         let root = project_root_from_index_db(Path::new("/repo/.sqmd/index.db"));
         assert_eq!(root, Path::new("/repo"));
+    }
+
+    #[test]
+    fn mcp_project_root_home_dir_falls_back_to_cwd() {
+        let home = dirs::home_dir().unwrap();
+        let home_db = home.join(".sqmd/index.db");
+        let root = project_root_from_index_db(&home_db);
+        let cwd = std::env::current_dir().unwrap();
+        assert_eq!(
+            root, cwd,
+            "should fall back to CWD when index resolves to home"
+        );
+    }
+
+    #[test]
+    fn mcp_project_root_non_home_dir_unchanged() {
+        let root = project_root_from_index_db(Path::new("/opt/project/.sqmd/index.db"));
+        assert_eq!(root, Path::new("/opt/project"));
     }
 }
 
@@ -796,6 +834,12 @@ fn tool_index_file(
         } else {
             root.join(path)
         };
+        if !abs.exists() {
+            return Ok(vec![json!({
+                "type": "text",
+                "text": format!("Error: file not found: {:?} (resolved from path={:?}, root={:?})", abs, path, root)
+            })]);
+        }
         match indexer.index_file(&abs) {
             Ok(Some(result)) => {
                 let text = format!(
