@@ -104,7 +104,7 @@ pub fn materialize_entity_deps_to_relationships(
              JOIN entities e1 ON ed.source_entity = e1.id AND e1.chunk_id IS NOT NULL
              JOIN entities e2 ON ed.target_entity = e2.id AND e2.chunk_id IS NOT NULL
              WHERE ed.valid_to IS NULL AND e1.chunk_id != e2.chunk_id
-             AND ed.dep_type IN ('imports', 'calls', 'contains', 'extends', 'implements')",
+             AND ed.dep_type IN ('imports', 'calls', 'contains', 'extends', 'implements', 'overrides', 'references')",
         )?;
     }
 

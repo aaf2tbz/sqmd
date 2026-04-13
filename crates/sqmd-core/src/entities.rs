@@ -895,6 +895,12 @@ pub fn generate_relational_hints(
                 "imports" => {
                     hints.push((format!("{} imports {}", name, target_name), "importer"));
                 }
+                "overrides" => {
+                    hints.push((format!("{} overrides {}", name, target_name), "heir"));
+                }
+                "references" => {
+                    hints.push((format!("{} references {}", name, target_name), "callee"));
+                }
                 _ => {}
             }
         }
@@ -915,6 +921,12 @@ pub fn generate_relational_hints(
                 }
                 "imports" => {
                     hints.push((format!("files that import {}", name), "importer"));
+                }
+                "overrides" => {
+                    hints.push((format!("methods overridden by {}", name), "heir"));
+                }
+                "references" => {
+                    hints.push((format!("entities referencing {}", name), "callee"));
                 }
                 _ => {}
             }
@@ -1022,12 +1034,88 @@ pub fn tombstone_chunks(
 
 pub fn purge_tombstones(
     db: &rusqlite::Connection,
-    max_age_days: i64,
+    days: i64,
 ) -> Result<usize, Box<dyn std::error::Error>> {
+    let cutoff = format!("datetime('now', '-{} days')", days);
     let count = db.execute(
-        "DELETE FROM chunks WHERE is_deleted = 1 AND deleted_at <= datetime('now', ?1)",
-        params![format!("-{} days", max_age_days)],
+        &format!(
+            "DELETE FROM chunks WHERE is_deleted = 1 AND updated_at < ({})",
+            cutoff
+        ),
+        [],
     )?;
+    Ok(count)
+}
+
+pub fn detect_overrides(db: &rusqlite::Connection) -> Result<usize, Box<dyn std::error::Error>> {
+    let extends: Vec<(i64, i64)> = {
+        let mut stmt = db.prepare(
+            "SELECT source.id, target.id FROM entity_dependencies ed
+         JOIN entities source ON ed.source_entity = source.id
+         JOIN entities target ON ed.target_entity = target.id
+         WHERE ed.dep_type = 'extends' AND ed.valid_to IS NULL
+         AND source.entity_type IN ('class', 'struct')
+         AND target.entity_type IN ('class', 'struct')",
+        )?;
+        let rows: Vec<(i64, i64)> = stmt
+            .query_map([], |r| {
+                let a: i64 = r.get(0)?;
+                let b: i64 = r.get(1)?;
+                Ok((a, b))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        drop(stmt);
+        rows
+    };
+
+    let mut count = 0;
+    for (child_class_id, parent_class_id) in &extends {
+        let child_methods: Vec<(String, i64)> = {
+            let mut stmt = db.prepare(
+                "SELECT e.name, e.id FROM entities e
+                 JOIN entity_dependencies ed ON ed.source_entity = ?1 AND ed.target_entity = e.id
+                 WHERE ed.dep_type = 'contains' AND ed.valid_to IS NULL
+                 AND e.entity_type = 'method'",
+            )?;
+            let rows: Vec<(String, i64)> = stmt
+                .query_map(params![child_class_id], |r| {
+                    Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            drop(stmt);
+            rows
+        };
+
+        let parent_methods: Vec<(String, i64)> = {
+            let mut stmt = db.prepare(
+                "SELECT e.name, e.id FROM entities e
+                 JOIN entity_dependencies ed ON ed.source_entity = ?1 AND ed.target_entity = e.id
+                 WHERE ed.dep_type = 'contains' AND ed.valid_to IS NULL
+                 AND e.entity_type = 'method'",
+            )?;
+            let rows: Vec<(String, i64)> = stmt
+                .query_map(params![parent_class_id], |r| {
+                    Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            drop(stmt);
+            rows
+        };
+
+        for (child_method_name, child_method_id) in &child_methods {
+            for (parent_method_name, parent_method_id) in &parent_methods {
+                if child_method_name == parent_method_name {
+                    db.execute(
+                        "INSERT OR IGNORE INTO entity_dependencies (source_entity, target_entity, dep_type, valid_from)
+                         VALUES (?1, ?2, 'overrides', datetime('now'))",
+                        params![child_method_id, parent_method_id],
+                    )?;
+                    count += 1;
+                }
+            }
+        }
+    }
+
     Ok(count)
 }
 

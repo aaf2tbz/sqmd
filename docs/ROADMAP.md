@@ -216,14 +216,14 @@ Validated the two riskiest dependencies before committing to the stack.
 | 10 — Extended Language Support | **COMPLETE** |
 | 11 — Recall Research Integration | **COMPLETE** |
 | 12 — MCP Server + Agent Workflows | **COMPLETE** |
-| 13 — Per-Project Configuration | Planned |
-| 14 — Index Health & Maintenance | Planned |
-| 15 — Type-Aware Call Graph | Planned |
-| 16 — Context Assembly Improvements | Planned |
-| 17 — Cross-Project Search | Planned |
-| 18 — Import Resolution Quality | Planned |
-| 19 — Plugin System | Planned |
-| 20 — Entity Graph Redesign | Planned |
+| 13 — Per-Project Configuration | **COMPLETE** |
+| 14 — Index Health & Maintenance | **COMPLETE** |
+| 15 — Type-Aware Call Graph | **COMPLETE** |
+| 16 — Context Assembly Improvements | **COMPLETE** |
+| 17 — Cross-Project Search | **COMPLETE** |
+| 18 — Import Resolution Quality | **COMPLETE** |
+| 19 — Plugin System | **COMPLETE** |
+| 20 — Entity Graph Redesign | **COMPLETE** |
 
 **v1.0.0** — phases 0-8.
 **v1.1.0** — production hardening for signet-sqmd integration.

@@ -397,12 +397,12 @@ fn get_related_chunks(
     let sql = format!(
         "WITH rel_graph(id, depth, rel_type) AS (
             SELECT target_id, 1, r.rel_type FROM relationships r
-            WHERE r.source_id IN ({ph}) AND r.rel_type IN ('imports','calls','contains','extends','implements')
+            WHERE r.source_id IN ({ph}) AND r.rel_type IN ('imports','calls','contains','extends','implements','overrides','references')
             UNION
             SELECT target_id, rg.depth + 1, r.rel_type FROM relationships r
             JOIN rel_graph rg ON r.source_id = rg.id
             WHERE rg.depth < {depth}
-              AND r.rel_type IN ('imports','calls','contains','extends','implements')
+              AND r.rel_type IN ('imports','calls','contains','extends','implements','overrides','references')
             UNION
             SELECT source_id, rg.depth + 1, r.rel_type FROM relationships r
             JOIN rel_graph rg ON r.target_id = rg.id
@@ -437,6 +437,8 @@ fn get_related_chunks(
                        WHEN 'imports' THEN 0.7
                        WHEN 'extends' THEN 0.6
                        WHEN 'implements' THEN 0.6
+                       WHEN 'overrides' THEN 0.55
+                       WHEN 'references' THEN 0.35
                        WHEN 'entity' THEN 0.3
                        ELSE 0.5
                    END as rel_score

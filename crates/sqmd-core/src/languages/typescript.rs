@@ -345,6 +345,24 @@ impl LanguageChunker for TypeScriptChunker {
                         }
                     }
                 }
+            } else if node.kind() == "export_statement" {
+                let inner = node.child_by_field_name("declaration");
+                if let Some(inner) = inner {
+                    if inner.kind() == "function_declaration" {
+                        if let Some(name_node) = inner.child_by_field_name("name") {
+                            if let Ok(name) = name_node.utf8_text(source.as_bytes()) {
+                                let name = name.trim().to_string();
+                                if !name.is_empty() {
+                                    rels.push(crate::relationships::StructuralRelation {
+                                        source_name: name,
+                                        target_name: "exports".to_string(),
+                                        rel_type: "references".to_string(),
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
 
