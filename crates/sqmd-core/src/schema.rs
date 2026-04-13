@@ -5,6 +5,13 @@ use std::path::Path;
 const CURRENT_VERSION: i64 = 14;
 
 pub fn init(db: &mut Connection) -> SqlResult<()> {
+    init_with_config(db, &crate::config::ProjectConfig::default())
+}
+
+pub fn init_with_config(
+    db: &mut Connection,
+    config: &crate::config::ProjectConfig,
+) -> SqlResult<()> {
     #[allow(clippy::missing_transmute_annotations)]
     unsafe {
         rusqlite::ffi::sqlite3_auto_extension(Some(std::mem::transmute(
@@ -15,9 +22,16 @@ pub fn init(db: &mut Connection) -> SqlResult<()> {
     db.execute_batch("PRAGMA foreign_keys = ON;")?;
     db.execute_batch("PRAGMA busy_timeout = 5000;")?;
     db.execute_batch("PRAGMA defer_foreign_keys = ON;")?;
-    db.execute_batch("PRAGMA mmap_size = 268435456;")?;
-    db.execute_batch("PRAGMA wal_autocheckpoint = 1000;")?;
-    db.execute_batch("PRAGMA cache_size = -8000;")?;
+    db.execute_batch(&format!("PRAGMA mmap_size = {};", config.mmap_size_bytes()))?;
+    db.execute_batch(&format!(
+        "PRAGMA wal_autocheckpoint = {};",
+        config.wal_autocheckpoint()
+    ))?;
+    db.execute_batch(&format!(
+        "PRAGMA cache_size = {};",
+        config.cache_size_pages()
+    ))?;
+    db.execute_batch(&format!("PRAGMA busy_timeout = {};", config.busy_timeout()))?;
 
     // Always ensure chunks_vec exists — handles dbs created before embed feature
     if let Err(e) = db.execute_batch(
@@ -593,7 +607,13 @@ fn migrate_v14(db: &mut Connection) -> SqlResult<()> {
 }
 
 pub fn open(path: &Path) -> SqlResult<Connection> {
-    // Register sqlite-vec BEFORE opening so the connection has it available
+    open_with_config(path, &crate::config::ProjectConfig::default())
+}
+
+pub fn open_with_config(
+    path: &Path,
+    config: &crate::config::ProjectConfig,
+) -> SqlResult<Connection> {
     #[allow(clippy::missing_transmute_annotations)]
     unsafe {
         rusqlite::ffi::sqlite3_auto_extension(Some(std::mem::transmute(
@@ -601,20 +621,30 @@ pub fn open(path: &Path) -> SqlResult<Connection> {
         )));
     }
     let mut db = Connection::open(path)?;
-    init(&mut db)?;
+    init_with_config(&mut db, config)?;
     Ok(db)
 }
 
 pub fn open_fast(path: &Path) -> SqlResult<Connection> {
+    open_fast_with_config(path, &crate::config::ProjectConfig::default())
+}
+
+pub fn open_fast_with_config(
+    path: &Path,
+    config: &crate::config::ProjectConfig,
+) -> SqlResult<Connection> {
     #[allow(clippy::missing_transmute_annotations)]
     unsafe {
         rusqlite::ffi::sqlite3_auto_extension(Some(std::mem::transmute(
-            sqlite_vec::sqlite3_vec_init as *const (),
+            sqlite3_vec_init as *const (),
         )));
     }
     let db = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-    db.execute_batch("PRAGMA mmap_size = 268435456;")?;
-    db.execute_batch("PRAGMA cache_size = -8000;")?;
+    db.execute_batch(&format!("PRAGMA mmap_size = {};", config.mmap_size_bytes()))?;
+    db.execute_batch(&format!(
+        "PRAGMA cache_size = {};",
+        config.cache_size_pages()
+    ))?;
     db.execute_batch("PRAGMA foreign_keys = ON;")?;
     Ok(db)
 }

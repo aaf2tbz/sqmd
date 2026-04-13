@@ -12,7 +12,8 @@ pub fn watch(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
         std::process::exit(1);
     }
 
-    let mut db = schema::open(&db_path)?;
+    let config = crate::config::ProjectConfig::load(root);
+    let mut db = schema::open_with_config(&db_path, &config)?;
     let mut indexer = crate::index::Indexer::new(&mut db, root);
 
     // Full index first
@@ -34,7 +35,7 @@ pub fn watch(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
     );
 
     let mut pending: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
-    let debounce = Duration::from_millis(200);
+    let debounce = config.debounce_duration();
 
     loop {
         match rx.recv_timeout(debounce) {

@@ -56,6 +56,9 @@ pub fn run(db_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
         std::process::exit(1);
     }
 
+    let root = project_root_from_index_db(db_path);
+    let config = crate::config::ProjectConfig::load(&root);
+
     let log_path = std::path::PathBuf::from("/tmp/sqmd-mcp-debug.log");
     let start = std::time::Instant::now();
 
@@ -84,7 +87,7 @@ pub fn run(db_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
     dbg!(log, "PATH={:?}", std::env::var("PATH").unwrap_or_default());
     dbg!(log, "args={:?}", std::env::args().collect::<Vec<_>>());
 
-    let mut db = match crate::schema::open(db_path) {
+    let mut db = match crate::schema::open_with_config(db_path, &config) {
         Ok(db) => db,
         Err(e) => {
             dbg!(
@@ -119,7 +122,6 @@ pub fn run(db_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
         total_chunks
     );
 
-    let root = project_root_from_index_db(db_path);
     let embed_state: Arc<Mutex<EmbedState>> = Arc::new(Mutex::new(EmbedState {
         total: 0,
         embedded: 0,

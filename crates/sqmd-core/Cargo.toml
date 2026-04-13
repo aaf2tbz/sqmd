@@ -32,6 +32,7 @@ rayon = "1.10"
 chrono = { version = "0.4", features = ["serde"] }
 notify = "7"
 dirs = "5"
+toml = "0.8"
 tempfile = "3"
 regex = "1"
 tree-sitter-ruby = "0.23"

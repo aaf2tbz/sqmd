@@ -1,6 +1,7 @@
 pub mod chunk;
 pub mod chunker;
 pub mod communities;
+pub mod config;
 pub mod context;
 pub mod daemon;
 pub mod dampening;
