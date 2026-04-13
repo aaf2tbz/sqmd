@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 #[derive(Debug, Clone)]
 pub struct TsConfigPaths {
@@ -64,10 +64,7 @@ impl TsConfigPaths {
                     format!("{}/{}", target, remainder)
                 };
                 let match_len = pattern.len();
-                if best_match
-                    .as_ref()
-                    .map_or(true, |(len, _)| match_len > *len)
-                {
+                if best_match.as_ref().is_none_or(|(len, _)| match_len > *len) {
                     best_match = Some((match_len, resolved));
                 }
             }
@@ -293,7 +290,7 @@ mod tests {
     #[test]
     fn tsconfig_alias_resolution() {
         let json = r#"{"compilerOptions":{"paths":{"@components/*":["src/components/*"],"@lib/*":["lib/*"]}}}"#;
-        let value: serde_json::Value = serde_json::from_str(json).unwrap();
+        let _value: serde_json::Value = serde_json::from_str(json).unwrap();
         let mut aliases = HashMap::new();
         aliases.insert("@components/".to_string(), "src/components".to_string());
         aliases.insert("@lib/".to_string(), "lib".to_string());

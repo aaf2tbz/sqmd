@@ -185,7 +185,7 @@ mod tests {
 
         let names: Vec<_> = chunks.iter().filter_map(|c| c.name.as_deref()).collect();
         assert!(
-            names.iter().any(|n| *n == "services"),
+            names.contains(&"services"),
             "Should find services key, got: {:?}",
             names
         );

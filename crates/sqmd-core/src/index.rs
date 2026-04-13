@@ -427,12 +427,13 @@ impl<'a> Indexer<'a> {
             .collect();
 
         // Phase 3: parallel chunking (CPU-bound)
-        let chunked: Vec<(
+        type ChunkedWork = (
             FileWork,
             Vec<chunk::Chunk>,
             Vec<ImportInfo>,
             Option<tree_sitter::Tree>,
-        )> = work_items
+        );
+        let chunked: Vec<ChunkedWork> = work_items
             .into_par_iter()
             .map(|work| {
                 let (chunks, imports, tree) =
@@ -891,7 +892,7 @@ impl<'a> Indexer<'a> {
                 .iter()
                 .filter_map(|n| name_to_id.get(*n))
             {
-                for (_idx, &caller_id) in chunk_id_map {
+                for &caller_id in chunk_id_map.values() {
                     if caller_id == target_id {
                         continue;
                     }

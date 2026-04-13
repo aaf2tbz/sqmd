@@ -1,7 +1,7 @@
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ProjectsRegistry {
@@ -222,10 +222,7 @@ pub fn multi_project_stats(project_paths: &[PathBuf]) -> Vec<(String, Option<Mul
             }
         };
 
-        let stats = match get_project_stats(&conn) {
-            Ok(s) => Some(s),
-            Err(_) => None,
-        };
+        let stats = get_project_stats(&conn).ok();
         results.push((project_name, stats));
     }
     results

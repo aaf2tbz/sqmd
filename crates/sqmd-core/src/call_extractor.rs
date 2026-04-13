@@ -47,14 +47,14 @@ fn is_inside_string(node: tree_sitter::Node) -> bool {
     false
 }
 
-fn node_text<'a>(node: tree_sitter::Node, source: &'a [u8]) -> String {
+fn node_text(node: tree_sitter::Node, source: &[u8]) -> String {
     node.utf8_text(source)
         .unwrap_or_default()
         .trim()
         .to_string()
 }
 
-fn field_text<'a>(node: tree_sitter::Node, field: &str, source: &'a [u8]) -> Option<String> {
+fn field_text(node: tree_sitter::Node, field: &str, source: &[u8]) -> Option<String> {
     node.child_by_field_name(field)
         .and_then(|n| n.utf8_text(source).ok())
         .map(|s| s.trim().to_string())
