@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 const SERVER_NAME: &str = "sqmd";
-const SERVER_VERSION: &str = "3.3.1";
+const SERVER_VERSION: &str = "3.4.1";
 const PROTOCOL_VERSION: &str = "2024-11-05";
 
 struct EmbedState {

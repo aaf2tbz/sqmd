@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.4.1] - 2026-04-12
+
+### Fixed
+
+- MCP server no longer resolves to home directory as project root when `.sqmd/` lives at `~/.sqmd/`. `project_root_from_index_db()` now falls back to CWD with a warning, fixing wrong `tool_stats` counts and broken relative path resolution.
+- `tool_index_file` validates the resolved path exists before indexing, preventing silent tombstoning when an incorrect root causes `root.join(path)` to produce a nonexistent file.
+
 ## [3.4.0] - 2026-04-12
 
 ### Changed
