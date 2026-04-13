@@ -3,7 +3,6 @@ use crate::schema;
 use notify::{Event, RecursiveMode, Watcher};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
-use std::time::Duration;
 
 pub fn watch(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let db_path = root.join(".sqmd/index.db");

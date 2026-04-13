@@ -360,9 +360,7 @@ fn resolve_rust_path(
         candidates.push(format!("{}/{}/mod.rs", dir, snake));
     }
 
-    let existing = filter_existing(db, &candidates);
-
-    existing
+    filter_existing(db, &candidates)
 }
 
 fn find_crate_root(file_path: &str) -> String {

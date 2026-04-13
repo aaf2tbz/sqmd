@@ -199,6 +199,6 @@ mod tests {
         let chunker = QmlChunker::new();
         let (_chunks, tree) = chunker.chunk(source, "test.qml");
         let imports = chunker.extract_imports(&tree.unwrap(), source);
-        assert!(imports.len() >= 1, "Should find at least 1 import");
+        assert!(!imports.is_empty(), "Should find at least 1 import");
     }
 }

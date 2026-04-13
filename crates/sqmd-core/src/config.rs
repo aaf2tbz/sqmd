@@ -1,6 +1,6 @@
 use serde::Deserialize;
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(default)]
@@ -16,7 +16,7 @@ pub struct ProjectConfig {
     pub context: ContextConfig,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Default)]
 #[serde(default)]
 pub struct SqliteConfig {
     pub mmap_size: Option<String>,
@@ -25,18 +25,7 @@ pub struct SqliteConfig {
     pub busy_timeout: Option<i64>,
 }
 
-impl Default for SqliteConfig {
-    fn default() -> Self {
-        Self {
-            mmap_size: None,
-            cache_size: None,
-            wal_autocheckpoint: None,
-            busy_timeout: None,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Default)]
 #[serde(default)]
 pub struct SearchConfig {
     pub default_top_k: Option<usize>,
@@ -45,93 +34,39 @@ pub struct SearchConfig {
     pub graph_boost_decay: Option<f64>,
 }
 
-impl Default for SearchConfig {
-    fn default() -> Self {
-        Self {
-            default_top_k: None,
-            default_max_tokens: None,
-            graph_boost_base: None,
-            graph_boost_decay: None,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Default)]
 #[serde(default)]
 pub struct ChunkingConfig {
     pub unclaimed_gap: Option<usize>,
     pub min_importance: Option<f64>,
 }
 
-impl Default for ChunkingConfig {
-    fn default() -> Self {
-        Self {
-            unclaimed_gap: None,
-            min_importance: None,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Default)]
 #[serde(default)]
 pub struct HintsConfig {
     pub min_importance: Option<f64>,
     pub max_per_chunk: Option<usize>,
 }
 
-impl Default for HintsConfig {
-    fn default() -> Self {
-        Self {
-            min_importance: None,
-            max_per_chunk: None,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Default)]
 #[serde(default)]
 pub struct EmbedConfig {
     pub model: Option<String>,
     pub hint_model: Option<String>,
 }
 
-impl Default for EmbedConfig {
-    fn default() -> Self {
-        Self {
-            model: None,
-            hint_model: None,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Default)]
 #[serde(default)]
 pub struct WatchConfig {
     pub debounce_ms: Option<u64>,
 }
 
-impl Default for WatchConfig {
-    fn default() -> Self {
-        Self { debounce_ms: None }
-    }
-}
-
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Default)]
 #[serde(default)]
 pub struct ContextConfig {
     pub max_dep_chunks: Option<usize>,
     pub default_dep_depth: Option<usize>,
     pub community_boost: Option<f64>,
-}
-
-impl Default for ContextConfig {
-    fn default() -> Self {
-        Self {
-            max_dep_chunks: None,
-            default_dep_depth: None,
-            community_boost: None,
-        }
-    }
 }
 
 impl ProjectConfig {

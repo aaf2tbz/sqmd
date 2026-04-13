@@ -1446,7 +1446,7 @@ mod tests {
             signature: None,
             chunk_id: Some(1),
         };
-        let eid = ensure_symbol_entity(&db, &input).unwrap();
+        let _eid = ensure_symbol_entity(&db, &input).unwrap();
 
         let entity = get_entity(&db, "DatabasePool").unwrap().unwrap();
         assert_eq!(entity.chunk_id, Some(1));
