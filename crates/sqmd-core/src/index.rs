@@ -55,147 +55,167 @@ fn chunk_file_content(
     language: &Language,
     content: &str,
     relative: &str,
-) -> (Vec<chunk::Chunk>, Vec<ImportInfo>) {
+) -> (
+    Vec<chunk::Chunk>,
+    Vec<ImportInfo>,
+    Option<tree_sitter::Tree>,
+) {
     match language {
         Language::TypeScript | Language::JavaScript | Language::JSX => {
             let c = crate::languages::typescript::TypeScriptChunker::new();
             let (chunks, tree) = c.chunk(content, relative);
             let imports = tree
-                .map(|t| c.extract_imports(&t, content))
+                .as_ref()
+                .map(|t| c.extract_imports(t, content))
                 .unwrap_or_default();
-            (chunks, imports)
+            (chunks, imports, tree)
         }
         Language::TSX => {
             let c = crate::languages::typescript::TypeScriptChunker::tsx();
             let (chunks, tree) = c.chunk(content, relative);
             let imports = tree
-                .map(|t| c.extract_imports(&t, content))
+                .as_ref()
+                .map(|t| c.extract_imports(t, content))
                 .unwrap_or_default();
-            (chunks, imports)
+            (chunks, imports, tree)
         }
         Language::Rust => {
             let c = crate::languages::rust::RustChunker::new();
             let (chunks, tree) = c.chunk(content, relative);
             let imports = tree
-                .map(|t| c.extract_imports(&t, content))
+                .as_ref()
+                .map(|t| c.extract_imports(t, content))
                 .unwrap_or_default();
-            (chunks, imports)
+            (chunks, imports, tree)
         }
         Language::Python => {
             let c = crate::languages::python::PythonChunker::new();
             let (chunks, tree) = c.chunk(content, relative);
             let imports = tree
-                .map(|t| c.extract_imports(&t, content))
+                .as_ref()
+                .map(|t| c.extract_imports(t, content))
                 .unwrap_or_default();
-            (chunks, imports)
+            (chunks, imports, tree)
         }
         Language::Go => {
             let c = crate::languages::go::GoChunker::new();
             let (chunks, tree) = c.chunk(content, relative);
             let imports = tree
-                .map(|t| c.extract_imports(&t, content))
+                .as_ref()
+                .map(|t| c.extract_imports(t, content))
                 .unwrap_or_default();
-            (chunks, imports)
+            (chunks, imports, tree)
         }
         Language::Java => {
             let c = crate::languages::java::JavaChunker::new();
             let (chunks, tree) = c.chunk(content, relative);
             let imports = tree
-                .map(|t| c.extract_imports(&t, content))
+                .as_ref()
+                .map(|t| c.extract_imports(t, content))
                 .unwrap_or_default();
-            (chunks, imports)
+            (chunks, imports, tree)
         }
         Language::C => {
             let c = crate::languages::c::CChunker::new();
             let (chunks, tree) = c.chunk(content, relative);
             let imports = tree
-                .map(|t| c.extract_imports(&t, content))
+                .as_ref()
+                .map(|t| c.extract_imports(t, content))
                 .unwrap_or_default();
-            (chunks, imports)
+            (chunks, imports, tree)
         }
         Language::Cpp => {
             let c = crate::languages::cpp::CppChunker::new();
             let (chunks, tree) = c.chunk(content, relative);
             let imports = tree
-                .map(|t| c.extract_imports(&t, content))
+                .as_ref()
+                .map(|t| c.extract_imports(t, content))
                 .unwrap_or_default();
-            (chunks, imports)
+            (chunks, imports, tree)
         }
         Language::CMake => {
             let c = crate::languages::cmake::CMakeChunker::new();
             let (chunks, tree) = c.chunk(content, relative);
             let imports = tree
-                .map(|t| c.extract_imports(&t, content))
+                .as_ref()
+                .map(|t| c.extract_imports(t, content))
                 .unwrap_or_default();
-            (chunks, imports)
+            (chunks, imports, tree)
         }
         Language::Qml => {
             let c = crate::languages::qml::QmlChunker::new();
             let (chunks, tree) = c.chunk(content, relative);
             let imports = tree
-                .map(|t| c.extract_imports(&t, content))
+                .as_ref()
+                .map(|t| c.extract_imports(t, content))
                 .unwrap_or_default();
-            (chunks, imports)
+            (chunks, imports, tree)
         }
         Language::Meson => {
             let chunks = crate::languages::meson::MesonChunker::chunk(content, relative);
-            (chunks, Vec::new())
+            (chunks, Vec::new(), None)
         }
         Language::Ruby => {
             let c = crate::languages::ruby::RubyChunker::new();
             let (chunks, tree) = c.chunk(content, relative);
             let imports = tree
-                .map(|t| c.extract_imports(&t, content))
+                .as_ref()
+                .map(|t| c.extract_imports(t, content))
                 .unwrap_or_default();
-            (chunks, imports)
+            (chunks, imports, tree)
         }
         Language::Yaml => {
             let c = crate::languages::yaml::YamlChunker::new();
             let (chunks, tree) = c.chunk(content, relative);
             let imports = tree
-                .map(|t| c.extract_imports(&t, content))
+                .as_ref()
+                .map(|t| c.extract_imports(t, content))
                 .unwrap_or_default();
-            (chunks, imports)
+            (chunks, imports, tree)
         }
         Language::Json => {
             let c = crate::languages::json::JsonChunker::new();
             let (chunks, tree) = c.chunk(content, relative);
             let imports = tree
-                .map(|t| c.extract_imports(&t, content))
+                .as_ref()
+                .map(|t| c.extract_imports(t, content))
                 .unwrap_or_default();
-            (chunks, imports)
+            (chunks, imports, tree)
         }
         Language::Toml => {
             let c = crate::languages::toml::TomlChunker::new();
             let (chunks, tree) = c.chunk(content, relative);
             let imports = tree
-                .map(|t| c.extract_imports(&t, content))
+                .as_ref()
+                .map(|t| c.extract_imports(t, content))
                 .unwrap_or_default();
-            (chunks, imports)
+            (chunks, imports, tree)
         }
         Language::Html => {
             let c = crate::languages::html::HtmlChunker::new();
             let (chunks, tree) = c.chunk(content, relative);
             let imports = tree
-                .map(|t| c.extract_imports(&t, content))
+                .as_ref()
+                .map(|t| c.extract_imports(t, content))
                 .unwrap_or_default();
-            (chunks, imports)
+            (chunks, imports, tree)
         }
         Language::Css => {
             let c = crate::languages::css::CssChunker::new();
             let (chunks, tree) = c.chunk(content, relative);
             let imports = tree
-                .map(|t| c.extract_imports(&t, content))
+                .as_ref()
+                .map(|t| c.extract_imports(t, content))
                 .unwrap_or_default();
-            (chunks, imports)
+            (chunks, imports, tree)
         }
         Language::Scss => {
             let chunks = crate::chunker::FileChunker::chunk_file(content, relative, "scss");
-            (chunks, Vec::new())
+            (chunks, Vec::new(), None)
         }
         Language::Markdown => {
             let chunks = crate::languages::markdown::MarkdownChunker::chunk(content, relative);
-            (chunks, Vec::new())
+            (chunks, Vec::new(), None)
         }
         Language::Shell
         | Language::Sql
@@ -216,11 +236,12 @@ fn chunk_file_content(
         | Language::Protobuf => {
             let chunks =
                 crate::chunker::FileChunker::chunk_file(content, relative, language.as_str());
-            (chunks, Vec::new())
+            (chunks, Vec::new(), None)
         }
         _ => (
             crate::chunker::FileChunker::chunk_file(content, relative, language.as_str()),
             Vec::new(),
+            None,
         ),
     }
 }
@@ -406,12 +427,17 @@ impl<'a> Indexer<'a> {
             .collect();
 
         // Phase 3: parallel chunking (CPU-bound)
-        let chunked: Vec<(FileWork, Vec<chunk::Chunk>, Vec<ImportInfo>)> = work_items
+        let chunked: Vec<(
+            FileWork,
+            Vec<chunk::Chunk>,
+            Vec<ImportInfo>,
+            Option<tree_sitter::Tree>,
+        )> = work_items
             .into_par_iter()
             .map(|work| {
-                let (chunks, imports) =
+                let (chunks, imports, tree) =
                     chunk_file_content(&work.language, &work.content, &work.relative);
-                (work, chunks, imports)
+                (work, chunks, imports, tree)
             })
             .collect();
 
@@ -420,7 +446,7 @@ impl<'a> Indexer<'a> {
 
         let mut pending_imports: Vec<(String, Vec<ImportInfo>)> = Vec::new();
 
-        for (work, chunks, raw_imports) in &chunked {
+        for (work, chunks, raw_imports, _tree) in &chunked {
             // mtime pre-filter can have false positives; verify with content hash
             let existing_hash: Option<String> = self
                 .db
@@ -462,7 +488,14 @@ impl<'a> Indexer<'a> {
 
             let mut file_decisions = IndexDecisions::default();
             let mut rel_count = 0;
-            rel_count += self.decision_write_chunks(&work.relative, chunks, &mut file_decisions)?;
+            rel_count += self.decision_write_chunks(
+                &work.relative,
+                chunks,
+                &mut file_decisions,
+                &work.content,
+                _tree.as_ref(),
+                work.language.as_str(),
+            )?;
             pending_imports.push((work.relative.clone(), raw_imports.clone()));
             self.build_entity_graph(&work.relative, chunks)?;
             let structural_rels = extract_structural_rels_for_file(&work.language, &work.content);
@@ -579,10 +612,17 @@ impl<'a> Indexer<'a> {
             ],
         )?;
 
-        let (chunks, raw_imports) = chunk_file_content(&language, &content, &relative);
+        let (chunks, raw_imports, tree) = chunk_file_content(&language, &content, &relative);
         let mut file_decisions = IndexDecisions::default();
         let mut rel_count = 0;
-        rel_count += self.decision_write_chunks(&relative, &chunks, &mut file_decisions)?;
+        rel_count += self.decision_write_chunks(
+            &relative,
+            &chunks,
+            &mut file_decisions,
+            &content,
+            tree.as_ref(),
+            language.as_str(),
+        )?;
         rel_count += self.write_import_relationships(&relative, &raw_imports)?;
         self.build_entity_graph(&relative, &chunks)?;
 
@@ -616,6 +656,9 @@ impl<'a> Indexer<'a> {
         relative: &str,
         chunks: &[chunk::Chunk],
         decisions: &mut IndexDecisions,
+        source: &str,
+        tree: Option<&tree_sitter::Tree>,
+        language: &str,
     ) -> Result<usize, Box<dyn std::error::Error>> {
         let old_hashes: std::collections::HashMap<String, (i64, Option<String>)> = {
             let mut stmt = self.db.prepare(
@@ -698,7 +741,8 @@ impl<'a> Indexer<'a> {
             decisions.tombstoned += stale_ids.len();
         }
 
-        let rel_count = self.build_relationships(relative, chunks, &chunk_id_map)?;
+        let rel_count =
+            self.build_relationships(relative, chunks, &chunk_id_map, source, tree, language)?;
 
         for (chunk_idx, chunk) in chunks.iter().enumerate() {
             if let Some(&chunk_id) = chunk_id_map.get(&chunk_idx) {
@@ -734,6 +778,9 @@ impl<'a> Indexer<'a> {
         _relative: &str,
         chunks: &[chunk::Chunk],
         chunk_id_map: &std::collections::HashMap<usize, i64>,
+        source: &str,
+        tree: Option<&tree_sitter::Tree>,
+        language: &str,
     ) -> Result<usize, Box<dyn std::error::Error>> {
         let mut rel_count = 0;
         let mut parent_stack: Vec<(i64, usize, usize)> = Vec::new();
@@ -824,19 +871,29 @@ impl<'a> Indexer<'a> {
             }
         }
 
-        for (idx, caller_id) in chunk_id_map {
-            let caller_id = *caller_id;
-            let c = &chunks[*idx];
-            if !matches!(
-                c.chunk_type,
-                chunk::ChunkType::Function | chunk::ChunkType::Method | chunk::ChunkType::Constant
-            ) {
-                continue;
+        let call_sites: Vec<crate::call_extractor::CallSite> = match tree {
+            Some(t) => crate::call_extractor::extract_calls_language_aware(source, t, language),
+            None => {
+                let mut parser = tree_sitter::Parser::new();
+                let parsed = parser.parse(source, None).unwrap();
+                crate::call_extractor::extract_calls_language_aware(source, &parsed, language)
             }
+        };
 
-            for call in crate::relationships::extract_calls(&c.content_raw) {
-                if let Some(&target_id) = name_to_id.get(&call) {
-                    if target_id != caller_id {
+        let mut call_pair_seen = std::collections::HashSet::new();
+        for call in &call_sites {
+            let callee_name = call.display_name();
+            let direct_name = &call.callee;
+
+            for &target_id in [&callee_name, direct_name]
+                .iter()
+                .filter_map(|n| name_to_id.get(*n))
+            {
+                for (_idx, &caller_id) in chunk_id_map {
+                    if caller_id == target_id {
+                        continue;
+                    }
+                    if call_pair_seen.insert((caller_id, target_id)) {
                         self.db.execute(
                             "INSERT OR IGNORE INTO relationships (source_id, target_id, rel_type) VALUES (?1, ?2, 'calls')",
                             params![caller_id, target_id],
