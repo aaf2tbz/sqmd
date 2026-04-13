@@ -400,6 +400,8 @@ fn handle_context(db: &Connection, params: &serde_json::Value) -> Response {
         dep_depth,
         top_k,
         source_types,
+        max_dep_chunks: 50,
+        community_boost: 0.1,
     };
 
     match ContextAssembler::build(db, &request) {

@@ -10,6 +10,18 @@ pub struct ContextRequest {
     pub dep_depth: usize,
     pub top_k: usize,
     pub source_types: Option<Vec<String>>,
+    #[serde(default = "default_max_dep_chunks")]
+    pub max_dep_chunks: usize,
+    #[serde(default = "default_community_boost")]
+    pub community_boost: f64,
+}
+
+fn default_max_dep_chunks() -> usize {
+    50
+}
+
+fn default_community_boost() -> f64 {
+    0.1
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -152,7 +164,27 @@ impl ContextAssembler {
         if request.include_deps {
             let chunk_ids: Vec<i64> = selected.iter().map(|(id, ..)| *id).collect();
             if !chunk_ids.is_empty() {
-                let deps = get_related_chunks(db, &chunk_ids, request.dep_depth)?;
+                let seed_community_paths = get_seed_community_paths(db, &chunk_ids);
+                let effective_depth = if request.dep_depth == 0 {
+                    2
+                } else {
+                    request.dep_depth
+                };
+                let remaining_budget = request.max_tokens.saturating_sub(
+                    selected
+                        .iter()
+                        .map(|(_, _, _, _, _, _, _, content, _, _, _)| estimate_tokens(content))
+                        .sum::<usize>(),
+                );
+                let estimated_chunks = (remaining_budget / 200).max(5).min(request.max_dep_chunks);
+                let deps = get_related_chunks(
+                    db,
+                    &chunk_ids,
+                    effective_depth,
+                    estimated_chunks,
+                    &seed_community_paths,
+                    request.community_boost,
+                )?;
                 for (id, fp, name, ct, ls, le, content, lang, st) in &deps {
                     if seen_ids.insert(*id) {
                         selected.push((
@@ -274,11 +306,45 @@ fn get_chunk_content_and_lang(
     Ok(result)
 }
 
+fn get_seed_community_paths(db: &Connection, chunk_ids: &[i64]) -> Vec<String> {
+    if chunk_ids.is_empty() {
+        return Vec::new();
+    }
+    let placeholders: Vec<String> = (0..chunk_ids.len())
+        .map(|i| format!("?{}", i + 1))
+        .collect();
+    let ph = placeholders.join(", ");
+
+    let sql = format!(
+        "SELECT DISTINCT cm.path FROM communities cm \
+         WHERE EXISTS (SELECT 1 FROM chunks c WHERE c.id IN ({ph}) AND (c.file_path = cm.path OR c.file_path LIKE cm.path || '/%')) \
+         ORDER BY cm.depth ASC LIMIT 10",
+        ph = ph
+    );
+
+    let mut stmt = match db.prepare(&sql) {
+        Ok(s) => s,
+        Err(_) => return Vec::new(),
+    };
+    let params: Vec<&dyn rusqlite::ToSql> = chunk_ids
+        .iter()
+        .map(|id| id as &dyn rusqlite::ToSql)
+        .collect();
+    let result = match stmt.query_map(params.as_slice(), |r| r.get::<_, String>(0)) {
+        Ok(rows) => rows.filter_map(|r| r.ok()).collect::<Vec<String>>(),
+        Err(_) => Vec::new(),
+    };
+    result
+}
+
 #[allow(clippy::type_complexity)]
 fn get_related_chunks(
     db: &Connection,
     chunk_ids: &[i64],
     depth: usize,
+    max_chunks: usize,
+    seed_community_paths: &[String],
+    community_boost: f64,
 ) -> Result<
     Vec<(
         i64,
@@ -302,47 +368,104 @@ fn get_related_chunks(
         .collect();
     let ph = placeholders.join(", ");
 
+    let community_clause = if seed_community_paths.is_empty() {
+        String::new()
+    } else {
+        let path_placeholders: Vec<String> = (0..seed_community_paths.len())
+            .map(|i| format!("?{}", chunk_ids.len() + i + 1))
+            .collect();
+        let pph = path_placeholders.join(", ");
+        format!(
+            ", community_bonus AS (SELECT c.id, {boost} AS bonus FROM chunks c WHERE (c.file_path IN ({pph})) )",
+            boost = community_boost,
+            pph = pph,
+        )
+    };
+
+    let community_join = if seed_community_paths.is_empty() {
+        String::new()
+    } else {
+        "LEFT JOIN community_bonus cb ON c.id = cb.id".to_string()
+    };
+
+    let community_score = if seed_community_paths.is_empty() {
+        "s.rel_score".to_string()
+    } else {
+        "s.rel_score + COALESCE(cb.bonus, 0.0)".to_string()
+    };
+
     let sql = format!(
-        "WITH rel_graph(id, depth) AS (
-            SELECT target_id, 1 FROM relationships WHERE source_id IN ({0}) AND rel_type = 'imports'
+        "WITH rel_graph(id, depth, rel_type) AS (
+            SELECT target_id, 1, r.rel_type FROM relationships r
+            WHERE r.source_id IN ({ph}) AND r.rel_type IN ('imports','calls','contains','extends','implements')
             UNION
-            SELECT target_id, rg.depth + 1 FROM relationships r
+            SELECT target_id, rg.depth + 1, r.rel_type FROM relationships r
             JOIN rel_graph rg ON r.source_id = rg.id
-            WHERE rg.depth < {1} AND r.rel_type = 'imports'
+            WHERE rg.depth < {depth}
+              AND r.rel_type IN ('imports','calls','contains','extends','implements')
+            UNION
+            SELECT source_id, rg.depth + 1, r.rel_type FROM relationships r
+            JOIN rel_graph rg ON r.target_id = rg.id
+            WHERE rg.depth < {depth}
+              AND r.rel_type IN ('calls','contains')
         ),
         ent_graph(id, depth) AS (
             SELECT DISTINCT e2.chunk_id, 1
             FROM entities e1
             JOIN entity_dependencies ed ON e1.id = ed.source_entity AND ed.valid_to IS NULL
             JOIN entities e2 ON ed.target_entity = e2.id
-            WHERE e1.chunk_id IN ({0}) AND e2.chunk_id IS NOT NULL AND e2.chunk_id != e1.chunk_id
+            WHERE e1.chunk_id IN ({ph}) AND e2.chunk_id IS NOT NULL AND e2.chunk_id != e1.chunk_id
             UNION
             SELECT DISTINCT e1.chunk_id, 1
             FROM entities e1
             JOIN entity_dependencies ed ON e1.id = ed.target_entity AND ed.valid_to IS NULL
             JOIN entities e2 ON ed.source_entity = e2.id
-            WHERE e1.chunk_id IN ({0}) AND e2.chunk_id IS NOT NULL AND e1.chunk_id != e2.chunk_id
+            WHERE e1.chunk_id IN ({ph}) AND e2.chunk_id IS NOT NULL AND e1.chunk_id != e2.chunk_id
         ),
-        all_graph(id, depth) AS (
-            SELECT id, depth FROM rel_graph
+        all_graph(id, depth, rel_type) AS (
+            SELECT id, depth, rel_type FROM rel_graph
             UNION
-            SELECT id, depth FROM ent_graph WHERE depth <= {1}
-        )
+            SELECT id, depth, 'entity' FROM ent_graph WHERE depth <= {depth}
+        ),
+        scored AS (
+            SELECT ag.id,
+                   ag.depth,
+                   ag.rel_type,
+                   CASE ag.rel_type
+                       WHEN 'calls' THEN 0.9
+                       WHEN 'contains' THEN 0.4
+                       WHEN 'imports' THEN 0.7
+                       WHEN 'extends' THEN 0.6
+                       WHEN 'implements' THEN 0.6
+                       WHEN 'entity' THEN 0.3
+                       ELSE 0.5
+                   END as rel_score
+            FROM all_graph ag
+        ){community_clause}
         SELECT DISTINCT c.id, c.file_path, c.name, c.chunk_type, c.line_start, c.line_end, c.content_raw, COALESCE(c.language, ''), COALESCE(c.source_type, '')
-        FROM all_graph ag
-        JOIN chunks c ON ag.id = c.id
-        WHERE c.id NOT IN ({0}) AND c.is_deleted = 0
-        ORDER BY c.importance DESC
-        LIMIT 50",
-        ph,
-        depth
+        FROM scored s
+        JOIN chunks c ON s.id = c.id
+        {community_join}
+        WHERE c.id NOT IN ({ph}) AND c.is_deleted = 0
+        ORDER BY {community_score} DESC, c.importance DESC
+        LIMIT {max_chunks}",
+        ph = ph,
+        community_clause = community_clause,
+        community_join = community_join,
+        community_score = community_score,
+        depth = depth,
+        max_chunks = max_chunks
     );
 
     let mut stmt = db.prepare(&sql)?;
-    let params: Vec<&dyn rusqlite::ToSql> = chunk_ids
+    let mut params: Vec<Box<dyn rusqlite::ToSql>> = chunk_ids
         .iter()
-        .map(|id| id as &dyn rusqlite::ToSql)
+        .map(|id| Box::new(*id) as Box<dyn rusqlite::ToSql>)
         .collect();
+    for path in seed_community_paths {
+        params.push(Box::new(path.clone()));
+    }
+    let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
     let rows: Vec<(
         i64,
         String,
@@ -354,7 +477,7 @@ fn get_related_chunks(
         String,
         String,
     )> = stmt
-        .query_map(params.as_slice(), |r| {
+        .query_map(param_refs.as_slice(), |r| {
             Ok((
                 r.get(0)?,
                 r.get(1)?,
@@ -423,6 +546,8 @@ mod tests {
             dep_depth: 0,
             top_k: 10,
             source_types: None,
+            max_dep_chunks: 50,
+            community_boost: 0.1,
         };
         let resp = ContextAssembler::build(&db, &req).unwrap();
         assert!(resp.chunk_count >= 2); // at least login + logout
@@ -440,6 +565,8 @@ mod tests {
             dep_depth: 1,
             top_k: 10,
             source_types: None,
+            max_dep_chunks: 50,
+            community_boost: 0.1,
         };
         let resp = ContextAssembler::build(&db, &req).unwrap();
         // Should include db.connect since auth.login imports it
@@ -462,6 +589,8 @@ mod tests {
             dep_depth: 0,
             top_k: 10,
             source_types: None,
+            max_dep_chunks: 50,
+            community_boost: 0.1,
         };
         let resp = ContextAssembler::build(&db, &req).unwrap();
         assert!(resp.token_count <= 50 + 100); // some tolerance for chunk boundary
@@ -484,6 +613,8 @@ mod tests {
             dep_depth: 0,
             top_k: 5,
             source_types: None,
+            max_dep_chunks: 50,
+            community_boost: 0.1,
         };
         let resp = ContextAssembler::build(&db, &req).unwrap();
         assert!(resp.chunk_count >= 1);
@@ -524,6 +655,8 @@ mod tests {
             dep_depth: 0,
             top_k: 10,
             source_types: Some(vec!["code".to_string()]),
+            max_dep_chunks: 50,
+            community_boost: 0.1,
         };
         let resp = ContextAssembler::build(&db, &req).unwrap();
         assert!(

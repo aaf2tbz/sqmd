@@ -886,6 +886,8 @@ fn cmd_context(
         dep_depth,
         top_k: 10,
         source_types: None,
+        max_dep_chunks: 50,
+        community_boost: 0.1,
     };
 
     let resp = sqmd_core::context::ContextAssembler::build(&db, &request)?;

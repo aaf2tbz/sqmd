@@ -13,6 +13,7 @@ pub struct ProjectConfig {
     pub hints: HintsConfig,
     pub embed: EmbedConfig,
     pub watch: WatchConfig,
+    pub context: ContextConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -115,6 +116,24 @@ impl Default for WatchConfig {
     }
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct ContextConfig {
+    pub max_dep_chunks: Option<usize>,
+    pub default_dep_depth: Option<usize>,
+    pub community_boost: Option<f64>,
+}
+
+impl Default for ContextConfig {
+    fn default() -> Self {
+        Self {
+            max_dep_chunks: None,
+            default_dep_depth: None,
+            community_boost: None,
+        }
+    }
+}
+
 impl ProjectConfig {
     pub fn load(project_root: &Path) -> Self {
         let config_path = project_root.join(".sqmd").join("config.toml");
@@ -191,6 +210,18 @@ impl ProjectConfig {
 
     pub fn override_importance(&self, chunk_type: &str) -> Option<f64> {
         self.importance.get(chunk_type).copied()
+    }
+
+    pub fn max_dep_chunks(&self) -> usize {
+        self.context.max_dep_chunks.unwrap_or(50)
+    }
+
+    pub fn default_dep_depth(&self) -> usize {
+        self.context.default_dep_depth.unwrap_or(2)
+    }
+
+    pub fn community_boost(&self) -> f64 {
+        self.context.community_boost.unwrap_or(0.1)
     }
 }
 
