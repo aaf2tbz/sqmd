@@ -10,6 +10,7 @@ pub mod embed;
 pub mod entities;
 pub mod episodes;
 pub mod files;
+pub mod import_resolver;
 pub mod index;
 pub mod languages;
 pub mod maintain;

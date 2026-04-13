@@ -117,18 +117,71 @@ fn resolve_module_path(
     module_path: &str,
 ) -> Vec<String> {
     let mut candidates = Vec::new();
+    let project_root = find_project_root_from_file(source_file);
+
+    let source_ext = if let Some(idx) = source_file.rfind('.') {
+        &source_file[idx + 1..]
+    } else {
+        ""
+    };
+
+    if source_ext == "ts" || source_ext == "tsx" || source_ext == "js" || source_ext == "jsx" {
+        if let Some(ref root) = project_root {
+            let tsconfig = crate::import_resolver::TsConfigPaths::load(root.as_path());
+            if let Some(resolved) = tsconfig.resolve(module_path) {
+                candidates.extend(resolve_path_candidates(&resolved, source_file));
+            }
+        }
+    }
+
+    if candidates.is_empty() && source_ext == "rs" {
+        if let Some(ref root) = project_root {
+            let cargo = crate::import_resolver::CargoWorkspace::load(root.as_path());
+            let segments: Vec<&str> = module_path.split("::").collect();
+            if segments.len() == 1
+                && !segments[0].contains("crate")
+                && !segments[0].contains("super")
+                && !segments[0].contains("self")
+            {
+                if let Some(crate_root) = cargo.resolve_crate(module_path) {
+                    candidates.push(format!("{}/src/lib.rs", crate_root));
+                    candidates.push(format!("{}/src/mod.rs", crate_root));
+                }
+            }
+        }
+    }
+
+    if candidates.is_empty() && source_ext == "go" {
+        if let Some(ref root) = project_root {
+            let go_mod = crate::import_resolver::GoModule::load(root.as_path());
+            if let Some(resolved) = go_mod.resolve(module_path, root.as_path()) {
+                candidates.push(format!("{}.go", resolved));
+            }
+        }
+    }
+
+    if candidates.is_empty() && source_ext == "py" {
+        if let Some(ref root) = project_root {
+            let pyproject = crate::import_resolver::PyProject::load(root.as_path());
+            if let Some(resolved) = pyproject.resolve(module_path, root.as_path()) {
+                candidates.push(resolved);
+            }
+        }
+    }
+
+    if !candidates.is_empty() {
+        let existing = filter_existing(db, &candidates);
+        if !existing.is_empty() {
+            return existing;
+        }
+    }
 
     let is_relative =
         module_path.starts_with('.') || module_path.contains('/') || module_path.contains('\\');
     let is_rust_crate_path = module_path.contains("::");
 
     if is_rust_crate_path {
-        let source_ext = if source_file.ends_with(".rs") {
-            "rs"
-        } else {
-            ""
-        };
-
+        candidates.clear();
         if source_ext == "rs" {
             candidates.extend(resolve_rust_path(db, source_file, module_path));
         }
@@ -137,6 +190,7 @@ fn resolve_module_path(
             return candidates;
         }
     } else if is_relative {
+        candidates.clear();
         let mut source_dir = source_file.to_string();
         if let Some(idx) = source_dir.rfind('/') {
             source_dir.truncate(idx);
@@ -168,61 +222,85 @@ fn resolve_module_path(
             return Vec::new();
         }
 
-        let extensions = [
-            "ts", "tsx", "js", "jsx", "rs", "py", "go", "java", "rb", "c", "cpp", "h",
-        ];
-
         let base = name_parts.join("/");
-
-        for ext in &extensions {
-            if resolved_dir.is_empty() {
-                candidates.push(format!("{}.{}", base, ext));
-            } else {
-                candidates.push(format!("{}/{}.{}", resolved_dir, base, ext));
-            }
-        }
-
-        if resolved_dir.is_empty() {
-            candidates.push(format!("{}/mod.rs", base));
-            candidates.push(format!("{}/__init__.py", base));
-            candidates.push(format!("{}/index.ts", base));
-        } else {
-            candidates.push(format!("{}/{}/mod.rs", resolved_dir, base));
-            candidates.push(format!("{}/{}/__init__.py", resolved_dir, base));
-            candidates.push(format!("{}/{}/index.ts", resolved_dir, base));
-        }
+        candidates = resolve_path_candidates(&base, &format!("{}/{}", resolved_dir, base));
     } else {
+        candidates.clear();
         let extensions = ["ts", "tsx", "js", "rs", "py", "go", "java"];
         for ext in &extensions {
             candidates.push(format!("{}.{}", module_path, ext));
         }
     }
 
-    let existing: Vec<String> = {
-        let placeholders: Vec<String> = candidates
-            .iter()
-            .enumerate()
-            .map(|(i, _)| format!("?{}", i + 1))
-            .collect();
-        let sql = format!(
-            "SELECT DISTINCT path FROM files WHERE path IN ({})",
-            placeholders.join(", ")
-        );
-        let mut stmt = match db.prepare(&sql) {
-            Ok(s) => s,
-            Err(_) => return Vec::new(),
-        };
-        let params: Vec<&dyn rusqlite::ToSql> = candidates
-            .iter()
-            .map(|c| c as &dyn rusqlite::ToSql)
-            .collect();
-        stmt.query_map(params.as_slice(), |r| r.get(0))
-            .ok()
-            .and_then(|rows| rows.collect::<Result<_, _>>().ok())
-            .unwrap_or_default()
-    };
+    filter_existing(db, &candidates)
+}
 
-    existing
+fn resolve_path_candidates(base: &str, full_path: &str) -> Vec<String> {
+    let mut candidates = Vec::new();
+    let extensions = [
+        "ts", "tsx", "js", "jsx", "rs", "py", "go", "java", "rb", "c", "cpp", "h",
+    ];
+    for ext in &extensions {
+        candidates.push(format!("{}.{}", full_path, ext));
+    }
+    candidates.push(format!("{}/mod.rs", full_path));
+    candidates.push(format!("{}/__init__.py", full_path));
+    candidates.push(format!("{}/index.ts", full_path));
+    if base != full_path {
+        for ext in &extensions {
+            candidates.push(format!("{}.{}", base, ext));
+        }
+        candidates.push(format!("{}/mod.rs", base));
+        candidates.push(format!("{}/__init__.py", base));
+        candidates.push(format!("{}/index.ts", base));
+    }
+    candidates
+}
+
+fn filter_existing(db: &rusqlite::Connection, candidates: &[String]) -> Vec<String> {
+    if candidates.is_empty() {
+        return Vec::new();
+    }
+    let placeholders: Vec<String> = candidates
+        .iter()
+        .enumerate()
+        .map(|(i, _)| format!("?{}", i + 1))
+        .collect();
+    let sql = format!(
+        "SELECT DISTINCT path FROM files WHERE path IN ({})",
+        placeholders.join(", ")
+    );
+    let mut stmt = match db.prepare(&sql) {
+        Ok(s) => s,
+        Err(_) => return Vec::new(),
+    };
+    let params: Vec<&dyn rusqlite::ToSql> = candidates
+        .iter()
+        .map(|c| c as &dyn rusqlite::ToSql)
+        .collect();
+    stmt.query_map(params.as_slice(), |r| r.get(0))
+        .ok()
+        .and_then(|rows| rows.collect::<Result<_, _>>().ok())
+        .unwrap_or_default()
+}
+
+fn find_project_root_from_file(file_path: &str) -> Option<std::path::PathBuf> {
+    let mut dir = std::path::PathBuf::from(file_path);
+    loop {
+        dir.pop();
+        if dir.join("Cargo.toml").exists()
+            || dir.join("tsconfig.json").exists()
+            || dir.join("go.mod").exists()
+            || dir.join("pyproject.toml").exists()
+            || dir.join("package.json").exists()
+            || dir.join(".sqmd").exists()
+        {
+            return Some(dir);
+        }
+        if !dir.pop() {
+            return None;
+        }
+    }
 }
 
 fn resolve_rust_path(
@@ -282,29 +360,7 @@ fn resolve_rust_path(
         candidates.push(format!("{}/{}/mod.rs", dir, snake));
     }
 
-    let existing: Vec<String> = {
-        let placeholders: Vec<String> = candidates
-            .iter()
-            .enumerate()
-            .map(|(i, _)| format!("?{}", i + 1))
-            .collect();
-        let sql = format!(
-            "SELECT DISTINCT path FROM files WHERE path IN ({})",
-            placeholders.join(", ")
-        );
-        let mut stmt = match db.prepare(&sql) {
-            Ok(s) => s,
-            Err(_) => return Vec::new(),
-        };
-        let params: Vec<&dyn rusqlite::ToSql> = candidates
-            .iter()
-            .map(|c| c as &dyn rusqlite::ToSql)
-            .collect();
-        stmt.query_map(params.as_slice(), |r| r.get(0))
-            .ok()
-            .and_then(|rows| rows.collect::<Result<_, _>>().ok())
-            .unwrap_or_default()
-    };
+    let existing = filter_existing(db, &candidates);
 
     existing
 }
