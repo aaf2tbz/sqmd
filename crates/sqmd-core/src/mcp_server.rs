@@ -576,6 +576,25 @@ fn tools() -> Vec<Value> {
             "description": "Check index health — integrity, orphan counts, index/WAL size, FTS/vector consistency.",
             "inputSchema": { "type": "object", "properties": {} }
         }),
+        json!({
+            "name": "projects",
+            "description": "List registered projects, add/remove projects, or search across multiple projects.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": ["list", "add", "remove", "search"],
+                        "description": "Action to perform"
+                    },
+                    "name": { "type": "string", "description": "Project name (for add/remove)" },
+                    "path": { "type": "string", "description": "Project root path (for add)" },
+                    "query": { "type": "string", "description": "Search query (for search action)" },
+                    "top_k": { "type": "integer", "description": "Max results (for search action)", "default": 10 }
+                },
+                "required": ["action"]
+            }
+        }),
     ]
 }
 
@@ -601,6 +620,7 @@ fn call_tool(
         "ls" => tool_ls(db, args),
         "cat" => tool_cat(db, args),
         "health" => tool_health(db),
+        "projects" => tool_projects(args),
         _ => Err(format!("Unknown tool: {name}").into()),
     }
 }
@@ -1346,6 +1366,92 @@ fn tool_health(db: &Connection) -> Result<Vec<Value>, Box<dyn std::error::Error>
         text.push_str("\n**Orphans**: none\n");
     }
     Ok(vec![json!({ "type": "text", "text": text })])
+}
+
+fn tool_projects(args: &Value) -> Result<Vec<Value>, Box<dyn std::error::Error>> {
+    let action = args["action"]
+        .as_str()
+        .ok_or("missing 'action' parameter")?;
+    let reg = crate::multi_project::ProjectsRegistry::load();
+
+    match action {
+        "list" => {
+            let list = reg.list();
+            if list.is_empty() {
+                Ok(vec![
+                    json!({ "type": "text", "text": "No projects registered." }),
+                ])
+            } else {
+                let mut text = String::from("Registered projects:\n\n");
+                for (name, entry) in &list {
+                    text.push_str(&format!("  {} -> {}\n", name, entry.path));
+                }
+                Ok(vec![json!({ "type": "text", "text": text })])
+            }
+        }
+        "add" => {
+            let name = args["name"].as_str().ok_or("missing 'name'")?;
+            let path = args["path"].as_str().ok_or("missing 'path'")?;
+            let mut reg = reg;
+            reg.add(name.to_string(), path.to_string());
+            reg.save()?;
+            Ok(vec![
+                json!({ "type": "text", "text": format!("Added project '{}'", name) }),
+            ])
+        }
+        "remove" => {
+            let name = args["name"].as_str().ok_or("missing 'name'")?;
+            let mut reg = reg;
+            reg.remove(name);
+            reg.save()?;
+            Ok(vec![
+                json!({ "type": "text", "text": format!("Removed project '{}'", name) }),
+            ])
+        }
+        "search" => {
+            let query = args["query"].as_str().ok_or("missing 'query'")?;
+            let top_k = args["top_k"].as_u64().unwrap_or(10) as usize;
+            let project_spec = args["project"].as_str();
+            let paths: Vec<std::path::PathBuf> = if let Some(spec) = project_spec {
+                spec.split(',')
+                    .filter_map(|p| reg.resolve_path(p.trim()))
+                    .collect()
+            } else {
+                reg.list()
+                    .iter()
+                    .filter_map(|(_, entry)| {
+                        let p = std::path::PathBuf::from(&entry.path);
+                        if p.join(".sqmd").join("index.db").exists() {
+                            Some(p)
+                        } else {
+                            None
+                        }
+                    })
+                    .collect()
+            };
+            if paths.is_empty() {
+                return Ok(vec![
+                    json!({ "type": "text", "text": "No projects to search." }),
+                ]);
+            }
+            let results = crate::multi_project::multi_project_search(&paths, query, top_k)?;
+            let mut text = String::new();
+            for r in &results {
+                text.push_str(&format!(
+                    "[{}] {} ({}) {}-{} score={:.2}\n\n",
+                    r.project,
+                    r.file_path,
+                    r.name.as_deref().unwrap_or("?"),
+                    r.line_start + 1,
+                    r.line_end + 1,
+                    r.score,
+                ));
+                text.push_str(&r.markdown);
+            }
+            Ok(vec![json!({ "type": "text", "text": text })])
+        }
+        _ => Err(format!("Unknown projects action: {}", action).into()),
+    }
 }
 
 use rusqlite::params;

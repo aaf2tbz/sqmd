@@ -14,6 +14,7 @@ pub mod index;
 pub mod languages;
 pub mod maintain;
 pub mod mcp_server;
+pub mod multi_project;
 #[cfg(feature = "native")]
 pub mod native;
 pub mod query_cache;

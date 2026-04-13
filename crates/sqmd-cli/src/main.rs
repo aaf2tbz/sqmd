@@ -212,6 +212,40 @@ enum Commands {
         /// Version to install (default: latest)
         version: Option<String>,
     },
+    /// Manage multi-project registry
+    Projects {
+        #[command(subcommand)]
+        action: ProjectAction,
+    },
+}
+
+#[derive(Subcommand, Clone)]
+enum ProjectAction {
+    /// Add a project to the registry
+    Add {
+        /// Project name
+        name: String,
+        /// Project root path
+        path: PathBuf,
+    },
+    /// Remove a project from the registry
+    Remove {
+        /// Project name
+        name: String,
+    },
+    /// List all registered projects
+    List,
+    /// Search across multiple projects
+    Search {
+        /// Search query
+        query: String,
+        /// Maximum results
+        #[arg(short, long, default_value = "10")]
+        top_k: usize,
+        /// Comma-separated project names or paths
+        #[arg(long)]
+        project: Option<String>,
+    },
 }
 
 fn main() {
@@ -290,6 +324,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         Commands::Doctor { check } => cmd_doctor(check.as_deref()),
         Commands::Update { force } => cmd_update(force),
         Commands::Install { version } => cmd_install(version.as_deref()),
+        Commands::Projects { action } => cmd_projects(action, cli.json),
     }
 }
 
@@ -1744,6 +1779,117 @@ fn cmd_install(version: Option<&str>) -> Result<(), Box<dyn std::error::Error>> 
             std::process::exit(1);
         }
         println!("Cloned. Run `sqmd install` again to build.");
+    }
+    Ok(())
+}
+
+fn cmd_projects(action: ProjectAction, is_json: bool) -> Result<(), Box<dyn std::error::Error>> {
+    match action {
+        ProjectAction::Add { name, path } => {
+            let mut reg = sqmd_core::multi_project::ProjectsRegistry::load();
+            let path_str = path.to_string_lossy().to_string();
+            if !path.join(".sqmd").join("index.db").exists() {
+                eprintln!("Warning: no .sqmd/index.db found at {}", path.display());
+            }
+            reg.add(name.clone(), path_str);
+            reg.save()?;
+            if is_json {
+                println!(
+                    "{}",
+                    serde_json::json!({"ok": true, "action": "add", "name": name})
+                );
+            } else {
+                println!("Added project '{}'", name);
+            }
+        }
+        ProjectAction::Remove { name } => {
+            let mut reg = sqmd_core::multi_project::ProjectsRegistry::load();
+            reg.remove(&name);
+            reg.save()?;
+            if is_json {
+                println!(
+                    "{}",
+                    serde_json::json!({"ok": true, "action": "remove", "name": name})
+                );
+            } else {
+                println!("Removed project '{}'", name);
+            }
+        }
+        ProjectAction::List => {
+            let reg = sqmd_core::multi_project::ProjectsRegistry::load();
+            let list = reg.list();
+            if list.is_empty() {
+                if is_json {
+                    println!("{}", serde_json::json!({"projects": []}));
+                } else {
+                    println!("No projects registered. Use `sqmd projects add <name> <path>`");
+                }
+            } else {
+                if is_json {
+                    let entries: Vec<serde_json::Value> = list
+                        .iter()
+                        .map(|(name, entry)| serde_json::json!({"name": name, "path": entry.path}))
+                        .collect();
+                    println!("{}", serde_json::json!({"projects": entries}));
+                } else {
+                    println!("Registered projects:\n");
+                    for (name, entry) in &list {
+                        let exists = PathBuf::from(&entry.path)
+                            .join(".sqmd")
+                            .join("index.db")
+                            .exists();
+                        let status = if exists { "" } else { " (not found)" };
+                        println!("  {} -> {}{}", name, entry.path, status);
+                    }
+                }
+            }
+        }
+        ProjectAction::Search {
+            query,
+            top_k,
+            project,
+        } => {
+            let reg = sqmd_core::multi_project::ProjectsRegistry::load();
+            let paths: Vec<PathBuf> = if let Some(ref project_spec) = project {
+                project_spec
+                    .split(',')
+                    .filter_map(|p| reg.resolve_path(p.trim()))
+                    .collect()
+            } else {
+                reg.list()
+                    .iter()
+                    .filter_map(|(_, entry)| {
+                        let p = PathBuf::from(&entry.path);
+                        if p.join(".sqmd").join("index.db").exists() {
+                            Some(p)
+                        } else {
+                            None
+                        }
+                    })
+                    .collect()
+            };
+            if paths.is_empty() {
+                eprintln!("No projects to search. Register projects with `sqmd projects add`");
+                return Ok(());
+            }
+            let results = sqmd_core::multi_project::multi_project_search(&paths, &query, top_k)?;
+            if is_json {
+                println!("{}", serde_json::to_string_pretty(&results)?);
+            } else {
+                for r in &results {
+                    println!(
+                        "[{}] {} ({}) {}-{} score={:.2}",
+                        r.project,
+                        r.file_path,
+                        r.name.as_deref().unwrap_or("?"),
+                        r.line_start + 1,
+                        r.line_end + 1,
+                        r.score,
+                    );
+                    println!("{}", r.markdown);
+                }
+            }
+        }
     }
     Ok(())
 }
