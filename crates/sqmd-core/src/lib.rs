@@ -18,6 +18,7 @@ pub mod mcp_server;
 pub mod multi_project;
 #[cfg(feature = "native")]
 pub mod native;
+pub mod plugin;
 pub mod query_cache;
 pub mod relationships;
 pub mod schema;
