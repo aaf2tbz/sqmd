@@ -2,7 +2,7 @@
 
 ## Overview
 
-A single Rust binary (~10MB) that turns any codebase into a queryable SQLite database of semantically chunked code, with tree-sitter parsing, local embeddings, FTS5 + vector hybrid search, and an import/call relationship graph. Zero network. Zero external services. Works offline.
+A single Rust binary (~10MB) that turns any codebase into a queryable SQLite database of semantically chunked code, with tree-sitter parsing, local embeddings via llama.cpp, FTS5 + vector hybrid search, and an import/call relationship graph. Zero network. Zero external services. Works offline. Exposes 12 MCP tools for AI agent integration.
 
 ### Design principle: raw code, derived Markdown
 
@@ -17,7 +17,7 @@ Validated the two riskiest dependencies before committing to the stack.
 ### Results
 
 - **sqlite-vec**: Compiled statically via the `sqlite-vec` Rust crate. Registered as a process-level singleton via `sqlite3_auto_extension`.
-- **ort v2.0.0-rc.12**: Works. Model load ~220ms (cached), inference ~17ms/chunk. nomic-embed-text-v1.5 q8 ONNX model (768 dims) cached at `~/.sqmd/models/`.
+- **llama.cpp**: Works via `llama-cpp-2` crate. Model load ~220ms (cached), inference ~17ms/chunk. mxbai-embed-large GGUF (1024 dims). Metal GPU acceleration on Apple Silicon.
 
 ---
 
@@ -59,7 +59,7 @@ Validated the two riskiest dependencies before committing to the stack.
 
 - Rayon parallelism: 4-phase pipeline (walk -> read -> chunk -> write)
 - mtime pre-filter: skip files where mtime unchanged; content hash verified before writing
-- `index_file()`: single-file re-index for watcher integration
+- `index_file()`: single-file re-index for watcher and MCP integration
 - File watcher via `notify` crate: recursive watch, 200ms debounce
 - Batch tombstone cleanup via `IN (...)` queries
 
@@ -71,13 +71,11 @@ Validated the two riskiest dependencies before committing to the stack.
 
 ### What shipped
 
-- `Embedder` struct: lazy-loads nomic-embed-text-v1.5 ONNX model (768 dims)
+- Native llama.cpp embeddings via `llama-cpp-2` crate (mxbai-embed-large, 1024 dims)
 - Hybrid search engine:
   - `fts_search()`: FTS5 with Porter stemming, file/type filters, rank normalization
   - `vec_search()`: KNN via `chunks_vec` (sqlite-vec), cosine distance
-  - `hybrid_search()`: alpha-blended merge, single-source penalty (0.8)
-- Adaptive padding to nearest multiple-of-64 (not power-of-two)
-- Real batched ONNX inference (single forward pass)
+  - `layered_search()`: 5-layer pipeline (FTS, graph, communities, vector, hint vector)
 
 ---
 
@@ -103,7 +101,7 @@ Validated the two riskiest dependencies before committing to the stack.
 - `ContextAssembler`: token-budgeted context assembly
 - `sqmd context --query --files --max-tokens --deps --dep-depth`
 - Unix socket daemon (`~/.sqmd/daemon.sock`) with JSON protocol
-- Methods: `search`, `cat`, `get`, `ls`, `context`, `stats`, `ingest`, `ingest_batch`, `forget`, `modify`, `embed`, `embed_text`, `embed_batch`
+- Methods: `search`, `cat`, `get`, `ls`, `context`, `stats`, `index_file`, `embed`
 
 ---
 
@@ -127,7 +125,7 @@ Validated the two riskiest dependencies before committing to the stack.
 ### What shipped
 
 - Asymmetric retrieval (`search_query:` / `search_document:` prefixes)
-- Real batch ONNX embedding (was a loop calling `embed_one`)
+- Real batch llama.cpp embedding (was a loop calling `embed_one`)
 - vec_search filter parity (source_type, agent_id)
 - Temporal decay scoring
 - Multi-threaded daemon (one connection per client thread)
@@ -136,27 +134,21 @@ Validated the two riskiest dependencies before committing to the stack.
 
 ## Phase 9: Performance Overhaul — COMPLETE
 
-**Goal:** Speed, memory, and search quality improvements for v1.2.0.
+**Goal:** Speed, memory, and search quality improvements.
 
 ### What shipped
 
-- **Wired dampening + importance boost** into both FTS and hybrid search
+- **Wired dampening + importance boost** into both FTS and layered search
 - **mmap + WAL tuning** (256MB mmap, autocheckpoint=1000, 8K page cache)
 - **Read-consistent snapshots** (FTS search in BEGIN/COMMIT)
 - **Single-pass tree-sitter** (AST reused for import extraction)
 - **Fixed N+1 hint merge** (batch `IN (...)` query)
-- **Adaptive embedding padding** (multiple-of-64, single-pass tokenization)
-- **Shared daemon Embedder** (`Arc<Mutex<Option<Embedder>>>`)
+- **Shared daemon Embedder** (`Arc<Mutex<Option<EmbedProvider>>>`)
 - **FTS5 Porter stemming** (schema v5 migration)
 - **Batch tombstone writes** (hints, entity_attributes, relationships via `IN (...)`)
 - **Read-only fast-path** (`open_fast()` for daemon read handlers)
-- **LRU query cache** (256 entries, 10s TTL)
+- **In-memory query cache** (100 entries, 10s TTL)
 - **Pre-rendered markdown** in search, cat, and get responses
-
-### E2E validation
-
-- 70 tests (default), 78 tests (embed), 0 clippy warnings
-- CI green on all jobs (build + test + clippy, default + embed)
 
 ---
 
@@ -166,12 +158,11 @@ Validated the two riskiest dependencies before committing to the stack.
 
 ### What shipped
 
-- **HTML chunker** (`tree-sitter-html`): Semantic element classification (Module for html/body/head, Struct for header/nav/main/footer/section/form, Section for script/style/generic). Handles `.html` and `.htm` extensions. Recursive walk for nested elements.
-- **CSS chunker** (`tree-sitter-css`): Selector extraction (Struct for rule_set, Module for @media/@keyframes/@supports/@layer). Handles `.css`, `.scss`, `.sass`, `.less` extensions.
+- **HTML chunker** (`tree-sitter-html`): Semantic element classification
+- **CSS chunker** (`tree-sitter-css`): Selector extraction (rule_set, @media/@keyframes/@supports)
 - **C, C++, CMake, QML, Meson, Ruby** chunkers added in prior phases
 - Schema v11 (community_type)
-- 18 languages total, all with dedicated chunkers
-- 124 tests passing
+- 17 tree-sitter grammars + 21 line-based fallback languages = 38 total
 
 ---
 
@@ -181,12 +172,30 @@ Validated the two riskiest dependencies before committing to the stack.
 
 ### What shipped
 
-- **Semantic hint retrieval** (Gap 1): `hints_vec` virtual table (schema v12) enables vector KNN search over hint text. `store_hint_embedding()` and `hint_vec_search()` integrate into `hybrid_search()` as a fourth scoring signal alongside content FTS, content vector, and hint FTS. `embed_unembedded()` now also embeds concatenated hint text per chunk.
-- **LLM prospective hints** (Gap 2): New `ollama` feature flag with `OllamaClient` calling Ollama's `/api/generate` endpoint. Uses gemma3:4b (configurable via `SQMD_HINT_MODEL`) to generate 3 natural-language retrieval cues per chunk at index time. Only generated for chunks with `importance >= 0.5`. Stored with `hint_type='prospective'`.
-- **Eval harness generalization** (Gap 3): `sqmd-bench` restructured with subcommands (`run`, `generate`, `compare`). `generate` walks chunks and produces held-out eval queries (Ollama if available, template fallback). `compare` runs queries through multiple lanes (fts, layered, hybrid) and computes Hit@1/3/5 + MRR per lane.
-- **Session summaries** (Gap 4): `ingest_batch()` generates a summary chunk for batches > 1, aggregating names and content previews. Creates `contains` relationships from summary to children. Provides document-level retrieval surface for fragmented knowledge.
-- **Feature separation**: `embed` (nomic-embed-text, ONNX) and `ollama` (gemma3:4b, Ollama API) are independent features. Embeddings run on the embedding model, hint generation runs on the language model.
-- 124 tests passing, 0 clippy warnings
+- **Semantic hint retrieval** (Gap 1): `hints_vec` virtual table (schema v12) enables vector KNN search over hint text
+- **LLM prospective hints** (Gap 2): Native llama.cpp (phi4-mini) generates natural-language retrieval cues per chunk. Only for chunks with `importance >= 0.5`
+- **Eval harness generalization** (Gap 3): `sqmd-bench` restructured with `run`, `generate`, `compare` subcommands
+- **Session summaries** (Gap 4): `ingest_batch()` generates summary chunks with `contains` edges to children
+- **Native runtime unification**: Both embeddings (mxbai-embed-large) and hints (phi4-mini) use llama.cpp via `llama-cpp-2`
+
+---
+
+## Phase 12: MCP Server + Agent Workflows — COMPLETE
+
+**Goal:** Expose sqmd as an MCP server for AI coding tools, add agent workflow features.
+
+### What shipped
+
+- **MCP server** (`sqmd mcp`): JSON-RPC 2.0 over stdio, 12 tools
+- **Both transport modes**: `Content-Length:` framed and raw JSON line-delimited
+- **Harness setup** (`sqmd setup`): Auto-configure OpenCode, Codex, Claude Code, Cursor
+- **Background embedding**: `embed_start`, `embed_progress`, `embed_stop` MCP tools
+- **Worktree support**: Index discovery via `git rev-parse --git-common-dir`
+- **Project root safety**: CWD fallback when `.sqmd/` resolves to home directory
+- **sqmd-review skill**: Iterative git-connected code review with prior review awareness
+- **24 CLI subcommands**: Full lifecycle management from init to update
+- **Doctor command**: Diagnostic checks for index, embed, model, mcp, daemon
+- **Diff command**: Show chunks modified since a timestamp
 
 ---
 
@@ -206,11 +215,37 @@ Validated the two riskiest dependencies before committing to the stack.
 | 9 — Performance Overhaul | **COMPLETE** |
 | 10 — Extended Language Support | **COMPLETE** |
 | 11 — Recall Research Integration | **COMPLETE** |
+| 12 — MCP Server + Agent Workflows | **COMPLETE** |
 
-**v1.0.0** — all phases through 8 complete.
+**v1.0.0** — phases 0-8.
 **v1.1.0** — production hardening for signet-sqmd integration.
 **v1.2.0** — performance overhaul, markdown output, CI reliability.
 **v2.0.0** — HTML/CSS languages, semantic hint retrieval, LLM prospective hints, eval harness, session summaries, schema v12.
+**v3.0.0** — ONNX replaced with native llama.cpp, MCP server, harness setup, background embedding.
+**v3.3.0** — worktree support, MCP index discovery, sqmd-review v2.
+**v3.4.0** — sqmd-review rewrite with git-connected iterative workflow.
+**v3.4.1** — MCP project root safety fix, tombstoning prevention.
+
+---
+
+## Future Directions
+
+### Entity Graph Redesign
+
+See [design/entity-graph-redesign.md](design/entity-graph-redesign.md) for the full proposal. Key goals:
+
+- Symbol-level entities (per-function/class, not per-file)
+- Auto-populated `entity_dependencies` during indexing
+- Merged graph layers (entity_deps as single source of truth)
+- Graph-driven relational hints
+- Community graph upgrade (module + type-hierarchy clusters)
+
+### Potential New Features
+
+- **Per-project config**: `.sqmd/config.toml` for language-specific settings, custom importance weights
+- **Cross-project search**: Search across multiple `.sqmd/index.db` files
+- **Web UI**: Browser-based code exploration dashboard
+- **Plugin system**: Custom chunkers, search layers, and post-processing hooks
 
 ---
 
@@ -218,14 +253,16 @@ Validated the two riskiest dependencies before committing to the stack.
 
 | Dependency | Risk | Status |
 |-----------|------|--------|
-| `tree-sitter` + language grammars | Low | Shipped (Phase 2, 10) |
+| `tree-sitter` + 17 language grammars | Low | Shipped (Phase 2, 10) |
 | `rusqlite` (bundled) | Low | Shipped (Phase 1) |
-| `sqlite-vec` (static compile) | Medium | Shipped — compiled in, non-fatal |
-| `ort` v2 RC (ONNX Runtime) | Medium | Shipped — feature-gated |
+| `sqlite-vec` (static compile) | Low | Shipped — compiled in, non-fatal |
+| `llama-cpp-2` | Medium | Shipped — feature-gated (`native`) |
 | `notify` (file watcher) | Low | Shipped (Phase 3) |
 | `rayon` | Low | Shipped (Phase 3) |
 | `chrono` | Low | Shipped (Phase 8) |
 | `clap` (derive) | Low | Shipped (Phase 1) |
-| `ureq` (Ollama HTTP) | Low | Shipped — feature-gated (Phase 11) |
-| `tree-sitter-html` | Low | Shipped (Phase 10) |
-| `tree-sitter-css` | Low | Shipped (Phase 10) |
+| `dirs` | Low | Shipped (Phase 12) |
+| `sha2` | Low | Shipped (Phase 1) |
+| `serde` / `serde_json` | Low | Shipped (Phase 1) |
+| `ignore` | Low | Shipped (Phase 3) |
+| `walkdir` | Low | Shipped (Phase 1) |

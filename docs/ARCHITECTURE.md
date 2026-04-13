@@ -2,7 +2,7 @@
 
 ## System Overview
 
-sqmd is a local-first code index built as a single Rust binary. It parses source files into semantically meaningful chunks, stores them in SQLite with vector embeddings, relationship metadata, and an entity knowledge graph. Serves hybrid search queries to AI agents in under 20ms. All query responses include a pre-rendered `markdown` field for direct agent prompt injection.
+sqmd is a local-first code index built as a single Rust binary. It parses source files into semantically meaningful chunks, stores them in SQLite with vector embeddings, relationship metadata, and an entity knowledge graph. Serves hybrid search queries to AI agents via MCP (JSON-RPC over stdio) or a Unix socket daemon. All query responses include a pre-rendered `markdown` field for direct agent prompt injection.
 
 ## Components
 
@@ -10,7 +10,9 @@ sqmd is a local-first code index built as a single Rust binary. It parses source
 +-----------------------------------------------------------------+
 |                          sqmd-cli                                |
 |  init | index | watch | search | get | cat | deps | context     |
-|  entities | entity-deps | prune | serve | stats                 |
+|  entities | entity-deps | prune | serve | stats | hints        |
+|  start | stop | mcp | setup | doctor | update | install | reset |
+|  diff | ls                                                  |
 +---------------------------+-------------------------------------+
                             |
 +---------------------------v-------------------------------------+
@@ -19,12 +21,12 @@ sqmd is a local-first code index built as a single Rust binary. It parses source
 |  +----------+ +----------+ +----------+ +----------+           |
 |  | chunker  | | embedder | |  search  | |  graph   |           |
 |  |          | |          | |          | |          |           |
-|  |tree-sitter| |  ONNX    | | FTS5 +   | | import   |           |
-|  | per-lang | | nomic    | | hints +  | | call     |           |
-|  | AST walk | | q8 model | | vec0 +   | | contains |           |
-|  |          | |          | | hint_vec | | graph    |           |
-|  |          | |          | | graph +  | |          |           |
-|  |          | |          | | cache    | |          |           |
+|  |tree-sitter| | llama   | | FTS5 +   | | import   |           |
+|  | 17 langs | | cpp-2   | | hints +  | | call     |           |
+|  | + 21    | | native  | | vec0 +   | | contains |           |
+|  | line-   | | mxbai   | | hint_vec | | graph    |           |
+|  | based   | | phi4    | | graph +  | |          |           |
+|  | fallback| | Metal   | | comm.    | |          |           |
 |  +----+-----+ +----+-----+ +----+-----+ +----+-----+           |
 |       |             |             |             |                |
 |  +----v-----------+-v-------------v-------------v-------+       |
@@ -34,18 +36,19 @@ sqmd is a local-first code index built as a single Rust binary. It parses source
 |  |  relationships | hints | hints_fts | hints_vec      |       |
 |  |  entities | entity_aspects | entity_attributes       |       |
 |  |  entity_dependencies | communities | episodes         |       |
+|  |  embeddings | schema_version                       |       |
 |  |                                                      |       |
 |  |  WAL mode | mmap | soft-delete | decision pipeline   |       |
 |  +------------------------------------------------------+       |
 +-----------------------------------------------------------------+
-
-+----------+       +----------+
-| ollama   |       | sqmd-bench|
-| (opt.)   |       |           |
-| gemma3:4b|       | run       |
-| hints    |       | generate  |
-|          |       | compare   |
-+----------+       +----------+
+       |                                          |
++------v------+                              +----v-------+
+| MCP server |                              | sqmd-bench  |
+| JSON-RPC   |                              |            |
+| stdio      |                              | run        |
+| 12 tools   |                              | generate   |
++------------+                              | compare    |
+                                            +------------+
 ```
 
 ## Data Flow
@@ -56,7 +59,7 @@ sqmd is a local-first code index built as a single Rust binary. It parses source
 Source file (e.g., src/auth.ts)
     |
     v
-Language detection (extension -> tree-sitter grammar)
+Language detection (extension -> Language enum -> tree-sitter grammar)
     |
     v
 tree-sitter parse -> AST    [parse ONCE]
@@ -83,22 +86,20 @@ Insert into SQLite:
     +---> hints + hints_fts (prospective indexing, porter-stemmed)
     +---> structural importance (graph density)
     |
-    +---> [if ollama feature] Generate LLM prospective hints (gemma3:4b)
+    +---> [if native feature] Generate LLM prospective hints (phi4-mini)
     |        -> hints with type='prospective' (importance >= 0.5 only)
     |
-    v (if embed feature enabled)
-ONNX embed -> store in chunks_vec + hints_vec
+    v (if native feature enabled)
+llama.cpp embed -> store in chunks_vec + hints_vec
 ```
 
-### Querying
+### Querying (MCP)
 
 ```
 Agent query: "how does authentication work"
     |
     v
-Query cache (LRU, 256 entries, 10s TTL)
-    +---> HIT: return cached results (structured + markdown)
-    +---> MISS: continue
+MCP server (JSON-RPC 2.0 over stdio, framed or raw)
     |
     v
 BEGIN (read-consistent snapshot)
@@ -107,13 +108,12 @@ BEGIN (read-consistent snapshot)
     +---> hints_fts MATCH (porter-stemmed) -> prospective hint results
     |       +---> batch hint merge (single IN (...) query)
     +---> entity graph -> graph_boost_ids (batch entity LIKE + recursive CTE)
-    +---> (if embed) ONNX embed -> query vector
+    +---> (if native) llama.cpp embed -> query vector
     |       +---> sqlite-vec KNN on chunks_vec -> content vector results
     |       +---> sqlite-vec KNN on hints_vec -> hint vector results
     |
     v
-Normalize + alpha-blend (default 70% vector / 30% keyword)
-    +---> merge_hint_vec_results: hint KNN results merged with same logic
+Layered merge (score multipliers per layer)
     |
     v
 importance_boost()     (0.7x-1.0x based on chunk importance field)
@@ -142,28 +142,6 @@ JSON response:
     +---> tooling: use structured fields (chunk_id, file_path, line_start, ...)
 ```
 
-### Knowledge Ingestion
-
-```
-KnowledgeIngestor::ingest_batch([chunk1, chunk2, chunk3, ...])
-    |
-    v
-For each input:
-    +---> content hash dedup check
-    +---> SKIP if duplicate (update last_accessed, bump importance)
-    +---> INSERT if new chunk
-    |
-    v (if batch has > 1 item)
-Session summary generation:
-    +---> Concatenate names + content previews (capped 4000 chars)
-    +---> Create summary chunk (chunk_type=summary, importance=max of children)
-    +---> INSERT summary chunk
-    +---> CREATE contains relationships (summary -> each child)
-    |
-    v
-Result: IngestBatchResult with chunk_ids for all inserted chunks
-```
-
 ### Incremental Update
 
 ```
@@ -185,24 +163,24 @@ sqmd prune --days N -> purge old tombstones
 
 ## SQLite Schema
 
-See [`schema.sql`](./schema.sql) for the base DDL (v5). The migration system in `schema.rs` manages upgrades through v12.
+The migration system in `schema.rs` manages upgrades through v14.
 
 ### Tables
 
 | Table | Purpose | Schema Version |
 |-------|---------|---------------|
-| `files` | Source file metadata (path, language, hash, mtime) | v1 |
+| `files` | Source file metadata (path, language, size, hash, mtime) | v1 |
 | `chunks` | Semantic code chunks (content_raw, signature, line range, metadata) | v1 |
 | `chunks_fts` | FTS5 virtual table for keyword search (porter + unicode61) | v2 |
+| `chunks_vec` | sqlite-vec virtual table (1024-dim vector KNN, float32) | v2 |
 | `relationships` | Import/call/contains graph edges between chunks | v1 |
-| `chunks_vec` | sqlite-vec virtual table (768-dim vector KNN) | v2 |
 | `entities` | Entity knowledge graph nodes (files, structs, functions, etc.) | v3 |
-| `entity_aspects` | Entity facets (exports, implementation, constraints) | v3 |
+| `entity_aspects` | Entity facets (exports, implementation, constraints) with weights | v3 |
 | `entity_attributes` | Chunk-level entity annotations with kind + content | v3 |
 | `entity_dependencies` | Entity-level dependency edges with temporal validity | v3+v7 |
 | `hints` | Prospective search hints (template + LLM-generated) | v3 |
 | `hints_fts` | FTS5 on hints for natural-language query matching | v3 |
-| `hints_vec` | sqlite-vec virtual table (768-dim vector KNN over hints) | v12 |
+| `hints_vec` | sqlite-vec virtual table (1024-dim vector KNN over hints) | v12 |
 | `communities` | Directory, module, and type-hierarchy groupings | v6 |
 | `episodes` | Change provenance tracking | v8 |
 | `embeddings` | Vector blob storage (fallback alongside chunks_vec) | v2 |
@@ -216,7 +194,7 @@ See [`schema.sql`](./schema.sql) for the base DDL (v5). The migration system in 
 
 3. **FTS5 with Porter stemming** -- `chunks_fts` and `hints_fts` use `tokenize='porter unicode61'`. Improves recall for inflected terms (authenticate/authenticating/authenticated all match).
 
-4. **sqlite-vec vector search** -- `chunks_vec` provides fast KNN on 768-dim embeddings. `hints_vec` (schema v12) provides the same for hint text. Both feature-gated behind `--features embed`.
+4. **sqlite-vec vector search** -- `chunks_vec` provides fast KNN on 1024-dim embeddings via mxbai-embed-large. `hints_vec` (schema v12) provides the same for hint text. Both gated behind the `native` feature.
 
 5. **Relationships as first-class data** -- Import, call, and contains relationships extracted during chunking. Stored explicitly for fast recursive CTE traversal.
 
@@ -226,46 +204,41 @@ See [`schema.sql`](./schema.sql) for the base DDL (v5). The migration system in 
 
 8. **Soft-delete with retention** -- Deleted files are tombstoned (not hard-deleted). `sqmd prune --days N` purges old tombstones. Batch cleanup via `IN (...)` queries.
 
-9. **Prospective hint indexing** -- Template-based hints generated for each chunk at index time. LLM-generated hints (via Ollama, gemma3:4b) added when the `ollama` feature is enabled. Both indexed in FTS5 and (when embed is enabled) in `hints_vec`.
+9. **Prospective hint indexing** -- Template-based hints generated for each chunk at index time. LLM-generated hints (via native llama.cpp, phi4-mini) added when the `native` feature is enabled. Both indexed in FTS5 and in `hints_vec`.
 
 10. **Structural importance** -- Graph density (in-degree, contains count, constraint count) boosts chunk importance scores. Highly-depended-upon code ranks higher in search.
 
-11. **Asymmetric retrieval** -- Query embeddings use `search_query:` prefix and document embeddings use `search_document:` prefix (nomic-embed-text-v1.5).
+11. **Native llama.cpp inference** -- All LLM inference runs through llama.cpp. mxbai-embed-large (1024 dims) for embeddings, phi4-mini for hint generation. Metal GPU offloading on Apple Silicon. No ONNX, no Ollama dependency.
 
-12. **Real batch ONNX inference** -- `embed_batch` stacks inputs into `[N, seq_len]` tensors for a single forward pass. Padded to nearest multiple-of-64.
+12. **Temporal decay** -- Knowledge chunks can have a `decay_rate` (exponential decay per day since `last_accessed`). Search scores multiplied by decay factor, clamped to [0.1, 1.0].
 
-13. **Temporal decay** -- Knowledge chunks can have a `decay_rate` (exponential decay per day since `last_accessed`). Search scores multiplied by decay factor, clamped to [0.1, 1.0].
+13. **Filter parity** -- Both FTS5 and vector search respect the same filter set: `file`, `type`, `source_type`, `agent_id`.
 
-14. **Filter parity** -- Both FTS5 and vector search respect the same filter set: `file`, `type`, `source_type`, `agent_id`.
+14. **Multi-threaded daemon** -- Each client connection spawns its own thread. Read handlers use `open_fast()` (read-only, no migration check). Write handlers use `open()`. Shared `DaemonState` with `Arc<Mutex>` for query cache and embedder.
 
-15. **Multi-threaded daemon** -- Each client connection spawns its own thread. Read handlers use `open_fast()` (read-only, no migration check). Write handlers use `open()`. Shared `DaemonState` with `Arc<Mutex>` for query cache and embedder.
+15. **Query cache** -- In-memory cache (100 entries, 10s TTL) deduplicates repeated agent searches within the TTL window.
 
-16. **Query cache** -- LRU cache (256 entries, 10s TTL) deduplicates repeated agent searches within the TTL window.
+16. **Read-consistent snapshots** -- FTS search runs inside `BEGIN`/`COMMIT` so all phases see the same data state.
 
-17. **Read-consistent snapshots** -- FTS search runs inside `BEGIN`/`COMMIT` so all phases see the same data state.
-
-18. **Session summaries** -- Knowledge batches (>1 item) automatically produce a summary chunk with `contains` edges to children. Provides document-level retrieval for fragmented knowledge, addressing the "note-level beats chunked" finding from the Obsidian Vault recall eval.
-
-19. **Separate embedding and LLM models** -- The `embed` feature uses nomic-embed-text-v1.5 (local ONNX, 768 dims) for vector search. The `ollama` feature uses gemma3:4b (local Ollama API) for prospective hint generation. These are independent: embeddings run on the embedding model, hints run on the language model.
+17. **MCP server** -- JSON-RPC 2.0 over stdio supporting both `Content-Length:` framed and raw JSON line-delimited transport. Falls back to CWD for project root when `.sqmd/` is at `~/.sqmd/` to prevent broken relative path resolution.
 
 ## Embedding Model
 
-**Model:** `nomic-embed-text-v1.5` (q8 quantized)
-**Dimensions:** 768
-**Size:** ~50MB (model) + tokenizer
-**Runtime:** ONNX Runtime (ort crate)
-**Cache:** `~/.sqmd/models/`
+**Model:** `mxbai-embed-large` (GGUF format)
+**Dimensions:** 1024
+**Runtime:** llama.cpp via `llama-cpp-2` crate
+**GPU:** Metal acceleration on Apple Silicon (`native-metal` feature)
+**Cache:** `~/.ollama/models/` (auto-discovered) or `SQMD_NATIVE_MODEL`
 
-Feature-gated behind `--features embed`. Default binary is ~10MB; embed binary is ~27MB.
+Feature-gated behind `native`.
 
 ## LLM Hint Generation
 
-**Model:** `gemma3:4b` (configurable via `SQMD_HINT_MODEL`)
-**Runtime:** Ollama API (local)
-**Endpoint:** `POST /api/generate` (stream=false)
-**Config:** `OLLAMA_HOST` (default: `http://localhost:11434`)
+**Model:** `phi4-mini` (configurable via `SQMD_HINT_MODEL`)
+**Runtime:** llama.cpp via `llama-cpp-2` crate (same native runtime as embeddings)
+**Config:** `SQMD_HINT_MODEL_PATH` for direct GGUF path
 
-Feature-gated behind `--features ollama`. Generates 3 prospective hints per chunk at index time for chunks with `importance >= 0.5`. Hints stored with `hint_type='prospective'` for search routing.
+Feature-gated behind `native`. Generates prospective hints per chunk at index time for chunks with `importance >= 0.5`. Hints stored with `hint_type='prospective'` for search routing.
 
 ## Pipeline Intelligence
 
@@ -282,7 +255,7 @@ Hints are generated at two levels:
 
 1. **Template hints** (always) -- Static patterns: "how does {name} work", "{name} implementation", "code in {filename}". For memory chunks: proper nouns, quoted strings, date patterns, key noun phrases.
 
-2. **LLM prospective hints** (optional, `ollama` feature) -- Natural-language queries an LLM predicts someone would search for. Prompted with chunk content, generates 3 queries. More effective for indirect/paraphrased searches.
+2. **LLM prospective hints** (optional, `native` feature) -- Natural-language queries the LLM predicts someone would search for. Prompted with chunk content. More effective for indirect/paraphrased searches.
 
 3. **Relational hints** (always) -- Generated from entity graph: "X implements Y", "X contains Y", "X calls Y", plus reverse directions. Typed with `hint_type` for search routing.
 
@@ -290,7 +263,7 @@ Hints are generated at two levels:
 
 Three-level knowledge graph:
 1. **Entities** -- Files, structs, classes, functions (deduped by canonical name)
-2. **Aspects** -- Facets like "exports", "implementation", "constraints"
+2. **Aspects** -- Facets like "exports", "implementation", "constraints" (with weights)
 3. **Attributes** -- Chunk-level annotations linking entities to code chunks
 
 ### Graph Boost
@@ -319,27 +292,30 @@ Search results boosted by entity graph density. Chunks belonging to highly-depen
 sqmd/
 +-- Cargo.toml
 +-- README.md
++-- CHANGELOG.md
 +-- CONTRIBUTING.md
++-- BENCHMARKING.md
 +-- crates/
 |   +-- sqmd-core/
 |   |   +-- src/
 |   |   |   +-- lib.rs
-|   |   |   +-- schema.rs          # SQLite DDL + migrations (v1-v12)
+|   |   |   +-- schema.rs          # SQLite DDL + migrations (v1-v14)
 |   |   |   +-- chunk.rs           # Chunk struct + ChunkType + SourceType + render_md()
 |   |   |   +-- chunker.rs         # LanguageChunker trait + FileChunker fallback
-|   |   |   +-- index.rs           # Transactional indexer + decision pipeline + KnowledgeIngestor
+|   |   |   +-- index.rs           # Transactional indexer + decision pipeline
 |   |   |   +-- entities.rs        # Entity/aspect/attribute model + hints + graph boost
-|   |   |   +-- embed.rs           # ONNX embedding (ort) + BPE tokenizer + auto-download
-|   |   |   +-- ollama.rs          # Ollama API client for LLM hint generation (feature-gated)
-|   |   |   +-- search.rs          # FTS5 + hints + hint_vec + vector + hybrid + decay
+|   |   |   +-- embed.rs           # EmbedProvider trait + vector encoding + cosine similarity
+|   |   |   +-- native.rs          # llama.cpp runtime: mxbai-embed-large + phi4-mini
+|   |   |   +-- search.rs          # FTS5 + hints + hint_vec + vector + layered + render
 |   |   |   +-- relationships.rs   # Import resolution + call graph + CTE traversal
 |   |   |   +-- context.rs         # Token-budgeted context assembly
 |   |   |   +-- dampening.rs       # Diversity dampening + importance boost
-|   |   |   +-- query_cache.rs     # LRU query cache (256 entries, 10s TTL)
-|   |   |   +-- vfs.rs             # Virtual file system: list, get, diff, tree
+|   |   |   +-- query_cache.rs     # In-memory query cache (100 entries, 10s TTL)
+|   |   |   +-- mcp_server.rs      # MCP JSON-RPC server (stdio, 12 tools)
 |   |   |   +-- daemon.rs          # Unix socket daemon + JSON protocol + shared embedder
 |   |   |   +-- watcher.rs         # File watcher + debounce
-|   |   |   +-- files.rs           # Language detection + file walking + hashing
+|   |   |   +-- files.rs           # Language detection (38 variants) + file walking + hashing
+|   |   |   +-- vfs.rs             # Virtual file system: list, get, diff, tree
 |   |   |   +-- communities.rs     # Directory, module, and type-hierarchy communities
 |   |   |   +-- episodes.rs        # Change provenance tracking
 |   |   |   +-- languages/
@@ -360,23 +336,30 @@ sqmd/
 |   |   |       +-- json.rs        # JSON chunker (keyed pairs)
 |   |   |       +-- yaml.rs        # YAML chunker (keyed mappings)
 |   |   |       +-- toml.rs        # TOML chunker (tables, arrays, pairs)
-|   |   |   +-- tests/
-|   |   |   +-- knowledge_integration.rs
-|   |   +-- Cargo.toml             # features: embed, ollama
+|   |   +-- Cargo.toml             # features: native, native-metal
 |   +-- sqmd-cli/
 |   |   +-- src/
-|   |   |   +-- main.rs            # CLI commands
-|   |   +-- Cargo.toml             # features: embed
+|   |   |   +-- main.rs            # CLI commands (24 subcommands)
+|   |   +-- Cargo.toml             # features: native, native-metal (default: native-metal)
 |   +-- sqmd-bench/
 |       +-- src/
 |       |   +-- main.rs            # Benchmark: run, generate, compare subcommands
-|       +-- Cargo.toml             # features: embed, ollama
+|       +-- Cargo.toml             # features: native, native-metal (default: native-metal)
 +-- docs/
 |   +-- ARCHITECTURE.md
 |   +-- ROADMAP.md
 |   +-- WHAT_IT_IS.md
-|   +-- schema.sql
 |   +-- design/
 |       +-- entity-graph-redesign.md
-+-- .github/workflows/rust.yml
++-- skills/
+|   +-- sqmd-review/
+|       +-- SKILL.md
+|       +-- references/
+|           +-- review-schema.md
++-- references/
+|   +-- memorybench/              # External reference submodule
++-- .github/workflows/
+    +-- rust.yml                   # CI: build + test + clippy
+    +-- bump-version.yml           # Auto-bump from CHANGELOG
+    +-- release.yml                # GitHub Release on version bump
 ```

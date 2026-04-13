@@ -64,7 +64,7 @@ LLMs are bad at reading large codebases. They lose context, hallucinate file pat
 ## Quick Start
 
 ```bash
-cargo build --release --features native
+cargo build --release
 
 cd /path/to/your/project
 sqmd init           # creates .sqmd/index.db
@@ -208,7 +208,7 @@ Supports both raw JSON lines and `Content-Length:` framed transport.
 
 ### Worktrees and Index Discovery
 
-sqmd stores its index at `<project>/.sqmd/index.db`. If you run agents from git worktrees, the MCP server now handles the common setup where the index lives in the main worktree:
+sqmd stores its index at `<project>/.sqmd/index.db`. If you run agents from git worktrees, the MCP server handles the common setup where the index lives in the main worktree:
 
 ```bash
 cd /path/to/main-checkout
@@ -220,7 +220,7 @@ cd ../feature-branch
 sqmd mcp
 ```
 
-When launched from the linked worktree, sqmd asks git for the common git directory, finds the main checkout's `.sqmd/index.db`, and still treats file paths as project-relative. That means `index_file` can safely re-index `src/foo.ts` from the worktree without tombstoning the wrong path.
+When launched from the linked worktree, sqmd asks git for the common git directory, finds the main checkout's `.sqmd/index.db`, and still treats file paths as project-relative. When `.sqmd/` lives at `~/.sqmd/` (global index), the MCP server falls back to CWD for path resolution to prevent broken relative paths.
 
 ## What Gets Indexed
 
@@ -236,6 +236,8 @@ Every function, method, class, struct, enum, trait, interface, type alias, impor
 
 ## Languages
 
+### Tree-sitter grammars (17 languages)
+
 | Language | Grammar | Imports | Chunk types |
 |----------|---------|---------|-------------|
 | TypeScript / JSX | `tree-sitter-typescript` | `import { X } from '...'` | function, class, interface, type, enum, export |
@@ -250,33 +252,60 @@ Every function, method, class, struct, enum, trait, interface, type alias, impor
 | Ruby | `tree-sitter-ruby` | `require '...'` | function, method, class, module, constant |
 | HTML | `tree-sitter-html` | — | element (semantic landmarks) |
 | CSS | `tree-sitter-css` | — | rule_set, media/keyframes/supports |
-| SCSS/SASS | line-based | — | declaration blocks |
 | CMake | `tree-sitter-cmake` | `find_package`, `add_subdirectory` | function, macro, target, dependency, config |
 | QML | `tree-sitter-qmljs` | `import QtQuick 2.15` | component, function, property, import |
-| Meson | regex-based | `dependency()`, `subdir()` | target, dependency, function |
 | YAML | `tree-sitter-yaml` | — | mapping (keyed sections) |
 | JSON | `tree-sitter-json` | — | pair (keyed entries) |
 | TOML | `tree-sitter-toml-ng` | — | table, table_array, pair |
 | Markdown | regex-based | — | section (heading splits) + fenced code blocks |
-| Shell | line-based | — | function, declaration blocks |
-| SQL | line-based | — | statement blocks |
-| Dockerfile | line-based | — | instruction blocks |
-| Makefile | line-based | — | target blocks |
-| Kotlin | line-based | — | function, class blocks |
-| Swift | line-based | — | function, class blocks |
-| C# | line-based | — | function, class blocks |
-| PHP | line-based | — | function, class blocks |
-| Lua | line-based | — | function blocks |
-| Dart | line-based | — | function, class blocks |
-| Scala | line-based | — | function, class blocks |
-| Haskell | line-based | — | function, class blocks |
-| Elixir | line-based | — | function, module blocks |
-| Zig | line-based | — | function, class blocks |
-| XML/SVG | line-based | — | element blocks |
-| GraphQL | line-based | — | definition blocks |
-| Protobuf | line-based | — | message, service blocks |
+| Meson | regex-based | `dependency()`, `subdir()` | target, dependency, function |
 
-17 additional languages use line-based chunking (better than being excluded entirely). Tree-sitter grammars can be added incrementally — see [CONTRIBUTING.md](CONTRIBUTING.md).
+### Line-based chunking (additional 21 languages)
+
+Languages without dedicated tree-sitter grammars still get indexed using line-based chunking. These include: SCSS/SASS, Shell, SQL, Dockerfile, Makefile, Kotlin, Swift, C#, PHP, Lua, Dart, Scala, Haskell, Elixir, Zig, XML/SVG, GraphQL, Protobuf, JSX, and JavaScript (fallback).
+
+### Extension coverage
+
+| Language | Extensions |
+|----------|-----------|
+| TypeScript | `.ts` |
+| TSX | `.tsx` |
+| JavaScript | `.js`, `.mjs`, `.cjs` |
+| JSX | `.jsx` |
+| Rust | `.rs` |
+| Python | `.py`, `.pyi` |
+| Go | `.go` |
+| Java | `.java` |
+| C | `.c`, `.h` |
+| C++ | `.cpp`, `.cc`, `.cxx`, `.hpp`, `.hxx`, `.hh` |
+| CMake | `.cmake`, `CMakeLists.txt` |
+| QML | `.qml` |
+| Meson | `meson.build`, `meson_options.txt` |
+| Ruby | `.rb` |
+| Markdown | `.md`, `.mdx` |
+| JSON | `.json`, `.jsonc` |
+| YAML | `.yml`, `.yaml` |
+| TOML | `.toml` |
+| HTML | `.html`, `.htm` |
+| CSS | `.css`, `.less` |
+| SCSS | `.scss`, `.sass` |
+| Shell | `.sh`, `.bash`, `.zsh`, `.fish` |
+| SQL | `.sql` |
+| Dockerfile | `Dockerfile`, `dockerfile` |
+| Makefile | `Makefile`, `makefile`, `GNUmakefile` |
+| Kotlin | `.kt`, `.kts` |
+| Swift | `.swift` |
+| C# | `.cs` |
+| PHP | `.php` |
+| Lua | `.lua` |
+| Dart | `.dart` |
+| Scala | `.scala`, `.sc` |
+| Haskell | `.hs` |
+| Elixir | `.ex`, `.exs` |
+| Zig | `.zig` |
+| XML | `.xml`, `.svg`, `.xsl`, `.xslt` |
+| GraphQL | `.graphql`, `.gql` |
+| Protobuf | `.proto` |
 
 ## Search
 
@@ -314,16 +343,21 @@ source files
     | native llama.cpp -> mxbai-embed-large embeddings (Metal GPU)
     |
 SQLite database (schema v14)
-    |-- chunks         (raw code + metadata)
-    |-- chunks_fts     (FTS5 full-text index)
-    |-- chunks_vec     (1024-dim vector index)
-    |-- relationships  (imports, contains, calls)
+    |-- files            (path, language, hash, mtime)
+    |-- chunks           (raw code + metadata)
+    |-- chunks_fts       (FTS5 full-text index)
+    |-- chunks_vec       (1024-dim vector index, float32)
+    |-- relationships    (imports, contains, calls)
     |-- entity_dependencies (extends, implements, contains)
-    |-- entities       (symbol-level graph nodes)
+    |-- entities         (symbol-level graph nodes)
+    |-- entity_aspects   (exports, implementation, constraints)
+    |-- entity_attributes (chunk-level entity annotations)
     |-- hints + hints_fts (search hints)
-    |-- hints_vec      (1024-dim vector index over hints)
-    |-- communities    (module, type-hierarchy summaries)
-    +-- episodes       (change provenance)
+    |-- hints_vec        (1024-dim vector index over hints)
+    |-- communities      (module, type-hierarchy summaries)
+    |-- embeddings       (vector blob fallback)
+    |-- episodes         (change provenance)
+    +-- schema_version   (migration tracking)
 ```
 
 Single-pass parsing with incremental re-indexing via content hashes.
@@ -332,7 +366,7 @@ Single-pass parsing with incremental re-indexing via content hashes.
 
 | Feature | Dependencies | Purpose |
 |---------|-------------|---------|
-| `native` (default) | `llama-cpp-2` | Embeddings + text generation via native llama.cpp |
+| `native` (default) | `llama-cpp-2` | Embeddings + hint generation via native llama.cpp |
 | `native-metal` (default on macOS) | `llama-cpp-2/metal` | + Metal GPU acceleration |
 
 No external services required. All inference runs locally through llama.cpp.
@@ -357,12 +391,13 @@ Native Windows support (without WSL2) is not yet tested. All inference runs thro
 ## Build
 
 ```bash
-cargo build --release               # default: native llama.cpp + Metal GPU (macOS)
-cargo build --release --features native  # CPU-only (Linux, macOS Intel, WSL2)
+cargo build --release                              # default: native llama.cpp + Metal GPU (macOS)
+cargo build --release --no-default-features        # no native features (no embeddings/hints)
+cargo build --release --features native             # CPU-only (Linux, macOS Intel, WSL2)
 ```
 
 Build requirements:
-- **Rust** 1.80+ (`rustup`)
+- **Rust** 1.85+ (edition 2024)
 - **CMake** (`brew install cmake` on macOS, `sudo apt install cmake` on Linux)
 - **C compiler** (Xcode CLI tools on macOS, `build-essential` on Linux)
 
@@ -374,6 +409,7 @@ Build requirements:
 sqmd init                            # create index at .sqmd/index.db
 sqmd index                           # full or incremental index
 sqmd index --embed                   # index + generate embeddings
+sqmd index src/auth.ts               # index a single file
 sqmd embed                           # generate embeddings for unembedded chunks
 sqmd watch                           # live re-index on file changes
 ```
@@ -410,10 +446,14 @@ sqmd context --files a.ts,b.ts --max-tokens 4000
 ```bash
 sqmd ls                              # list chunks (tree view)
 sqmd ls --type function              # filter by type
+sqmd ls --file src/auth.ts           # filter by file
+sqmd ls --language rust              # filter by language
 sqmd cat 42                          # get chunk by ID
 sqmd get src/auth.ts:42              # get chunk at file:line
 sqmd stats                           # index statistics
 sqmd entities                        # list knowledge graph entities
+sqmd entity-deps MyStruct            # show entity dependencies
+sqmd diff 2026-04-01T00:00:00Z       # chunks modified since timestamp
 ```
 
 ### Lifecycle
@@ -426,8 +466,11 @@ sqmd mcp                             # start MCP server (JSON-RPC over stdio)
 sqmd setup                           # register sqmd in all AI tool configs
 sqmd setup opencode                  # register for OpenCode only
 sqmd doctor                          # run diagnostic checks
+sqmd doctor --check embed            # check embedding setup specifically
 sqmd update                          # update sqmd to latest version
 sqmd install                         # install sqmd from source
+sqmd reset                           # delete the index
+sqmd prune 30                        # purge soft-deleted chunks older than 30 days
 ```
 
 ### Hint Generation
@@ -457,10 +500,10 @@ Exposes 12 tools:
 | `search` | Layered search with query, top_k, file/type/source filters |
 | `context` | Assemble token-budgeted context with dependency expansion |
 | `deps` | Get dependencies and dependents for a file path |
-| `stats` | Index statistics (files, chunks, embeddings, relationships) |
+| `stats` | Index statistics (files, chunks, embeddings, entities, communities) |
 | `get` | Get chunk by file path and line number |
 | `index_file` | Index a single file or all changed files (incremental) |
-| `embed` | Embed unembedded chunks via local llama.cpp in the current request |
+| `embed` | Embed unembedded chunks via local llama.cpp (blocking, up to batch_size) |
 | `embed_start` | Start embedding in a background thread |
 | `embed_progress` | Poll embedding progress, percentage, progress bar, and ETA |
 | `embed_stop` | Request a graceful stop after the current batch |

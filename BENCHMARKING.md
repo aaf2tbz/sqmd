@@ -15,7 +15,7 @@ sqmd includes a benchmark harness (`sqmd-bench`) for measuring retrieval quality
 | MRR | 0.915 | 0.915 |
 
 **Dataset**: 505 TypeScript files, 8,886 chunks, 3,547 relationships, 200 queries
-**Embedding model**: mxbai-embed-large (1024-dim) via native llama.cpp via native llama.cpp
+**Embedding model**: mxbai-embed-large (1024-dim) via native llama.cpp with Metal GPU
 **Performance**: ~0.55s per query, ~19 q/sec
 **Date**: 2026-04-11
 
@@ -41,7 +41,6 @@ Each query targets a specific chunk (the chunk whose name generated the query). 
 ### Prerequisites
 
 ```bash
-# Build bench with native feature
 cargo build -p sqmd-bench --features native --release
 ```
 
@@ -73,7 +72,6 @@ cargo run -p sqmd-bench --features native -- generate /path/to/index.db --output
 ### Run Comparison
 
 ```bash
-# FTS vs Layered head-to-head
 cargo run -p sqmd-bench --features native -- compare /path/to/index.db --ground-truth queries.json
 
 # Single lane
